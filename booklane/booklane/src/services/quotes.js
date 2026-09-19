@@ -28,10 +28,18 @@ function sanitizeSelections(input) {
   })).filter((s) => Number.isFinite(s.service_id));
 }
 
-function sanitizeDetails(d) {
+// The details step is configurable, so any field id the business defined is allowed through,
+// alongside the built-ins other parts of the app (emails, BoothBook mapping) still read by name.
+function sanitizeDetails(d, business) {
   d = d && typeof d === 'object' ? d : {};
-  return { event_type: clampStr(d.event_type, 80), event_date: /^\d{4}-\d{2}-\d{2}$/.test(d.event_date || '') ? d.event_date : null, venue: clampStr(d.venue, 200),
-    city: clampStr(d.city, 120), guests: clampStr(d.guests, 40), notes: clampStr(d.notes, 3000) };
+  const out = { event_type: clampStr(d.event_type, 80), event_date: /^\d{4}-\d{2}-\d{2}$/.test(d.event_date || '') ? d.event_date : null,
+    venue: clampStr(d.venue, 200), city: clampStr(d.city, 120), guests: clampStr(d.guests, 40), notes: clampStr(d.notes, 3000) };
+  for (const f of (business && business.settings && business.settings.quote.fields) || []) {
+    if (out[f.id] !== undefined) continue;
+    const v = d[f.id];
+    out[f.id] = Array.isArray(v) ? v.slice(0, 40).map((x) => clampStr(x, 120)) : clampStr(v, 500);
+  }
+  return out;
 }
 
 function recalc(business, quote, selections) {
