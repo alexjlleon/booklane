@@ -53,6 +53,44 @@
     return `<div class="field"><label for="f-${name}">${esc(label)}${required ? ' <span class="req">*</span>' : ''}</label>${input}</div>`;
   }
 
+  // "We're available!" — answered from the dates the business has marked as taken.
+  function renderAvailability(step) {
+    const a = st.avail;
+    const when = dateAnswer(step);
+    const pretty = when ? BL.fmtDate(when + 'T12:00:00Z', 'UTC', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }) : '';
+    if (!when) return `<div class="done"><p class="muted">Tell us your date and we'll check it.</p></div>`;
+    if (!a || a.loading) return `<div class="done"><div class="spinner" style="margin:10px auto"></div><p class="muted">Checking ${esc(pretty)}…</p></div>`;
+    if (a.available) {
+      return `<div class="done"><div class="done-icon">${icons.check}</div>
+        <h2 style="margin:10px 0 4px">We're available!</h2>
+        <p class="muted">${esc(step.available_text || `${pretty} is open. Grab a time and we'll talk through the details.`)}</p></div>`;
+    }
+    return `<div class="done"><div class="done-icon" style="background:#fdf1e7;color:#b4690e">${icons.check}</div>
+      <h2 style="margin:10px 0 4px">That date is in demand</h2>
+      <p class="muted">${esc(step.unavailable_text || `We may already be booked on ${pretty}, but teams free up and we often have more than one. Let's talk.`)}</p></div>`;
+  }
+
+  const dateAnswer = (step) => {
+    const id = step.date_question_id || 'event_date';
+    const v = st.answers[id];
+    return /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) ? v : '';
+  };
+
+  async function checkDate(step) {
+    const when = dateAnswer(step);
+    if (!when || (st.avail && st.avail.date === when)) return;
+    st.avail = { loading: true, date: when };
+    try {
+      const r = await fetch(`/api/public/b/${encodeURIComponent(biz.slug)}/date-check?date=${when}`).then((x) => x.json());
+      st.avail = { date: when, available: !!r.available, note: r.note || '' };
+      capture({ answers: { date_available: r.available ? 'yes' : 'already booked' } }, true);
+    } catch (e) {
+      // If the check fails, say nothing rather than claiming a date is taken.
+      st.avail = { date: when, available: true };
+    }
+    if ((steps[st.i] || {}).type === 'availability') render();
+  }
+
   function renderContact(step) {
     const f = step.fields || {};
     const c = st.contact;
@@ -60,7 +98,7 @@
     const show = (k) => f[k] !== 'hidden';
     return `<form class="step-form" novalidate>
       <div class="grid-2">${show('first_name') ? field('first_name', 'First name', inp('first_name', 'text', 'given-name'), f.first_name === 'required') : ''}${show('last_name') ? field('last_name', 'Last name', inp('last_name', 'text', 'family-name'), f.last_name === 'required') : ''}</div>
-      ${field('email', 'Email', inp('email', 'email', 'email', 'you@example.com'), true)}
+      ${show('email') ? field('email', 'Email', inp('email', 'email', 'email', 'you@example.com'), f.email !== 'optional') : ''}
       ${show('phone') ? field('phone', 'Phone', inp('phone', 'tel', 'tel', '(555) 555-5555'), f.phone === 'required') : ''}
       ${show('sms_consent') ? `<label class="check"><input type="checkbox" name="sms_consent" data-contact ${c.sms_consent ? 'checked' : ''}><span>${esc(biz.settings.sms_consent_text)}</span></label>` : ''}
       ${biz.settings.privacy_note ? `<p class="muted small" style="margin-top:14px">${esc(biz.settings.privacy_note)}</p>` : ''}
@@ -101,18 +139,19 @@
     const pos = visiblePos(st.i), total = visibleCount();
     let body = '';
     if (step.type === 'schedule') body = '<div id="scheduler"></div>';
+    else if (step.type === 'availability') body = renderAvailability(step);
     else if (step.type === 'contact') body = renderContact(step);
     else body = `<form class="step-form" novalidate>${(step.questions || []).map(renderQuestion).join('')}</form>`;
     app.innerHTML = `<div class="shell"><div class="card booker">${side()}
       <main class="booker-main">
         <div class="progress" aria-label="Step ${pos} of ${total}"><div class="progress-bar"><span style="width:${Math.round((pos / total) * 100)}%"></span></div><div class="progress-count">${pos} / ${total}</div></div>
-        <div class="step-head"><h2>${esc(step.title || '')}</h2>${step.subtitle ? `<p>${esc(step.subtitle)}</p>` : ''}</div>
+        ${step.type === 'availability' && st.avail && !st.avail.loading ? '' : `<div class="step-head"><h2>${esc(step.title || '')}</h2>${step.subtitle ? `<p>${esc(step.subtitle)}</p>` : ''}</div>`}
         ${st.error ? `<div class="form-error" role="alert">${esc(st.error)}</div>` : ''}
         <div class="step-body">${body}</div>
         <div class="step-nav">
           <div>${prevIndex(st.i) >= 0 ? `<button type="button" class="btn btn-link" data-back>${icons.left} Back</button>` : `<span class="save-state ${st.saveState}">${st.saveState === 'saved' ? 'Progress saved' : ''}</span>`}</div>
           ${prevIndex(st.i) >= 0 ? `<span class="save-state ${st.saveState}">${st.saveState === 'saved' ? 'Progress saved' : ''}</span>` : ''}
-          <button type="button" class="btn btn-primary btn-lg" data-next ${st.busy ? 'disabled' : ''}>${st.busy ? '<span class="spinner"></span>' : ''}${isLast() ? 'Book my call' : 'Continue'} ${isLast() || st.busy ? '' : icons.right}</button>
+          <button type="button" class="btn btn-primary btn-lg" data-next ${st.busy ? 'disabled' : ''}>${st.busy ? '<span class="spinner"></span>' : ''}${isLast() ? 'Book my call' : step.type === 'availability' ? (step.cta || 'Set up a call') : 'Continue'} ${isLast() || st.busy ? '' : icons.right}</button>
         </div>
       </main></div></div>${BL.powered()}`;
     if (step.type === 'schedule') {
@@ -129,6 +168,7 @@
         },
       });
     }
+    if (step.type === 'availability') checkDate(step);
     const focusable = $('.step-form .input, .step-form .select, .step-form .textarea');
     if (focusable && window.innerWidth > 860 && !BL.data.embed) focusable.focus({ preventScroll: true });
   }
@@ -136,12 +176,18 @@
   // --------- Validation ---------
   function validate(step) {
     const errors = {};
+    if (step.type === 'availability') return errors;
     if (step.type === 'schedule') { if (!st.slot) st.error = 'Pick a date and time to continue.'; return !st.slot ? { _: 1 } : errors; }
     if (step.type === 'contact') {
       const f = step.fields || {}, c = st.contact;
       if (f.first_name === 'required' && !c.first_name.trim()) errors.first_name = 'Required';
       if (f.last_name === 'required' && !c.last_name.trim()) errors.last_name = 'Required';
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(c.email.trim())) errors.email = 'Enter a valid email';
+      const email = c.email.trim();
+      if (f.email !== 'hidden' && (f.email === 'required' || email)) {
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) errors.email = 'Enter a valid email';
+      }
+      // We must be able to reach them somehow, even on a short form that only asks for a phone.
+      if (f.email === 'hidden' && f.phone === 'hidden') errors._ = 'This form has no way to contact you.';
       if (f.phone === 'required' && c.phone.replace(/\D/g, '').length < 7) errors.phone = 'Enter a valid phone number';
     }
     if (step.type === 'questions') {
@@ -229,6 +275,33 @@
   app.addEventListener('input', onInput);
   app.addEventListener('change', (e) => { if (e.target.type === 'checkbox' || e.target.type === 'radio' || e.target.tagName === 'SELECT' || e.target.type === 'date') onInput(e); });
 
+  // Accepts ?event_date=…&first_name=…&phone=…&email=… from a short CTA on the website.
+  async function prefillFromUrl() {
+    const CONTACT = ['first_name', 'last_name', 'email', 'phone'];
+    const ids = new Set(steps.flatMap((s) => (s.questions || []).map((q) => q.id)));
+    const answers = {}, contact = {};
+    for (const [k, v] of params) {
+      const val = String(v || '').slice(0, 300);
+      if (!val) continue;
+      if (CONTACT.includes(k)) contact[k] = val;
+      else if (ids.has(k)) answers[k] = val;
+    }
+    if (!Object.keys(answers).length && !Object.keys(contact).length) return;
+    st.answers = Object.assign({}, st.answers, answers);
+    Object.assign(st.contact, contact);
+    // Save it straight away: this is the whole point of the short CTA.
+    capture({ answers, contact }, true);
+    // Jump past steps whose questions are all answered already.
+    steps.forEach((step, idx) => {
+      if (step.type !== 'questions') return;
+      const qs = step.questions || [];
+      if (qs.length && qs.every((q) => { const a = st.answers[q.id]; return Array.isArray(a) ? a.length : String(a || '').trim(); })) st.skip.add(idx);
+    });
+    let i = 0;
+    while (i < steps.length - 1 && st.skip.has(i)) i++;
+    st.i = i;
+  }
+
   // --------- Boot: resume a saved lead or prefill from a quote ---------
   async function boot() {
     const resume = params.get('resume') || (BL.store.get(storeKey) || {}).token;
@@ -263,6 +336,9 @@
         }
       } catch (e) { st.quoteToken = null; }
     }
+    // Prefill from the URL, so a one-field CTA on the website can hand its answer over
+    // and the customer never re-types what they already gave us.
+    await prefillFromUrl();
     if (st.skip.has(st.i)) st.i = steps.findIndex((s) => s.type === 'schedule');
     render();
   }
