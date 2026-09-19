@@ -47,6 +47,89 @@
     };
   }
 
+  const sumOf = (lines) => r2(lines.reduce((a, l) => a + (Number(l.amount) || 0), 0));
+  const idsOf = (lines) => new Set(lines.map((l) => Number(l.service_id)));
+
+  // One shape for every bundle rule. Old percent-only tiers are folded in so existing settings keep working.
+  function allBundles(settings) {
+    const list = (settings.bundles || []).map((b) => ({
+      name: String(b.name || ''), type: b.type === 'price' || b.type === 'amount' ? b.type : 'percent',
+      value: Number(b.value) || 0,
+      service_ids: (b.service_ids || []).map(Number).filter((n) => n > 0),
+      min_services: Math.max(0, Number(b.min_services) || 0),
+      label: String(b.label || ''),
+    }));
+    for (const t of settings.bundle_discounts || []) {
+      list.push({ name: '', type: 'percent', value: Number(t.percent) || 0, service_ids: [],
+        min_services: Math.max(1, Number(t.min_services) || 2), label: String(t.label || '') });
+    }
+    return list;
+  }
+
+  // A bundle applies either when every named service is selected, or when enough services are selected.
+  function matchOf(b, lines) {
+    if (b.service_ids.length) {
+      const have = idsOf(lines);
+      if (!b.service_ids.every((id) => have.has(id))) return null;
+      const matched = lines.filter((l) => b.service_ids.includes(Number(l.service_id)));
+      return { matched, sum: sumOf(matched) };
+    }
+    if (b.min_services && lines.length >= b.min_services) return { matched: lines, sum: sumOf(lines) };
+    return null;
+  }
+
+  function savingsOf(b, m) {
+    if (b.type === 'price') return r2(Math.max(0, m.sum - b.value));           // named services cost this instead
+    if (b.type === 'amount') return r2(Math.max(0, Math.min(m.sum, b.value))); // flat money off
+    return r2(m.sum * Math.max(0, Math.min(100, b.value)) / 100);
+  }
+
+  function labelOf(b) {
+    if (b.label) return b.label;
+    if (b.name) return b.name;
+    if (b.type === 'price') return 'Bundle price';
+    if (b.type === 'amount') return 'Bundle discount';
+    return `Bundle discount (${b.value}% off ${b.service_ids.length ? 'selected services' : b.min_services + '+ services'})`;
+  }
+
+  // Only one bundle ever applies: whichever saves the customer the most. Keeps totals predictable.
+  function bestBundle(lines, cap, settings) {
+    let best = null;
+    for (const b of allBundles(settings)) {
+      const m = matchOf(b, lines);
+      if (!m) continue;
+      const savings = Math.min(cap, savingsOf(b, m));
+      if (savings <= 0) continue;
+      if (!best || savings > best.savings) best = { savings, label: labelOf(b), bundle: b };
+    }
+    return best;
+  }
+
+  // What adding one more service would unlock, for the nudge under the running total.
+  function nextBundle(lines, catalog, settings, currentSavings) {
+    const have = idsOf(lines);
+    let best = null;
+    const consider = (svc, needed, name) => {
+      const projected = lines.concat([{ service_id: svc ? svc.id : -1, amount: svc ? startingPrice(svc) : 0 }]);
+      const p = bestBundle(projected, sumOf(projected), settings);
+      const gain = r2((p ? p.savings : 0) - currentSavings);
+      if (gain > 0 && (!best || gain > best.amount)) best = { needed, service: name, amount: gain };
+    };
+    for (const b of allBundles(settings)) {
+      if (b.service_ids.length) {
+        const missing = b.service_ids.filter((id) => !have.has(id));
+        if (missing.length !== 1) continue;
+        const svc = (catalog || []).find((s) => Number(s.id) === missing[0]);
+        if (svc) consider(svc, 1, svc.name);
+      } else if (b.min_services === lines.length + 1) {
+        const rest = (catalog || []).filter((s) => !have.has(Number(s.id)));
+        const cheapest = rest.sort((a, z) => startingPrice(a) - startingPrice(z))[0];
+        if (cheapest) consider(cheapest, 1, '');
+      }
+    }
+    return best;
+  }
+
   function calculate(catalog, selections, settings) {
     settings = settings || {};
     const byId = new Map((catalog || []).map((s) => [Number(s.id), s]));
@@ -58,22 +141,19 @@
       seen.add(s.id);
       lines.push(priceService(s, sel));
     }
-    const subtotal = r2(lines.reduce((a, l) => a + l.amount, 0));
-    let discount = 0, discountLabel = '';
-    const tiers = (settings.bundle_discounts || []).filter((t) => lines.length >= Number(t.min_services) && Number(t.percent) > 0)
-      .sort((a, b) => Number(b.percent) - Number(a.percent));
-    if (tiers.length) { discount = r2(subtotal * Number(tiers[0].percent) / 100); discountLabel = tiers[0].label || `Bundle discount (${tiers[0].percent}% off ${tiers[0].min_services}+ services)`; }
+    const subtotal = sumOf(lines);
+    const applied = bestBundle(lines, subtotal, settings);
+    const discount = applied ? applied.savings : 0;
+    const discountLabel = applied ? applied.label : '';
     const taxable = Math.max(0, subtotal - discount);
     const tax = r2(taxable * (Number(settings.tax_rate) || 0) / 100);
     const total = r2(taxable + tax);
     let deposit = 0;
     if (settings.deposit_type === 'flat') deposit = Math.min(total, Number(settings.deposit_value) || 0);
     else deposit = Math.min(total, Math.ceil(total * (Number(settings.deposit_value) || 0) / 100));
-    // Upsell hint: how many more services unlock the next bundle tier
-    const next = (settings.bundle_discounts || []).filter((t) => Number(t.min_services) > lines.length).sort((a, b) => a.min_services - b.min_services)[0];
     return {
-      lines, subtotal, discount, discount_label: discountLabel, tax, tax_rate: Number(settings.tax_rate) || 0, total, deposit: r2(deposit),
-      next_bundle: next ? { needed: Number(next.min_services) - lines.length, percent: Number(next.percent) } : null,
+      lines, subtotal, discount, discount_label: discountLabel, tax, tax_rate: Number(settings.tax_rate) || 0,
+      total, deposit: r2(deposit), next_bundle: lines.length ? nextBundle(lines, catalog, settings, discount) : null,
     };
   }
 
@@ -93,5 +173,5 @@
     return base * qty;
   }
 
-  return { calculate, priceService, money, startingPrice };
+  return { calculate, priceService, money, startingPrice, allBundles };
 });
