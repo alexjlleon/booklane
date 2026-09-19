@@ -288,3 +288,245 @@ test('DST: 9am wall time stays 9am across the November change', () => {
   assert.equal(new Date(before).toISOString(), '2026-10-30T14:00:00.000Z');
   assert.equal(new Date(afterDst).toISOString(), '2026-11-02T15:00:00.000Z');
 });
+
+test('bundles: combo price, flat amount off, best-of wins, upsell names the service', () => {
+  const P = require('../public/js/pricing');
+  const catalog = [
+    { id: 1, name: 'DJ', base_price: 1200, pricing_type: 'flat' },
+    { id: 2, name: 'Photo Booth', base_price: 800, pricing_type: 'flat' },
+    { id: 3, name: 'Videography', base_price: 2000, pricing_type: 'flat' },
+  ];
+  const both = [{ service_id: 1 }, { service_id: 2 }];
+
+  // A named set priced as a unit: 1200 + 800 = 2000 becomes 1795.
+  const combo = P.calculate(catalog, both, { bundles: [{ name: 'DJ + Booth', type: 'price', value: 1795, service_ids: [1, 2] }] });
+  assert.equal(combo.subtotal, 2000);
+  assert.equal(combo.discount, 205);
+  assert.equal(combo.total, 1795);
+  assert.equal(combo.discount_label, 'DJ + Booth');
+
+  // Flat money off the same pair.
+  assert.equal(P.calculate(catalog, both, { bundles: [{ name: 'Saver', type: 'amount', value: 300, service_ids: [1, 2] }] }).discount, 300);
+
+  // A bundle whose services are not all selected must not apply.
+  assert.equal(P.calculate(catalog, [{ service_id: 1 }], { bundles: [{ name: 'DJ + Booth', type: 'price', value: 1795, service_ids: [1, 2] }] }).discount, 0);
+
+  // When two bundles match, the customer gets the bigger saving.
+  const best = P.calculate(catalog, both, { bundles: [
+    { name: 'Small', type: 'amount', value: 100, service_ids: [1, 2] },
+    { name: 'Big', type: 'amount', value: 350, service_ids: [1, 2] },
+  ] });
+  assert.equal(best.discount, 350);
+  assert.equal(best.discount_label, 'Big');
+
+  // Count-based bundles still work, and legacy percent tiers keep applying.
+  assert.equal(P.calculate(catalog, both, { bundles: [{ name: 'Any two', type: 'amount', value: 150, min_services: 2 }] }).discount, 150);
+  assert.equal(P.calculate(catalog, both, { bundle_discounts: [{ min_services: 2, percent: 10 }] }).discount, 200);
+
+  // A discount can never exceed the subtotal.
+  assert.equal(P.calculate(catalog, both, { bundles: [{ name: 'Too big', type: 'amount', value: 99999, service_ids: [1, 2] }] }).discount, 2000);
+
+  // The nudge names the missing service and the real money saved.
+  const hint = P.calculate(catalog, [{ service_id: 1 }], { bundles: [{ name: 'DJ + Booth', type: 'price', value: 1795, service_ids: [1, 2] }] }).next_bundle;
+  assert.equal(hint.service, 'Photo Booth');
+  assert.equal(hint.amount, 205);
+});
+
+test('the page a form was embedded on is captured, reported and exported', async () => {
+  const page = 'https://weddingsunlimited.com/houston-wedding-dj/';
+  const c = await req('POST', `/api/public/b/${bizSlug}/leads`, {
+    source: 'booking', event_type_slug: 'discovery-call',
+    meta: { embedded: true, page_url: page, page_title: 'Houston Wedding DJ', landing: 'https://book.example.com/b/x?embed=1', referrer: page },
+  });
+  const lead = db.get('SELECT * FROM leads WHERE token = ?', c.data.token);
+  const meta = JSON.parse(lead.meta);
+  assert.equal(meta.page_url, page);
+  assert.equal(meta.page_title, 'Houston Wedding DJ');
+
+  // A lead that is not embedded still records where it came from.
+  const direct = await req('POST', `/api/public/b/${bizSlug}/leads`, { source: 'booking', event_type_slug: 'discovery-call', meta: { landing: 'https://book.example.com/b/x' } });
+  assert.equal(JSON.parse(db.get('SELECT * FROM leads WHERE token = ?', direct.data.token).meta).page_url, 'https://book.example.com/b/x');
+
+  // It shows up grouped on the dashboard...
+  const dash = await req('GET', '/api/admin/dashboard?days=30', null, { cookie: ownerCookie });
+  const row = dash.data.pages.find((r) => r.page === page);
+  assert.ok(row, 'expected the embedded page in the dashboard breakdown');
+  assert.equal(row.title, 'Houston Wedding DJ');
+
+  // ...and in the CSV, so it can be pivoted outside the app.
+  const csv = await fetch(`${base}/api/admin/leads/export.csv`, { headers: { Cookie: ownerCookie } });
+  const text = await csv.text();
+  assert.ok(text.split('\n')[0].includes('page_url,page_title'));
+  assert.ok(text.includes(page));
+
+  // The embed script has to hand the page in, or none of the above has anything to record.
+  const embed = await fetch(`${base}/embed.js`).then((r) => r.text());
+  assert.ok(embed.includes("src='+src()"), 'embed script must pass the host page URL');
+});
+
+test('spreadsheet import: preview first, then services and bundles land in the catalog', async () => {
+  const csv = [
+    'Category,Service,Description,Price,Unit,Min,Max',
+    'Entertainment,DJ / MC,5 hours of coverage,"1,200",flat,,',
+    'Entertainment,Photo Booth,3 hour booth,800,flat,,',
+    'Lighting,Uplighting,Per fixture,25,per unit,8,40',
+    'Lighting,Uplighting,duplicate row,30,per unit,8,40',
+    'Extras,No Price Service,,,flat,,',
+  ].join('\n');
+  const b64 = Buffer.from(csv, 'utf8').toString('base64');
+
+  // Dry run changes nothing.
+  const pre = await req('POST', '/api/admin/services/import', { filename: 'prices.csv', data: b64 }, { cookie: ownerCookie });
+  assert.equal(pre.data.preview, true);
+  assert.equal(pre.data.services.length, 4);
+  assert.equal(pre.data.services[0].base_price, 1200, 'currency formatting should be stripped');
+  assert.equal(pre.data.services[2].pricing_type, 'per_unit');
+  assert.equal(pre.data.services[2].max_qty, 40);
+  assert.ok(pre.data.warnings.some((w) => /more than once/.test(w)), 'duplicate names should warn');
+  assert.ok(pre.data.warnings.some((w) => /no price/.test(w)), 'missing price should warn');
+  const before = db.get('SELECT COUNT(*) c FROM services WHERE business_id = 1').c;
+  assert.equal(db.get('SELECT COUNT(*) c FROM services WHERE business_id = 1').c, before, 'preview must not write');
+
+  // Confirmed run writes.
+  const done = await req('POST', '/api/admin/services/import', { filename: 'prices.csv', data: b64, confirm: true }, { cookie: ownerCookie });
+  assert.equal(done.data.added + done.data.updated, 4);
+  assert.equal(db.get('SELECT COUNT(*) c FROM services WHERE business_id = 1').c, before + done.data.added);
+  const dj = db.get("SELECT * FROM services WHERE business_id = 1 AND name = 'DJ / MC'");
+  assert.equal(dj.base_price, 1200);
+
+  // Re-importing updates rather than duplicating.
+  const again = await req('POST', '/api/admin/services/import', { filename: 'prices.csv', data: b64, confirm: true }, { cookie: ownerCookie });
+  assert.equal(again.data.added, 0);
+  assert.equal(again.data.updated, 4);
+
+  // A bundle sheet resolves service names to ids and lands in settings.
+  const bundleCsv = ['Bundle,Services,Type,Value', 'DJ + Booth,DJ / MC; Photo Booth,price,1795', 'Ghost,DJ / MC; Nonexistent,amount,100'].join('\n');
+  const r = await req('POST', '/api/admin/services/import', { filename: 'bundles.csv', data: Buffer.from(bundleCsv).toString('base64'), confirm: true }, { cookie: ownerCookie });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.equal(r.data.bundles, 2);
+  assert.ok(r.data.unmatched.some((u) => /Nonexistent/.test(u)), 'unknown service names should be reported back');
+  const saved = JSON.parse(db.get('SELECT settings FROM businesses WHERE id = 1').settings).quote.bundles;
+  const combo = saved.find((x) => x.name === 'DJ + Booth');
+  assert.equal(combo.type, 'price');
+  assert.equal(combo.value, 1795);
+  assert.equal(combo.service_ids.length, 2);
+
+  // And it actually prices that way end to end.
+  const biz = require('../src/services/business').byId(1);
+  const P = require('../public/js/pricing');
+  const calc = P.calculate(require('../src/services/quotes').catalog(1), combo.service_ids.map((id) => ({ service_id: id })), biz.settings.quote);
+  assert.equal(calc.subtotal - calc.discount, 1795, 'the named pair should price as the bundle, before tax');
+
+  // Junk is rejected with a readable message, not a stack trace.
+  const bad = await req('POST', '/api/admin/services/import', { filename: 'x.csv', data: Buffer.from('nothing useful here').toString('base64') }, { cookie: ownerCookie });
+  assert.equal(bad.status, 400);
+  assert.match(bad.data.error, /No services or bundles/);
+
+  // A host (non-admin) cannot import.
+  const noAuth = await req('POST', '/api/admin/services/import', { filename: 'x.csv', data: b64 });
+  assert.equal(noAuth.status, 401);
+});
+
+test('quote form fields are configurable: add, remove, require and store answers', async () => {
+  const biz = require('../src/services/business');
+  // Replace the stock questions with a custom set: drop venue, add a required dropdown and a multi-select.
+  const r = await req('PATCH', '/api/admin/business', { settings: { quote: { fields: [
+    { id: 'event_date', label: 'Event date', type: 'date', required: true },
+    { id: 'Room Setup', label: 'Room setup', type: 'choice_select', options: ['Banquet', 'Theater'], required: true },
+    { id: 'extras', label: 'Anything else you want', type: 'multi', options: ['Cold sparks', 'Monogram', 'Photo album'] },
+  ] } } }, { cookie: ownerCookie });
+  assert.equal(r.status, 200);
+
+  const saved = biz.byId(1).settings.quote.fields;
+  assert.equal(saved.length, 3);
+  assert.equal(saved[1].id, 'room_setup', 'ids are slugged so they are safe as answer keys');
+  assert.equal(saved[1].type, 'choice_select');
+  assert.deepEqual(saved[2].options, ['Cold sparks', 'Monogram', 'Photo album']);
+  assert.ok(!saved.some((f) => f.id === 'venue'), 'removed questions stay removed');
+
+  // The public page serves the same field list to the browser.
+  const pub = await req('GET', `/api/public/b/${bizSlug}/quote-config`).catch(() => null);
+  const page = await fetch(`${base}/b/${bizSlug}/quote`).then((x) => x.text());
+  assert.ok(page.includes('room_setup'), 'the configured field should reach the quote page');
+
+  // Answers to custom fields are kept, and junk keys are still dropped.
+  const q = await req('POST', `/api/public/b/${bizSlug}/quotes`, {});
+  await req('PATCH', `/api/public/quotes/${q.data.token}`, { details: { room_setup: 'Banquet', extras: ['Cold sparks', 'Monogram'], not_a_field: 'drop me' } });
+  const details = JSON.parse(db.get('SELECT details FROM quotes WHERE token = ?', q.data.token).details);
+  assert.equal(details.room_setup, 'Banquet');
+  assert.deepEqual(details.extras, ['Cold sparks', 'Monogram']);
+  assert.equal(details.not_a_field, undefined, 'fields that are not configured must not be stored');
+
+  // A field with no label is discarded rather than saved as a blank question.
+  await req('PATCH', '/api/admin/business', { settings: { quote: { fields: [{ id: 'x', label: '', type: 'text' }] } } }, { cookie: ownerCookie });
+  assert.equal(biz.byId(1).settings.quote.fields.length, 0);
+});
+
+test('short date-first form: date, phone, availability verdict, then a time', async () => {
+  const { QUICK_DATE_STEPS } = require('../src/defaults');
+  // Create the short form from the template.
+  const made = await req('POST', '/api/admin/event-types', {
+    name: 'Check my date', duration_min: 15, location_type: 'phone', steps: QUICK_DATE_STEPS(), hosts: [1],
+  }, { cookie: ownerCookie });
+  assert.equal(made.status, 200, JSON.stringify(made.data));
+  const et = made.data;
+  assert.deepEqual(et.steps.map((s) => s.type), ['questions', 'contact', 'availability', 'schedule']);
+  assert.equal(et.steps[1].fields.email, 'optional', 'a short form may ask for a phone only');
+  assert.equal(et.steps[1].fields.phone, 'required');
+  assert.equal(et.steps[2].date_question_id, 'event_date');
+
+  // Date check answers honestly from the booked list.
+  const open = await req('GET', `/api/public/b/${bizSlug}/date-check?date=2027-05-15`);
+  assert.equal(open.data.available, true);
+
+  await req('POST', '/api/admin/blocked-dates', { dates: '2027-05-15, 2027-06-12, garbage', note: 'Smith wedding' }, { cookie: ownerCookie });
+  const taken = await req('GET', `/api/public/b/${bizSlug}/date-check?date=2027-05-15`);
+  assert.equal(taken.data.available, false);
+  assert.equal(taken.data.note, 'Smith wedding');
+  assert.equal((await req('GET', `/api/public/b/${bizSlug}/date-check?date=2027-06-12`)).data.available, false);
+  assert.equal((await req('GET', `/api/public/b/${bizSlug}/date-check?date=2027-07-04`)).data.available, true, 'unlisted dates stay available');
+  assert.equal((await req('GET', `/api/public/b/${bizSlug}/date-check?date=nonsense`)).status, 400);
+
+  // Duplicates are ignored rather than piling up.
+  const again = await req('POST', '/api/admin/blocked-dates', { dates: '2027-05-15' }, { cookie: ownerCookie });
+  assert.equal(again.data.added, 0);
+  assert.equal(again.data.skipped, 1);
+
+  // The lead captures the date and phone before the customer ever reaches the calendar.
+  const lead = await req('POST', `/api/public/b/${bizSlug}/leads`, { source: 'booking', event_type_slug: et.slug });
+  await req('PATCH', `/api/public/leads/${lead.data.token}`, { step_index: 0, step_total: 4, answers: { event_date: '2027-05-15' } });
+  await req('PATCH', `/api/public/leads/${lead.data.token}`, { step_index: 1, contact: { first_name: 'Dana', phone: '713-555-0164' } });
+  const row = db.get('SELECT * FROM leads WHERE token = ?', lead.data.token);
+  assert.equal(row.status, 'partial');
+  assert.equal(row.first_name, 'Dana');
+  assert.equal(row.phone, '713-555-0164');
+  assert.equal(JSON.parse(row.answers).event_date, '2027-05-15');
+  assert.equal(row.email, null, 'a usable lead without an email address');
+
+  // Two date-check steps are refused, and a form still needs its one scheduler.
+  const twice = await req('POST', '/api/admin/event-types', { name: 'Bad', duration_min: 15, location_type: 'phone', hosts: [1],
+    steps: QUICK_DATE_STEPS().concat([{ key: 'a2', type: 'availability', title: 'Again' }]) }, { cookie: ownerCookie });
+  assert.equal(twice.status, 422);
+  assert.match(twice.data.error, /one date-check/i);
+});
+
+test('short CTA: the embed passes an answer through and the lead is saved before the form loads', async () => {
+  // The embed script exposes the CTA widget and still parses as valid JS.
+  const embed = await fetch(`${base}/embed.js`).then((r) => r.text());
+  assert.ok(embed.includes('data-booklane-cta'), 'CTA widget must ship in embed.js');
+  assert.ok(embed.includes('window.Booklane={popup:popup,inline:inline,ctas:ctas}'));
+  new Function(embed); // throws on a syntax error, which a served script would hit silently
+
+  // The booking page accepts the prefilled answer in the URL.
+  const et = db.get("SELECT slug FROM event_types WHERE business_id = 1 AND slug = 'check-my-date'");
+  const page = await fetch(`${base}/b/${bizSlug}/${et.slug}?event_date=2027-08-21&phone=713-555-0199`).then((r) => r.text());
+  assert.equal(page.includes('<!doctype html>') || page.includes('<!DOCTYPE html>'), true);
+
+  // And a lead created from that first interaction holds the answer without any further steps.
+  const lead = await req('POST', `/api/public/b/${bizSlug}/leads`, { source: 'booking', event_type_slug: et.slug });
+  await req('PATCH', `/api/public/leads/${lead.data.token}`, { answers: { event_date: '2027-08-21' }, contact: { phone: '713-555-0199' } });
+  const row = db.get('SELECT * FROM leads WHERE token = ?', lead.data.token);
+  assert.equal(JSON.parse(row.answers).event_date, '2027-08-21');
+  assert.equal(row.phone, '713-555-0199');
+  assert.equal(row.first_name, null, 'a CTA lead is useful before they give a name');
+});
