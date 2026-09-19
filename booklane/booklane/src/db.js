@@ -55,6 +55,13 @@ CREATE TABLE IF NOT EXISTS date_overrides (
   id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   date TEXT NOT NULL, start_min INTEGER, end_min INTEGER, unavailable INTEGER NOT NULL DEFAULT 0
 );
+-- Event dates the business is already booked for, so a date-check form can answer honestly.
+CREATE TABLE IF NOT EXISTS blocked_dates (
+  id INTEGER PRIMARY KEY, business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  date TEXT NOT NULL, note TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (business_id, date)
+);
+CREATE INDEX IF NOT EXISTS idx_blocked_dates ON blocked_dates (business_id, date);
 CREATE TABLE IF NOT EXISTS calendar_connections (
   id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   provider TEXT NOT NULL, account_email TEXT, access_token TEXT, refresh_token TEXT, expires_at INTEGER,
