@@ -71,6 +71,62 @@
     });
   }
 
+  // ---------- Spreadsheet import ----------
+  function importDrawer() {
+    let file = null, parsed = null;
+    A.drawer(`<div class="drawer-head"><div><div class="small muted">Quote catalog</div><h2>Import a spreadsheet</h2></div><button class="icon-x" data-close-drawer aria-label="Close">&times;</button></div>
+      <div>
+        <p class="desc">Upload an .xlsx or .csv. The first row should be column headings. A sheet named <b>Bundles</b> is read as bundle pricing; everything else is read as services.</p>
+        <div class="panel" style="padding:12px;margin-bottom:14px"><div class="small"><b>Services columns:</b> Category, Service, Description, Price, Unit, Min, Max<br><b>Bundles columns:</b> Bundle, Services (separated by ;), Type (price / amount / percent), Value</div>
+          <a class="btn btn-link btn-sm" href="#" data-sample>Download a template</a></div>
+        <input type="file" id="imp-file" class="input" accept=".xlsx,.csv,.tsv,.txt">
+        <div id="imp-out" style="margin-top:14px"></div>
+      </div>
+      <div class="row" style="justify-content:flex-end;gap:8px;margin-top:18px"><button class="btn btn-ghost" data-close-drawer>Cancel</button><button class="btn btn-primary" id="imp-go" disabled>Preview</button></div>`,
+    (el) => {
+      const out = $('#imp-out', el), go = $('#imp-go', el);
+      $('#imp-file', el).addEventListener('change', (ev) => { file = ev.target.files[0] || null; parsed = null; go.disabled = !file; go.textContent = 'Preview'; out.innerHTML = ''; });
+      $('[data-sample]', el).addEventListener('click', (ev) => {
+        ev.preventDefault();
+        const csv = 'Category,Service,Description,Price,Unit,Min,Max\nEntertainment,DJ / MC,5 hours of coverage,1200,flat,,\nEntertainment,Photo Booth,3 hour open-air booth,800,flat,,\nLighting,Uplighting,Per fixture,25,per unit,8,40\n';
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); a.download = 'catalog-template.csv'; a.click();
+      });
+      go.addEventListener('click', async () => {
+        if (!file) return;
+        const mode = ($('[name=imp-mode]:checked', el) || {}).value || 'merge';
+        go.disabled = true; go.textContent = parsed ? 'Importing…' : 'Reading…';
+        try {
+          const data = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = rej; r.readAsDataURL(file); });
+          const r = await api('POST', '/services/import', { filename: file.name, data, mode, confirm: !!parsed });
+          if (r.preview) {
+            parsed = r;
+            out.innerHTML = previewHtml(r);
+            go.textContent = 'Import';
+          } else {
+            A.toast(`Imported ${r.added} new and ${r.updated} updated service${r.added + r.updated === 1 ? '' : 's'}${r.bundles ? `, ${r.bundles} bundle${r.bundles === 1 ? '' : 's'}` : ''}`);
+            A.closeDrawer(); A.render();
+            return;
+          }
+        } catch (err) { out.innerHTML = `<div class="warn-box">${esc(err.message)}</div>`; go.textContent = 'Preview'; parsed = null; }
+        go.disabled = false;
+      });
+    });
+  }
+
+  function previewHtml(r) {
+    const svc = r.services.map((s) => `<tr><td>${esc(s.category || '')}</td><td>${esc(s.name)}</td><td>${A.money(s.base_price)}</td><td class="small muted">${s.pricing_type === 'per_unit' ? `per ${esc(s.unit_label || 'unit')} (${s.min_qty}–${s.max_qty})` : 'flat'}</td></tr>`).join('');
+    const bun = r.bundles.map((b) => `<tr><td>${esc(b.name)}</td><td class="small">${esc((b.service_names || []).join(', ')) || `any ${b.min_services} services`}</td><td>${b.type === 'percent' ? `${b.value}% off` : b.type === 'amount' ? `${A.money(b.value)} off` : A.money(b.value)}</td></tr>`).join('');
+    return `${r.warnings.length ? `<div class="warn-box" style="margin-bottom:12px"><b>Check these:</b><ul style="margin:6px 0 0 16px">${r.warnings.map((w) => `<li>${esc(w)}</li>`).join('')}</ul></div>` : ''}
+      <h3 style="margin:0 0 6px">${r.services.length} service${r.services.length === 1 ? '' : 's'}</h3>
+      ${svc ? `<div class="table-wrap"><table class="t"><thead><tr><th>Category</th><th>Service</th><th>Price</th><th>Pricing</th></tr></thead><tbody>${svc}</tbody></table></div>` : '<p class="muted small">None found.</p>'}
+      ${bun ? `<h3 style="margin:16px 0 6px">${r.bundles.length} bundle${r.bundles.length === 1 ? '' : 's'}</h3><div class="table-wrap"><table class="t"><thead><tr><th>Bundle</th><th>Applies to</th><th>Price / discount</th></tr></thead><tbody>${bun}</tbody></table></div>
+        <p class="small muted" style="margin-top:6px">Importing bundles replaces the bundle list in Settings → Quotes.</p>` : ''}
+      <div class="panel" style="padding:12px;margin-top:16px"><label class="label">What should happen to services already in your catalog?</label>
+        <label class="check"><input type="radio" name="imp-mode" value="merge" checked><span>Update matching names, keep everything else</span></label>
+        <label class="check"><input type="radio" name="imp-mode" value="replace"><span>Also hide services that are not in this file</span></label></div>`;
+  }
+
   A.route('/catalog', {
     title: 'Quote catalog',
     async render() {
@@ -78,7 +134,7 @@
       A.cache.services = rows;
       const qs = biz.settings.quote;
       return `<div class="topbar"><div><h1>Quote catalog</h1><div class="sub">Services, packages and add-ons customers can build a quote from.</div></div>
-        <div class="tools"><a class="btn btn-ghost" href="/b/${esc(A.me.business.slug)}/quote" target="_blank">Preview builder</a>${isAdmin() ? '<button class="btn btn-primary" data-new>+ Add service</button>' : ''}</div></div>
+        <div class="tools"><a class="btn btn-ghost" href="/b/${esc(A.me.business.slug)}/quote" target="_blank">Preview builder</a>${isAdmin() ? '<button class="btn btn-ghost" data-import>Import spreadsheet</button><button class="btn btn-primary" data-new>+ Add service</button>' : ''}</div></div>
         ${qs.enabled ? '' : '<div class="warn-box" style="margin-bottom:16px">The quote builder is turned off. Turn it on in <a href="#/settings/quote">Settings → Quotes</a>.</div>'}
         <div class="panel" style="padding:0">${rows.length ? rows.map((s, i) => `<div class="svc-row"><div class="row" style="flex-direction:column;gap:0">${isAdmin() ? `<button class="icon-x" data-up="${i}" ${i === 0 ? 'disabled' : ''} title="Move up">↑</button><button class="icon-x" data-down="${i}" ${i === rows.length - 1 ? 'disabled' : ''} title="Move down">↓</button>` : ''}</div>
           <div class="grow"><div class="row"><b>${esc(s.name)}</b>${s.badge ? `<span class="pill quoted">${esc(s.badge)}</span>` : ''}${s.active ? '' : '<span class="pill">Hidden</span>'}</div>
@@ -86,12 +142,13 @@
           <div class="num"><b>from ${A.money(window.BLPricing.startingPrice(s))}</b></div>
           ${isAdmin() ? `<button class="btn btn-ghost btn-sm" data-edit="${s.id}">Edit</button><button class="icon-x" data-del="${s.id}" title="Delete">×</button>` : ''}</div>`).join('')
           : '<div class="empty-state"><h3>No services yet</h3><p>Add your first service with its packages and add-ons.</p></div>'}</div>
-        <div class="panel"><div class="panel-head"><div><h2>Pricing rules</h2><p class="desc" style="margin:0">Tax ${Number(qs.tax_rate) || 0}% · Deposit ${qs.deposit_type === 'flat' ? A.money(qs.deposit_value) : (Number(qs.deposit_value) || 0) + '%'} · ${esc((qs.bundle_discounts || []).map((b) => `${Number(b.percent)}% off ${Number(b.min_services)}+ services`).join(', ') || 'No bundle discounts')}</p></div><a class="btn btn-ghost btn-sm" href="#/settings/quote">Edit rules</a></div></div>`;
+        <div class="panel"><div class="panel-head"><div><h2>Pricing rules</h2><p class="desc" style="margin:0">Tax ${Number(qs.tax_rate) || 0}% · Deposit ${qs.deposit_type === 'flat' ? A.money(qs.deposit_value) : (Number(qs.deposit_value) || 0) + '%'} · ${esc(((qs.bundles || []).map((b) => b.name || (b.type === 'price' ? 'Bundle price' : 'Bundle discount')).concat((qs.bundle_discounts || []).map((b) => `${Number(b.percent)}% off ${Number(b.min_services)}+`))).join(', ') || 'No bundles')}</p></div><a class="btn btn-ghost btn-sm" href="#/settings/quote">Edit rules</a></div></div>`;
     },
     mount(root) {
       root.addEventListener('click', async (e) => {
         const rows = A.cache.services;
         const t = e.target.closest('button'); if (!t) return;
+        if (t.hasAttribute('data-import')) importDrawer();
         if (t.hasAttribute('data-new')) serviceEditor({ name: '', category: '', description: '', pricing_type: 'flat', base_price: 0, unit_label: '', min_qty: 1, max_qty: 1, default_qty: 1, option_groups: [], addons: [], active: true, badge: '' });
         if (t.dataset.edit) serviceEditor(rows.find((s) => String(s.id) === t.dataset.edit));
         if (t.dataset.del && confirm('Delete this service? Existing quotes keep their line items.')) { await A.guard(() => api('DELETE', `/services/${t.dataset.del}`), 'Deleted'); A.render(); }
@@ -177,6 +234,7 @@
     } else if (tab === 'quote') {
       const Q = s.quote;
       const ets = (await api('GET', '/event-types')).event_types;
+      const svcs = await api('GET', '/services');
       body = `<div class="cols-even"><div class="panel"><h2>Quote builder</h2>
         <div class="stack" style="margin-bottom:14px">${A.toggle('settings.quote.enabled', Q.enabled, 'Quote builder is live')}${A.toggle('settings.quote.require_event_date', Q.require_event_date, 'Require an event date')}</div>
         ${A.field('Title', A.input('settings.quote.title', Q.title))}${A.field('Intro', A.textarea('settings.quote.intro', Q.intro, 'rows="2"'))}
@@ -184,11 +242,17 @@
         ${A.field('Event types (one per line)', `<textarea class="textarea" rows="4" data-bind="settings.quote.event_types" data-type="lines">${esc(lines(Q.event_types))}</textarea>`)}
         <div class="grid-2">${A.field('Cities / areas (one per line)', `<textarea class="textarea" rows="4" data-bind="settings.quote.cities" data-type="lines">${esc(lines(Q.cities))}</textarea>`, 'Blank = free text')}${A.field('Guest count ranges', `<textarea class="textarea" rows="4" data-bind="settings.quote.guest_ranges" data-type="lines">${esc(lines(Q.guest_ranges))}</textarea>`)}</div>
         ${A.field('Terms shown under the quote', A.textarea('settings.quote.terms', Q.terms, 'rows="3"'))}</div>
+        <div class="panel"><div class="panel-head"><div><h2>Questions on the first step</h2><p class="desc" style="margin:0">Add, remove or reorder what the quote builder asks before showing services.</p></div>
+          <button type="button" class="btn btn-ghost btn-sm" data-add-qf>+ Question</button></div>
+          <div id="qfields" class="stack" style="gap:10px;margin-top:10px">${(Q.fields || []).map((f) => qfieldRow(f)).join('')}</div></div>
+        <div class="panel"><h2>Contact step</h2><p class="desc">Which contact details the quote builder asks for.</p>
+          <div class="stack" style="margin-top:10px">${A.toggle('settings.quote.ask_last_name', Q.ask_last_name !== false, 'Ask for last name')}${A.toggle('settings.quote.ask_phone', Q.ask_phone !== false, 'Ask for phone')}${A.toggle('settings.quote.require_phone', !!Q.require_phone, 'Phone is required')}${A.toggle('settings.quote.ask_company', !!Q.ask_company, 'Ask for company')}</div></div>
         <div class="stack"><div class="panel"><h2>Pricing rules</h2>
           <div class="grid-2">${A.field('Currency', A.select('settings.quote.currency', Q.currency, { USD: 'USD', CAD: 'CAD', MXN: 'MXN', EUR: 'EUR', GBP: 'GBP', AUD: 'AUD' }))}${A.field('Tax rate %', A.input('settings.quote.tax_rate', Q.tax_rate, 'type="number" step="0.01" min="0" data-type="number"'))}</div>
           <div class="grid-2">${A.field('Deposit type', A.select('settings.quote.deposit_type', Q.deposit_type, { percent: 'Percent of total', flat: 'Flat amount' }))}${A.field('Deposit value', A.input('settings.quote.deposit_value', Q.deposit_value, 'type="number" step="0.01" min="0" data-type="number"'))}</div>
           ${A.field('Quote valid for (days)', A.input('settings.quote.expires_days', Q.expires_days, 'type="number" min="1" data-type="number"'))}
-          <label class="label">Bundle discounts</label><div id="bundles" class="stack" style="gap:6px;margin:8px 0">${(Q.bundle_discounts || []).map((t, i) => bundleRow(t, i)).join('')}</div><button type="button" class="btn btn-link btn-sm" data-add-bundle>+ Add discount tier</button></div>
+          <label class="label">Bundles</label><p class="desc" style="margin:2px 0 8px">Pick the services a bundle covers, or leave them all unticked and set a minimum count. When several bundles match, the customer gets the best one.</p>
+          <div id="bundles" class="stack" style="gap:10px;margin:8px 0">${legacyBundles(Q).map((t) => bundleRow(t, svcs)).join('')}</div><button type="button" class="btn btn-link btn-sm" data-add-bundle>+ Add bundle</button></div>
         <div class="panel"><h2>Next steps offered</h2><div class="stack">${A.toggle('settings.quote.next_steps.contract', Q.next_steps.contract, 'Request a contract')}${A.toggle('settings.quote.next_steps.book_call', Q.next_steps.book_call, 'Book a call')}${A.toggle('settings.quote.next_steps.callback', Q.next_steps.callback, 'Have us call me')}</div>
           <div style="margin-top:14px">${A.field('Call type used for “Book a call”', A.select('settings.quote.call_event_type_id', Q.call_event_type_id || '', Object.assign({ '': 'First active call type' }, Object.fromEntries(ets.map((e) => [e.id, e.name])))))}</div>
           <label class="label">Ask for in the contract request</label><div class="stack" style="margin-top:8px">${Object.entries({ billing_address: 'Billing address', venue_address: 'Venue address', event_start_time: 'Start time', event_end_time: 'End time', planner_name: 'Planner name' }).map(([k, v]) => A.toggle(`settings.quote.contract_fields.${k}`, Q.contract_fields[k], v)).join('')}</div></div></div></div>`;
@@ -218,22 +282,88 @@
     const savable = !['emails'].includes(tab);
     return `<div class="topbar"><div><h1>Settings</h1><div class="sub">${esc(b.name)}</div></div>${savable && isAdmin() ? '<div class="tools"><button class="btn btn-primary" data-save-settings>Save changes</button></div>' : ''}</div>${tabs}<form id="settings-form" onsubmit="return false">${body}</form>`;
   }
-  function bundleRow(t, i) {
-    return `<div class="interval" data-bundle><input class="input" type="number" min="1" style="width:80px" data-bf="min_services" value="${t.min_services}"><span class="small">+ services →</span><input class="input" type="number" min="0" max="100" step="0.5" style="width:80px" data-bf="percent" value="${t.percent}"><span class="small">% off</span><input class="input" style="flex:1;min-width:120px" placeholder="Label (optional)" data-bf="label" value="${esc(t.label || '')}"><button type="button" class="icon-x" data-rm-bundle>×</button></div>`;
+  const QFIELD_TYPES = { text: 'Short text', textarea: 'Paragraph', choice: 'Choose one (cards)', choice_select: 'Choose one (dropdown)', multi: 'Choose several', date: 'Date', number: 'Number', email: 'Email', phone: 'Phone' };
+
+  function qfieldRow(f) {
+    f = f || { id: '', label: '', type: 'text', options: [], required: false, full: true };
+    const builtin = ['event_type', 'event_date', 'city', 'venue', 'guests'].includes(f.id);
+    return `<div class="panel" data-qfield style="padding:12px" data-id="${esc(f.id)}">
+      <div class="row" style="gap:6px;align-items:center;flex-wrap:nowrap">
+        <input class="input" style="flex:1;min-width:90px" placeholder="Question" data-qf="label" value="${esc(f.label || '')}">
+        <select class="input" style="width:150px;flex:none" data-qf="type">${Object.entries(QFIELD_TYPES).map(([k, v]) => `<option value="${k}" ${f.type === k ? 'selected' : ''}>${v}</option>`).join('')}</select>
+        <button type="button" class="icon-x" data-qf-move="-1" title="Move up">&uarr;</button>
+        <button type="button" class="icon-x" data-qf-move="1" title="Move down">&darr;</button>
+        <button type="button" class="icon-x" data-rm-qfield title="Remove">&times;</button>
+      </div>
+      <div class="row" style="gap:14px;margin-top:8px;align-items:center">
+        <label class="check"><input type="checkbox" data-qf="required" ${f.required ? 'checked' : ''}><span>Required</span></label>
+        <label class="check"><input type="checkbox" data-qf="full" ${f.full ? 'checked' : ''}><span>Full width</span></label>
+        ${builtin ? `<span class="small muted">Answers save as <code>${esc(f.id)}</code></span>` : ''}
+      </div>
+      <div data-qf-opts style="margin-top:8px;${['choice', 'choice_select', 'multi'].includes(f.type) ? '' : 'display:none'}">
+        ${A.field('Choices (one per line)', `<textarea class="textarea" rows="3" data-qf="options">${esc((f.options || []).join('\n'))}</textarea>`, builtin ? 'Leave blank to use the list above' : '')}
+      </div></div>`;
+  }
+
+  // Old percent-only tiers are shown as ordinary bundles so nothing is lost on save.
+  function legacyBundles(Q) {
+    const list = (Q.bundles || []).slice();
+    for (const t of Q.bundle_discounts || []) list.push({ name: '', type: 'percent', value: t.percent, service_ids: [], min_services: t.min_services, label: t.label || '' });
+    return list.length ? list : [];
+  }
+
+  function bundleRow(t, svcs) {
+    t = t || { name: '', type: 'price', value: 0, service_ids: [], min_services: 0, label: '' };
+    const ids = (t.service_ids || []).map(Number);
+    const types = { price: 'these services cost', amount: 'take this much off', percent: 'take this % off' };
+    return `<div class="panel" data-bundle style="padding:12px">
+      <div class="row" style="gap:6px;align-items:center;flex-wrap:nowrap">
+        <input class="input" style="flex:1;min-width:90px" placeholder="Bundle name (shown on the quote)" data-bf="name" value="${esc(t.name || t.label || '')}">
+        <select class="input" style="width:150px;flex:none" data-bf="type">${Object.entries(types).map(([k, v]) => `<option value="${k}" ${t.type === k ? 'selected' : ''}>${v}</option>`).join('')}</select>
+        <input class="input" type="number" min="0" step="0.01" style="width:100px;flex:none" data-bf="value" value="${Number(t.value) || 0}">
+        <button type="button" class="icon-x" data-rm-bundle title="Remove">&times;</button>
+      </div>
+      <div style="margin-top:8px"><label class="label">Applies when the customer picks</label>
+        <div class="mini-grid" style="margin:6px 0">${(svcs || []).map((sv) => `<label class="check"><input type="checkbox" data-bsvc="${sv.id}" ${ids.includes(Number(sv.id)) ? 'checked' : ''}><span>${esc(sv.name)}</span></label>`).join('') || '<span class="small muted">Add services to your catalog first.</span>'}</div>
+        <div class="row" style="gap:8px;align-items:center"><span class="small muted">or any</span><input class="input" type="number" min="0" max="50" style="width:80px" data-bf="min_services" value="${Number(t.min_services) || 0}"><span class="small muted">services (0 = off)</span></div>
+      </div></div>`;
   }
 
   function settingsMount(root, p) {
     const tab = p.tab || 'general';
     const form = $('#settings-form', root);
+    root.addEventListener('change', (e) => {
+      if (e.target.dataset.qf === 'type') {
+        const card = e.target.closest('[data-qfield]');
+        $('[data-qf-opts]', card).style.display = ['choice', 'choice_select', 'multi'].includes(e.target.value) ? '' : 'none';
+      }
+    });
     root.addEventListener('click', async (e) => {
       const t = e.target.closest('button'); if (!t) return;
-      if (t.hasAttribute('data-add-bundle')) $('#bundles', root).insertAdjacentHTML('beforeend', bundleRow({ min_services: 2, percent: 5 }, 0));
+      if (t.hasAttribute('data-add-qf')) $('#qfields', root).insertAdjacentHTML('beforeend', qfieldRow(null));
+      if (t.hasAttribute('data-rm-qfield')) t.closest('[data-qfield]').remove();
+      if (t.hasAttribute('data-qf-move')) {
+        const card = t.closest('[data-qfield]'), dir = Number(t.dataset.qfMove);
+        const sib = dir < 0 ? card.previousElementSibling : card.nextElementSibling;
+        if (sib) card.parentNode.insertBefore(dir < 0 ? card : sib, dir < 0 ? sib : card);
+      }
+      if (t.hasAttribute('data-add-bundle')) { const sv = await api('GET', '/services'); $('#bundles', root).insertAdjacentHTML('beforeend', bundleRow(null, sv)); }
       if (t.hasAttribute('data-rm-bundle')) t.closest('[data-bundle]').remove();
       if (t.hasAttribute('data-save-settings') || t.dataset.test) {
         let body;
         try { body = A.collect(form); } catch (err) { return A.toast(err.message, true); }
         if (tab === 'quote') {
-          body.settings.quote.bundle_discounts = $$('[data-bundle]', root).map((r) => ({ min_services: Number($('[data-bf=min_services]', r).value), percent: Number($('[data-bf=percent]', r).value), label: $('[data-bf=label]', r).value }));
+          body.settings.quote.fields = $$('[data-qfield]', root).map((r) => ({
+            id: r.dataset.id || '', label: $('[data-qf=label]', r).value, type: $('[data-qf=type]', r).value,
+            options: $('[data-qf=options]', r).value.split('\n').map((x) => x.trim()).filter(Boolean),
+            required: $('[data-qf=required]', r).checked, full: $('[data-qf=full]', r).checked,
+          })).filter((f) => f.label.trim());
+          body.settings.quote.bundles = $$('[data-bundle]', root).map((r) => ({
+            name: $('[data-bf=name]', r).value, type: $('[data-bf=type]', r).value, value: Number($('[data-bf=value]', r).value) || 0,
+            service_ids: $$('[data-bsvc]', r).filter((x) => x.checked).map((x) => Number(x.dataset.bsvc)),
+            min_services: Number($('[data-bf=min_services]', r).value) || 0, label: '',
+          })).filter((b) => b.value > 0 && (b.service_ids.length || b.min_services));
+          body.settings.quote.bundle_discounts = [];
           const cid = body.settings.quote.call_event_type_id; body.settings.quote.call_event_type_id = cid ? Number(cid) : null;
         }
         if (tab === 'integrations') body.settings.integrations.webhook.events = $$('[data-wh]', root).filter((x) => x.checked).map((x) => x.dataset.wh);
