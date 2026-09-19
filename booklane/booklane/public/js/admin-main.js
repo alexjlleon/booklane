@@ -76,6 +76,18 @@
   });
 
   // ---------- Dashboard ----------
+  // Which page on the site the form was on when people started it.
+  function pagesHtml(d) {
+    const rows = (d.pages || []).filter((r) => r.page);
+    if (!rows.length) return '<div class="empty-state"><h3>No page data yet</h3><p>Once the booking form is embedded on your site, each lead records the page it started on.</p></div>';
+    const max = Math.max(...rows.map((r) => r.leads));
+    const short = (u) => { try { const x = new URL(u); return (x.pathname === '/' ? x.hostname : x.pathname) + (x.search || ''); } catch (e) { return u; } };
+    return `<div class="funnel">${rows.map((r) => `<div class="funnel-row">
+      <span class="lbl" title="${esc(r.page)}"><a href="${esc(r.page)}" target="_blank" rel="noopener">${esc(r.title || short(r.page))}</a></span>
+      <span class="bar"><span style="width:${max ? (r.leads / max) * 100 : 0}%"></span></span>
+      <span class="n">${r.leads}<span class="drop" style="color:var(--ok)">${r.done} booked</span></span></div>`).join('')}</div>`;
+  }
+
   function funnelHtml(d) {
     const groups = [];
     const quoteRows = d.funnelRows.filter((r) => r.source === 'quote');
@@ -129,6 +141,7 @@
         <div class="cols-2">
           <div class="stack">
             <div class="panel"><div class="panel-head"><div><h2>Where people drop off</h2><p class="desc" style="margin:0">How far visitors get in each form. Every step they finish is saved as a lead.</p></div></div>${funnelHtml(d)}</div>
+            <div class="panel"><div class="panel-head"><div><h2>Which pages bring bookings</h2><p class="desc" style="margin:0">Where each lead started, for forms embedded on your website.</p></div></div>${pagesHtml(d)}</div>
             <div class="panel"><h2>Leads per day</h2>${sparkline(d.series, days) || '<p class="muted">No leads yet.</p>'}</div>
           </div>
           <div class="stack">
@@ -220,7 +233,7 @@
       </div><div class="stack">
         <div class="panel"><h2>Notes</h2><textarea class="textarea" id="notes" placeholder="Private notes for your team" style="margin-top:10px">${esc(l.notes || '')}</textarea><button class="btn btn-ghost btn-sm" style="margin-top:8px" data-save-notes>Save notes</button></div>
         <div class="panel"><h2>Timeline</h2><ul class="timeline" style="margin-top:12px">${d.activity.map((a) => `<li>${esc(a.message)}<time>${esc(A.dt(a.created_at))}</time></li>`).join('') || '<li>No activity</li>'}</ul></div>
-        <div class="panel"><h2>Source</h2><dl class="kv" style="margin-top:12px">${utm.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}<dt>Referrer</dt><dd class="small">${esc((l.meta && l.meta.referrer) || 'Direct')}</dd><dt>Embedded</dt><dd>${l.meta && l.meta.embedded ? 'Yes' : 'No'}</dd></dl></div>
+        <div class="panel"><h2>Source</h2><dl class="kv" style="margin-top:12px">${(l.meta && l.meta.page_url) ? `<dt>Page</dt><dd class="small"><a href="${esc(l.meta.page_url)}" target="_blank" rel="noopener">${esc(l.meta.page_title || l.meta.page_url)}</a></dd>` : ''}${utm.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}<dt>Referrer</dt><dd class="small">${esc((l.meta && l.meta.referrer) || 'Direct')}</dd><dt>Embedded</dt><dd>${l.meta && l.meta.embedded ? 'Yes' : 'No'}</dd></dl></div>
         ${['owner', 'admin'].includes(A.me.business.role) ? '<button class="btn btn-danger btn-sm" data-delete>Delete lead</button>' : ''}
       </div></div>`;
     },
