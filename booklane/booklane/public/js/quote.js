@@ -57,17 +57,48 @@
   const field = (name, label, input, req) => `<div class="field"><label for="f-${name}">${esc(label)}${req ? ' <span class="req">*</span>' : ''}</label>${input}</div>`;
   const cards = (name, options, value) => `<div class="options">${options.map((o) => `<label class="opt radio ${o === value ? 'is-on' : ''}"><input type="radio" name="${name}" value="${esc(o)}" ${o === value ? 'checked' : ''} data-detail="${name}"><span class="tick"></span><span>${esc(o)}</span></label>`).join('')}</div>`;
 
-  function renderDetails() {
+  // Options can come from the field itself or, for the built-in questions, the lists in Settings.
+  function optionsFor(f) {
+    if ((f.options || []).length) return f.options;
+    if (f.id === 'event_type') return qs.event_types || [];
+    if (f.id === 'guests') return qs.guest_ranges || [];
+    if (f.id === 'city') return qs.cities || [];
+    return [];
+  }
+
+  const isRequired = (f) => !!f.required || (f.id === 'event_date' && qs.require_event_date);
+
+  function renderField(f) {
     const d = st.details;
-    return `<form class="step-form" novalidate>
-      <div class="field"><span class="label">What are you celebrating?</span>${cards('event_type', qs.event_types || [], d.event_type)}</div>
-      <div class="grid-2">
-        ${field('event_date', 'Event date', `<input class="input" type="date" id="f-event_date" name="event_date" min="${BL.todayIn(biz.timezone)}" value="${esc(d.event_date)}" data-detail="event_date">`, qs.require_event_date)}
-        ${(qs.cities || []).length ? field('city', 'City / area', `<select class="select" id="f-city" name="city" data-detail="city"><option value="">Select…</option>${qs.cities.map((c) => `<option ${c === d.city ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>`) : field('city', 'City', `<input class="input" id="f-city" name="city" value="${esc(d.city)}" data-detail="city">`)}
-      </div>
-      ${field('venue', 'Venue (if you have one)', `<input class="input" id="f-venue" name="venue" value="${esc(d.venue)}" placeholder="Not booked yet? Leave blank" data-detail="venue">`)}
-      ${(qs.guest_ranges || []).length ? `<div class="field"><span class="label">Guest count</span>${cards('guests', qs.guest_ranges, d.guests)}</div>` : ''}
-    </form>`;
+    const v = d[f.id];
+    const opts = optionsFor(f);
+    const req = isRequired(f);
+    const a = `id="f-${f.id}" name="${f.id}" data-detail="${f.id}"`;
+    if (f.type === 'choice' && opts.length) return `<div class="field"><span class="label">${esc(f.label)}${req ? ' <span class="req">*</span>' : ''}</span>${cards(f.id, opts, v)}</div>`;
+    if (f.type === 'multi' && opts.length) {
+      return `<div class="field"><span class="label">${esc(f.label)}${req ? ' <span class="req">*</span>' : ''}</span><div class="options">${opts.map((o) => `<label class="opt check ${(v || []).includes(o) ? 'is-on' : ''}"><input type="checkbox" value="${esc(o)}" ${(v || []).includes(o) ? 'checked' : ''} data-detail-multi="${f.id}"><span class="tick"></span><span>${esc(o)}</span></label>`).join('')}</div></div>`;
+    }
+    if ((f.type === 'choice_select' || f.type === 'choice') && opts.length) {
+      return field(f.id, f.label, `<select class="select" ${a}><option value="">Select…</option>${opts.map((o) => `<option ${o === v ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`, req);
+    }
+    if (f.type === 'date') return field(f.id, f.label, `<input class="input" type="date" ${a} min="${BL.todayIn(biz.timezone)}" value="${esc(v || '')}">`, req);
+    if (f.type === 'textarea') return field(f.id, f.label, `<textarea class="textarea" rows="3" ${a}>${esc(v || '')}</textarea>`, req);
+    const type = f.type === 'number' ? 'number' : f.type === 'email' ? 'email' : f.type === 'phone' ? 'tel' : 'text';
+    return field(f.id, f.label, `<input class="input" type="${type}" ${a} value="${esc(v || '')}">`, req);
+  }
+
+  function renderDetails() {
+    const fields = (qs.fields || []).slice();
+    if (!fields.length) return '<form class="step-form" novalidate></form>';
+    // Half-width fields pair up; everything else runs full width.
+    const html = [];
+    for (let i = 0; i < fields.length; i++) {
+      const f = fields[i], next = fields[i + 1];
+      const halfable = (x) => x && !x.full && !['choice', 'multi'].includes(x.type);
+      if (halfable(f) && halfable(next)) { html.push(`<div class="grid-2">${renderField(f)}${renderField(next)}</div>`); i++; }
+      else html.push(renderField(f));
+    }
+    return `<form class="step-form" novalidate>${html.join('')}</form>`;
   }
 
   function stepper(attrs, value, min, max) {
@@ -102,11 +133,16 @@
         <span class="svc-price">${priceLabel}</span></button>${body}</div>`;
   }
 
+  function hintText(h) {
+    const saving = BLPricing.money(h.amount, (BL.data.business.settings.quote || {}).currency);
+    return h.service ? `Add ${h.service} and save ${saving}` : `Add 1 more service and save ${saving}`;
+  }
+
   function renderServices() {
     const cats = [];
     for (const s of catalog) { const c = s.category || ''; let g = cats.find((x) => x.c === c); if (!g) cats.push((g = { c, items: [] })); g.items.push(s); }
     const hint = calc().next_bundle;
-    return `${hint && selections().length ? `<div class="q-hint" style="margin-bottom:14px">Add ${hint.needed} more service${hint.needed > 1 ? 's' : ''} to save ${hint.percent}%</div>` : ''}
+    return `${hint && selections().length ? `<div class="q-hint" style="margin-bottom:14px">${esc(hintText(hint))}</div>` : ''}
       ${cats.map((g) => `${g.c ? `<div class="svc-group-title" style="margin:18px 0 10px">${esc(g.c)}</div>` : ''}<div class="svc-list">${g.items.map(renderService).join('')}</div>`).join('')}
       ${catalog.length ? '' : '<div class="empty">No services have been added yet.</div>'}`;
   }
@@ -114,9 +150,14 @@
   function renderContact() {
     const c = st.contact;
     const inp = (name, type, auto, ph) => `<input class="input" id="f-${name}" name="${name}" type="${type}" autocomplete="${auto}" value="${esc(c[name] || '')}" placeholder="${esc(ph || '')}" data-contact>`;
-    return `<form class="step-form" novalidate><div class="grid-2">${field('first_name', 'First name', inp('first_name', 'text', 'given-name'), true)}${field('last_name', 'Last name', inp('last_name', 'text', 'family-name'))}</div>
-      ${field('email', 'Email', inp('email', 'email', 'email', 'you@example.com'), true)}${field('phone', 'Phone', inp('phone', 'tel', 'tel', '(555) 555-5555'))}
-      <label class="check"><input type="checkbox" name="sms_consent" data-contact ${c.sms_consent ? 'checked' : ''}><span>${esc(biz.settings.sms_consent_text)}</span></label>
+    const askLast = qs.ask_last_name !== false, askPhone = qs.ask_phone !== false;
+    return `<form class="step-form" novalidate>
+      ${askLast ? `<div class="grid-2">${field('first_name', 'First name', inp('first_name', 'text', 'given-name'), true)}${field('last_name', 'Last name', inp('last_name', 'text', 'family-name'))}</div>`
+        : field('first_name', 'Your name', inp('first_name', 'text', 'name'), true)}
+      ${field('email', 'Email', inp('email', 'email', 'email', 'you@example.com'), true)}
+      ${askPhone ? field('phone', 'Phone', inp('phone', 'tel', 'tel', '(555) 555-5555'), !!qs.require_phone) : ''}
+      ${qs.ask_company ? field('company', 'Company', inp('company', 'text', 'organization')) : ''}
+      ${askPhone ? `<label class="check"><input type="checkbox" name="sms_consent" data-contact ${c.sms_consent ? 'checked' : ''}><span>${esc(biz.settings.sms_consent_text)}</span></label>` : ''}
       ${biz.settings.privacy_note ? `<p class="muted small" style="margin-top:14px">${esc(biz.settings.privacy_note)}</p>` : ''}</form>`;
   }
 
@@ -163,7 +204,7 @@
       ${c.lines.length ? `<div class="q-lines">${c.lines.map((l) => `<div class="q-line"><div><div class="n">${esc(l.name)}</div><div class="d">${esc(lineDesc(l))}</div></div><div class="a">${money(l.amount)}</div></div>`).join('')}</div>` : '<div class="muted small">Pick services to see your price build here.</div>'}
       ${c.lines.length ? `<div class="q-totals">${c.discount ? `<div class="disc"><span>${esc(c.discount_label)}</span><span>−${money(c.discount)}</span></div>` : ''}${c.tax ? `<div><span>Tax</span><span>${money(c.tax)}</span></div>` : ''}
         <div style="align-items:baseline"><span class="muted">Total</span><span class="q-total">${money(c.total)}</span></div>${c.deposit ? `<div class="muted small"><span>Deposit to book</span><span>${money(c.deposit)}</span></div>` : ''}</div>` : ''}
-      ${c.next_bundle && c.lines.length ? `<div class="q-hint">Add ${c.next_bundle.needed} more to save ${c.next_bundle.percent}%</div>` : ''}
+      ${c.next_bundle && c.lines.length ? `<div class="q-hint">${esc(hintText(c.next_bundle))}</div>` : ''}
       <ul class="trust" style="margin-top:6px">${(biz.settings.trust_points || []).map((t) => `<li>${esc(t)}</li>`).join('')}</ul>
     </aside>`;
   }
@@ -241,11 +282,19 @@
   // ---- validation & navigation ----
   function validate(key) {
     const e = {};
-    if (key === 'details' && qs.require_event_date && !st.details.event_date) e.event_date = 'Pick your date (an estimate is fine)';
+    if (key === 'details') {
+      for (const f of qs.fields || []) {
+        if (!isRequired(f)) continue;
+        const v = st.details[f.id];
+        const empty = Array.isArray(v) ? !v.length : !String(v == null ? '' : v).trim();
+        if (empty) e[f.id] = f.id === 'event_date' ? 'Pick your date (an estimate is fine)' : 'Required';
+      }
+    }
     if (key === 'services' && !selections().length) { st.error = 'Pick at least one service to build your quote.'; return { _: 1 }; }
     if (key === 'contact') {
       if (!st.contact.first_name.trim()) e.first_name = 'Required';
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(st.contact.email.trim())) e.email = 'Enter a valid email';
+      if (qs.ask_phone !== false && qs.require_phone && !String(st.contact.phone || '').trim()) e.phone = 'Required';
     }
     return e;
   }
@@ -335,7 +384,13 @@
   app.addEventListener('keydown', (e) => { if (e.key === 'Escape' && st.modal) { st.modal = null; render(); } });
   function onInput(e) {
     const t = e.target;
-    if (t.dataset.detail) {
+    if (t.dataset.detailMulti) {
+      const id = t.dataset.detailMulti;
+      const picked = $$(`input[data-detail-multi="${id}"]`, app).filter((x) => x.checked).map((x) => x.value);
+      st.details[id] = picked;
+      t.closest('.opt').classList.toggle('is-on', t.checked);
+      capture({ details: { [id]: picked } }, true);
+    } else if (t.dataset.detail) {
       st.details[t.dataset.detail] = t.value;
       if (t.type === 'radio') $$(`input[name="${t.name}"]`, app).forEach((x) => x.closest('.opt').classList.toggle('is-on', x.checked));
       capture({ details: { [t.dataset.detail]: t.value } }, t.type === 'radio' || e.type === 'change');
