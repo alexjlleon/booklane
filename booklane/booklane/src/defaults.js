@@ -25,9 +25,19 @@ const BUSINESS_SETTINGS = {
     deposit_type: 'percent',
     deposit_value: 30,
     bundle_discounts: [],
+    bundles: [],
     expires_days: 14,
     contact_step_position: 'before_review',
     event_types: ['Wedding', 'Corporate event', 'Birthday / Celebration', 'Other'],
+    // The questions on the quote builder's first step. Edit, reorder or delete any of them.
+    fields: [
+      { id: 'event_type', label: 'What are you celebrating?', type: 'choice', options: [], required: false, full: true },
+      { id: 'event_date', label: 'Event date', type: 'date', options: [], required: true, full: false },
+      { id: 'city', label: 'City / area', type: 'choice_select', options: [], required: false, full: false },
+      { id: 'venue', label: 'Venue (if you have one)', type: 'text', options: [], required: false, full: true },
+      { id: 'guests', label: 'Guest count', type: 'choice', options: [], required: false, full: true },
+    ],
+    ask_last_name: true, ask_phone: true, require_phone: true, ask_company: false,
     guest_ranges: ['Under 50', '50-100', '100-150', '150-250', '250+'],
     cities: [],
     require_event_date: true,
@@ -83,4 +93,19 @@ const LOCATION_TYPES = {
   custom: 'Custom',
 };
 
-module.exports = { BUSINESS_SETTINGS, DEFAULT_STEPS, LOCATION_TYPES };
+// A short, date-first form: get the date and a phone number before asking for anything else,
+// tell them whether the date is open, then offer a time.
+const QUICK_DATE_STEPS = () => [
+  {
+    key: 'date', type: 'questions', title: "What's your wedding date?", subtitle: 'We\u2019ll check it against our calendar right now.',
+    questions: [{ id: 'event_date', label: 'Event date', type: 'date', options: [], required: true, display: 'list' }],
+  },
+  {
+    key: 'contact', type: 'contact', title: 'Where can we reach you?', subtitle: 'Name and number is all we need to check your date.',
+    fields: { first_name: 'required', last_name: 'optional', email: 'optional', phone: 'required', sms_consent: 'optional' },
+  },
+  { key: 'availability', type: 'availability', title: 'Checking your date\u2026', subtitle: '', date_question_id: 'event_date', available_text: '', unavailable_text: '', cta: 'Set up a call' },
+  { key: 'schedule', type: 'schedule', title: 'Pick a time for your consult call', subtitle: 'Fifteen minutes, no pressure.' },
+];
+
+module.exports = { BUSINESS_SETTINGS, DEFAULT_STEPS, QUICK_DATE_STEPS, LOCATION_TYPES };
