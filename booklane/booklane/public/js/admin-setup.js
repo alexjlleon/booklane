@@ -27,7 +27,7 @@
 
   // ---------- Event type editor ----------
   const Q_TYPES = { choice: 'Pick one', multi: 'Pick many', text: 'Short text', textarea: 'Long text', date: 'Date', number: 'Number', select: 'Dropdown' };
-  const STEP_TYPES = { schedule: 'Pick a time', contact: 'Contact info', questions: 'Questions' };
+  const STEP_TYPES = { schedule: 'Pick a time', contact: 'Contact info', questions: 'Questions', availability: 'Date check' };
 
   A.route('/event-types/:id', {
     title: 'Edit call type',
@@ -51,7 +51,7 @@
             ${A.toggle('active', et.active, 'Page is live')}
           </div>
           <div class="panel"><div class="panel-head"><div><h2>Form steps</h2><p class="desc" style="margin:0">Every step autosaves as a lead. Put Contact info early to capture more people who drop off.</p></div>
-            <div class="row"><button class="btn btn-ghost btn-sm" data-add-step>+ Questions step</button></div></div><div id="steps" class="stack"></div></div>
+            <div class="row">${isNew ? '<button class="btn btn-ghost btn-sm" data-template="quick">Use the short date-first form</button>' : ''}<button class="btn btn-ghost btn-sm" data-add-step>+ Questions step</button><button class="btn btn-ghost btn-sm" data-add-availability>+ Date check</button></div></div><div id="steps" class="stack"></div></div>
         </div><div class="stack">
           <div class="panel" id="limits"><h2>Scheduling rules</h2>
             <div class="grid-2">${A.field('Minimum notice (hours)', `<input class="input" type="number" min="0" step="0.5" id="notice" value="${et.min_notice_min / 60}">`)}${A.field('Book up to (days ahead)', A.input('max_days_ahead', et.max_days_ahead, 'type="number" min="1" data-type="number"'))}</div>
@@ -71,9 +71,13 @@
         stepsEl.innerHTML = et.steps.map((s, i) => `<div class="step-card" data-si="${i}">
           <div class="step-card-head"><span class="step-num">${i + 1}</span><div style="flex:1"><div class="step-type">${STEP_TYPES[s.type]}</div></div>
             <button class="icon-x" data-move="-1" title="Move up" ${i === 0 ? 'disabled' : ''}>↑</button><button class="icon-x" data-move="1" title="Move down" ${i === et.steps.length - 1 ? 'disabled' : ''}>↓</button>
-            ${s.type === 'questions' ? '<button class="icon-x" data-remove-step title="Remove step">×</button>' : ''}</div>
+            ${['questions', 'availability'].includes(s.type) ? '<button class="icon-x" data-remove-step title="Remove step">×</button>' : ''}</div>
           <div class="grid-2" style="margin-top:10px">${A.field('Title', `<input class="input" data-sf="title" value="${esc(s.title)}">`)}${A.field('Subtitle', `<input class="input" data-sf="subtitle" value="${esc(s.subtitle || '')}">`)}</div>
-          ${s.type === 'contact' ? `<div class="mini-grid">${['first_name', 'last_name', 'phone', 'sms_consent'].map((f) => A.field(A.label(f === 'sms_consent' ? 'SMS consent box' : f), `<select class="select" data-cf="${f}">${['required', 'optional', 'hidden'].filter((o) => f !== 'sms_consent' || o !== 'required').map((o) => `<option ${s.fields[f] === o ? 'selected' : ''}>${o}</option>`).join('')}</select>`)).join('')}</div><div class="help">Email is always required.</div>` : ''}
+          ${s.type === 'contact' ? `<div class="mini-grid">${['first_name', 'last_name', 'email', 'phone', 'sms_consent'].map((f) => A.field(A.label(f === 'sms_consent' ? 'SMS consent box' : f), `<select class="select" data-cf="${f}">${['required', 'optional', 'hidden'].filter((o) => f !== 'sms_consent' || o !== 'required').map((o) => `<option ${s.fields[f] === o ? 'selected' : ''}>${o}</option>`).join('')}</select>`)).join('')}</div><div class="help">Hide email for a short form, but keep a phone number.</div>` : ''}
+          ${s.type === 'availability' ? `<p class="desc">Reads the date the customer entered and tells them whether you are free, using the booked dates on the <a href="#/availability">Availability</a> page.</p>
+            <div class="grid-2">${A.field('Date comes from question id', `<input class="input" data-sf="date_question_id" value="${esc(s.date_question_id || 'event_date')}">`)}${A.field('Button label', `<input class="input" data-sf="cta" value="${esc(s.cta || 'Set up a call')}">`)}</div>
+            ${A.field('If the date is open', `<input class="input" data-sf="available_text" value="${esc(s.available_text || '')}" placeholder="Leave blank for the default wording">`)}
+            ${A.field('If the date is taken', `<input class="input" data-sf="unavailable_text" value="${esc(s.unavailable_text || '')}" placeholder="Leave blank for the default wording">`)}` : ''}
           ${s.type === 'questions' ? `${(s.questions || []).map((q, qi) => `<div class="q-edit" data-qi="${qi}">
               <div class="row between"><b class="small">Question ${qi + 1}</b><button class="icon-x" data-remove-q title="Remove question">×</button></div>
               <div class="grid-2">${A.field('Label', `<input class="input" data-qf="label" value="${esc(q.label)}">`)}${A.field('Type', `<select class="select" data-qf="type">${Object.entries(Q_TYPES).map(([k, v]) => `<option value="${k}" ${q.type === k ? 'selected' : ''}>${v}</option>`).join('')}</select>`)}</div>
@@ -106,6 +110,17 @@
         if (e.target.closest('[data-remove-step]') && confirm('Remove this step?')) { et.steps.splice(i, 1); renderSteps(); }
         if (e.target.closest('[data-add-q]')) { et.steps[i].questions.push({ id: '', label: 'New question', type: 'text', options: [], required: false }); renderSteps(); }
         if (e.target.closest('[data-remove-q]')) { et.steps[i].questions.splice(Number(e.target.closest('[data-qi]').dataset.qi), 1); renderSteps(); }
+        if (e.target.closest('[data-template]')) {
+          et.steps = JSON.parse(JSON.stringify(d.quick_date_steps));
+          $('[data-bind="name"]', root).value = $('[data-bind="name"]', root).value || 'Check my date';
+          renderSteps();
+        }
+        if (e.target.closest('[data-add-availability]')) {
+          if (et.steps.some((x) => x.type === 'availability')) return A.toast('This form already has a date check', true);
+          const at = et.steps.findIndex((x) => x.type === 'schedule');
+          et.steps.splice(at < 0 ? et.steps.length : at, 0, { key: '', type: 'availability', title: 'Checking your date…', subtitle: '', date_question_id: 'event_date', available_text: '', unavailable_text: '', cta: 'Set up a call' });
+          renderSteps();
+        }
         if (e.target.closest('[data-add-step]')) { et.steps.push({ key: '', type: 'questions', title: 'A few more details', subtitle: '', questions: [{ id: '', label: 'Your question', type: 'text', options: [], required: false }] }); renderSteps(); }
         if (e.target.closest('[data-save]')) {
           const body = Object.assign({}, A.collect($('#basics', root)), A.collect($('#limits', root)), A.collect($('#hosts', root)));
@@ -133,6 +148,10 @@
       return `<div class="topbar"><div><h1>Availability</h1><div class="sub">When ${d.user.id === A.me.user.id ? 'you are' : esc(d.user.name) + ' is'} open for calls. Busy times on connected calendars are blocked automatically.</div></div>
         <div class="tools">${d.members.length > 1 ? `<select class="select" id="who" style="width:auto">${d.members.map((m) => `<option value="${m.id}" ${m.id === d.user.id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>` : ''}<button class="btn btn-primary" data-save>Save hours</button></div></div>
         <div class="cols-2"><div class="panel"><div class="panel-head"><h2>Weekly hours</h2><div style="min-width:240px">${A.tzSelect('timezone', d.user.timezone)}</div></div><div id="week"></div></div>
+        <div class="panel"><h2>Booked event dates</h2><p class="desc">Dates you are already booked for an event. The "date check" step on a booking form answers from this list.</p>
+          <div class="row" style="margin-bottom:10px;align-items:flex-start"><textarea class="textarea" id="bd-dates" rows="2" placeholder="2027-05-15, 2027-06-12" style="flex:1"></textarea>
+            <button class="btn btn-ghost btn-sm" data-add-blocked>Mark booked</button></div>
+          <div id="blocked" class="stack" style="gap:4px"></div></div>
         <div class="panel"><h2>Date overrides</h2><p class="desc">Days off, holidays, or special hours for a single date.</p>
           <div class="row" style="margin-bottom:12px"><input class="input" type="date" id="ov-date" style="width:auto"><button class="btn btn-ghost btn-sm" data-ov="off">Mark unavailable</button><button class="btn btn-ghost btn-sm" data-ov="hours">Custom hours</button></div><div id="overrides"></div></div></div>`;
     },
@@ -147,6 +166,26 @@
               + `<div class="row" style="gap:2px"><button class="btn btn-link btn-sm" data-addint="${wd}">+ Add hours</button><button class="btn btn-link btn-sm" data-copyall="${wd}">Copy to all weekdays</button></div>` : '<span class="muted small" style="padding-top:8px">Unavailable</span>'}</div></div>`;
         }).join('');
       }
+      async function renderBlocked() {
+        const el = $('#blocked', root); if (!el) return;
+        const rows = await api('GET', '/blocked-dates');
+        el.innerHTML = rows.length
+          ? rows.map((r) => `<div class="interval" style="padding:6px 0;border-bottom:1px solid var(--line)"><b style="min-width:120px">${esc(r.date)}</b><span class="small muted grow">${esc(r.note || '')}</span><button class="icon-x" data-rm-blocked="${r.id}" title="Remove">&times;</button></div>`).join('')
+          : '<p class="small muted">No booked dates yet. Every date will come back as available.</p>';
+      }
+      renderBlocked();
+      root.addEventListener('click', async (e) => {
+        const add = e.target.closest('[data-add-blocked]');
+        if (add) {
+          const dates = $('#bd-dates', root).value;
+          if (!dates.trim()) return A.toast('Enter a date as YYYY-MM-DD', true);
+          const r = await A.guard(() => api('POST', '/blocked-dates', { dates }), 'Saved');
+          if (r) { $('#bd-dates', root).value = ''; A.toast(`${r.added} date${r.added === 1 ? '' : 's'} marked booked${r.skipped ? `, ${r.skipped} already there` : ''}`); renderBlocked(); }
+        }
+        const rm = e.target.closest('[data-rm-blocked]');
+        if (rm) { await A.guard(() => api('DELETE', `/blocked-dates/${rm.dataset.rmBlocked}`), 'Removed'); renderBlocked(); }
+      });
+
       function renderOverrides() {
         const el = $('#overrides', root);
         el.innerHTML = st.overrides.length ? st.overrides.map((o, i) => `<div class="interval" style="padding:8px 0;border-bottom:1px solid var(--line)"><b style="min-width:120px">${esc(A.date(o.date))}</b>
@@ -211,6 +250,8 @@
       const link = (label, path) => `<div class="field"><label>${esc(label)}</label><div class="copy-row"><input class="input" readonly value="${esc(url + path)}"><button class="btn btn-ghost btn-sm" data-copy="${esc(url + path)}">Copy</button><a class="btn btn-ghost btn-sm" href="${esc(path)}" target="_blank">Open</a></div></div>`;
       const inline = `<div data-booklane="b/${b.slug}"></div>\n<script src="${url}/embed.js" async></script>`;
       const popup = `<button data-booklane-popup="b/${b.slug}/quote">Build your quote</button>\n<script src="${url}/embed.js" async></script>`;
+      const shortEt = d.event_types.find((e) => e.active && (e.steps || []).some((x) => x.type === 'availability')) || d.event_types.find((e) => e.active) || {};
+      const cta = `<div data-booklane-cta="b/${b.slug}/${shortEt.slug || 'discovery-call'}"\n     data-field="event_date"\n     data-label="See if your date is open"\n     data-button="Check my date"\n     data-color="${b.brand_color || '#5b3df5'}"></div>\n<script src="${url}/embed.js" async></script>`;
       const checklist = [
         [me.has_hours, 'Set your weekly hours', '#/availability'],
         [(me.calendars || []).length > 0, 'Connect Google or Outlook calendar', '#/calendars'],
@@ -225,7 +266,10 @@
         <div class="panel"><h2>Embed on your website</h2><p class="desc">Paste into a Custom HTML / code block (WordPress, Avada, Squarespace, Wix). The frame resizes itself.</p>
           <div class="field"><label>Inline (main page)</label><div class="code">${esc(inline)}</div><button class="btn btn-ghost btn-sm" style="align-self:flex-start" data-copy="${esc(inline)}">Copy code</button></div>
           <div class="field"><label>Popup button (quote builder)</label><div class="code">${esc(popup)}</div><button class="btn btn-ghost btn-sm" style="align-self:flex-start" data-copy="${esc(popup)}">Copy code</button></div>
-          <p class="help">Swap the path for any link above, e.g. <code>b/${esc(b.slug)}/${esc((d.event_types[0] || {}).slug || 'discovery-call')}</code>.</p></div></div>`;
+          <p class="help">Swap the path for any link above, e.g. <code>b/${esc(b.slug)}/${esc((d.event_types[0] || {}).slug || 'discovery-call')}</code>.</p></div>
+        <div class="panel"><h2>Short call-to-action</h2><p class="desc">One field, right on the page, no iframe. It asks a single low-commitment question, saves the answer as a lead the moment they press the button, then opens the rest of the form with that answer already filled in.</p>
+          <div class="field"><label>Date-check CTA</label><div class="code">${esc(cta)}</div><button class="btn btn-ghost btn-sm" style="align-self:flex-start" data-copy="${esc(cta)}">Copy code</button></div>
+          <p class="help"><code>data-field</code> can be any question id on that form, or <code>phone</code> / <code>email</code> / <code>first_name</code>. Put one on each service page and the dashboard will show which pages convert.</p></div></div>`;
     },
   });
 })();
