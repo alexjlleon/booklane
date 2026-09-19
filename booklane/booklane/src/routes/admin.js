@@ -6,13 +6,14 @@ const { hashPassword, verifyPassword, token, rateLimit } = require('../lib/secur
 const { createSession, destroySession, requireAuth, requireRole, ROLE_RANK } = require('../lib/auth');
 const { isEmail, clampStr, int, num, bool, slugify, deepMerge, baseUrl } = require('../lib/util');
 const { sendEmail, layout } = require('../lib/email');
-const { BUSINESS_SETTINGS, DEFAULT_STEPS, LOCATION_TYPES } = require('../defaults');
+const { BUSINESS_SETTINGS, DEFAULT_STEPS, QUICK_DATE_STEPS, LOCATION_TYPES } = require('../defaults');
 const B = require('../services/business');
 const L = require('../services/leads');
 const Q = require('../services/quotes');
 const BK = require('../services/bookings');
 const calendars = require('../services/calendars');
 const { pushToBoothBook, sendWebhook, buildBoothBookPayload } = require('../services/integrations');
+const Importer = require('../services/catalog-import');
 const { createBusiness, uniqueSlug, ensureDefaultAvailability } = require('../services/setup');
 
 const authLimit = rateLimit({ windowMs: 15 * 60000, max: 25 });
@@ -29,12 +30,20 @@ function sanitizeSteps(steps) {
   if (!Array.isArray(steps)) throw new HttpError(422, 'Steps must be a list');
   const Q_TYPES = ['text', 'textarea', 'number', 'date', 'select', 'choice', 'multi'];
   const out = steps.slice(0, 12).map((s, i) => {
-    const type = ['schedule', 'contact', 'questions'].includes(s.type) ? s.type : 'questions';
+    const type = ['schedule', 'contact', 'questions', 'availability'].includes(s.type) ? s.type : 'questions';
     const step = { key: slugify(s.key || s.title || `step-${i + 1}`) || `step-${i + 1}`, type, title: clampStr(s.title || '', 120), subtitle: clampStr(s.subtitle || '', 240) };
     if (type === 'contact') {
       const f = s.fields || {};
       const mode = (v, def) => (['required', 'optional', 'hidden'].includes(v) ? v : def);
-      step.fields = { first_name: mode(f.first_name, 'required'), last_name: mode(f.last_name, 'required'), email: 'required', phone: mode(f.phone, 'required'), sms_consent: mode(f.sms_consent, 'optional') };
+      step.fields = { first_name: mode(f.first_name, 'required'), last_name: mode(f.last_name, 'required'), email: mode(f.email, 'required'), phone: mode(f.phone, 'required'), sms_consent: mode(f.sms_consent, 'optional') };
+      // Short forms may skip email, but the form has to leave us some way to reach the person.
+      if (step.fields.email === 'hidden' && step.fields.phone === 'hidden') step.fields.phone = 'required';
+    }
+    if (type === 'availability') {
+      step.date_question_id = slugify(s.date_question_id || 'event_date').replace(/-/g, '_') || 'event_date';
+      step.available_text = clampStr(s.available_text || '', 300);
+      step.unavailable_text = clampStr(s.unavailable_text || '', 300);
+      step.cta = clampStr(s.cta || '', 40);
     }
     if (type === 'questions') {
       step.questions = (Array.isArray(s.questions) ? s.questions : []).slice(0, 15).map((q, j) => ({
@@ -47,6 +56,7 @@ function sanitizeSteps(steps) {
   });
   const keys = new Set();
   for (const s of out) { while (keys.has(s.key)) s.key += '-2'; keys.add(s.key); }
+  if (out.filter((s) => s.type === 'availability').length > 1) throw new HttpError(422, 'Only one date-check step per form');
   if (out.filter((s) => s.type === 'schedule').length !== 1) throw new HttpError(422, 'A booking form needs exactly one "Pick a time" step');
   if (out.filter((s) => s.type === 'contact').length !== 1) throw new HttpError(422, 'A booking form needs exactly one "Contact info" step');
   return out;
@@ -201,7 +211,12 @@ module.exports = function adminRoutes(app) {
     const upcomingList = db.all(`SELECT b.id, b.start_utc, b.name, b.email, b.phone, e.name event_name, u.name host FROM bookings b LEFT JOIN event_types e ON e.id = b.event_type_id LEFT JOIN users u ON u.id = b.host_user_id
       WHERE b.business_id = ? AND b.status = 'confirmed' AND b.start_utc >= ? ORDER BY b.start_utc LIMIT 6`, id, new Date().toISOString());
     const activity = db.all(`SELECT a.*, l.first_name, l.last_name, l.email FROM activity a LEFT JOIN leads l ON l.id = a.lead_id WHERE a.business_id = ? ORDER BY a.id DESC LIMIT 12`, id);
-    return { days, leads, bookings: { ...bookings, upcoming: upcoming.c }, quotes, funnelRows, eventTypes, series, upcoming: upcomingList, activity };
+    // Where the forms were embedded: leads and completions per source page.
+    const pages = db.all(`SELECT json_extract(meta, '$.page_url') page, json_extract(meta, '$.page_title') title,
+        COUNT(*) leads, SUM(CASE WHEN status != 'partial' THEN 1 ELSE 0 END) done
+      FROM leads WHERE business_id = ? AND created_at >= datetime('now', ?) AND json_extract(meta, '$.page_url') IS NOT NULL
+      GROUP BY 1 ORDER BY leads DESC LIMIT 12`, id, since);
+    return { days, leads, bookings: { ...bookings, upcoming: upcoming.c }, quotes, funnelRows, eventTypes, series, upcoming: upcomingList, activity, pages };
   });
 
   // ---------- Leads ----------
@@ -226,9 +241,9 @@ module.exports = function adminRoutes(app) {
     requireRole('admin')(req);
     const rows = db.all(`SELECT l.*, e.name event_name FROM leads l LEFT JOIN event_types e ON e.id = l.event_type_id WHERE l.business_id = ? ORDER BY l.id DESC`, bid(req));
     const answerKeys = [...new Set(rows.flatMap((r) => Object.keys(db.json(r.answers, {}))))];
-    const head = ['id', 'created_at', 'last_activity_at', 'source', 'status', 'form', 'step_reached', 'first_name', 'last_name', 'email', 'phone', 'sms_consent', ...answerKeys];
+    const head = ['id', 'created_at', 'last_activity_at', 'source', 'status', 'form', 'step_reached', 'first_name', 'last_name', 'email', 'phone', 'sms_consent', 'page_url', 'page_title', ...answerKeys];
     const cell = (v) => { let s = Array.isArray(v) ? v.join('; ') : String(v ?? ''); if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
-    const lines = [head.join(',')].concat(rows.map((r) => { const a = db.json(r.answers, {}); return [r.id, r.created_at, r.last_activity_at, r.source, r.status, r.event_name || (r.source === 'quote' ? 'Quote builder' : ''), `${r.max_step_index + 1}/${r.step_total || ''}`, r.first_name, r.last_name, r.email, r.phone, r.sms_consent ? 'yes' : 'no', ...answerKeys.map((k) => a[k])].map(cell).join(','); }));
+    const lines = [head.join(',')].concat(rows.map((r) => { const a = db.json(r.answers, {}); const m = db.json(r.meta, {}); return [r.id, r.created_at, r.last_activity_at, r.source, r.status, r.event_name || (r.source === 'quote' ? 'Quote builder' : ''), `${r.max_step_index + 1}/${r.step_total || ''}`, r.first_name, r.last_name, r.email, r.phone, r.sms_consent ? 'yes' : 'no', m.page_url || '', m.page_title || '', ...answerKeys.map((k) => a[k])].map(cell).join(','); }));
     res.set('Content-Disposition', 'attachment; filename="leads.csv"');
     res.text(lines.join('\n'), 'text/csv; charset=utf-8');
   });
@@ -308,7 +323,7 @@ module.exports = function adminRoutes(app) {
   }
   app.get('/api/admin/event-types', (req) => {
     requireRole('host')(req);
-    return { event_types: db.all('SELECT * FROM event_types WHERE business_id = ? ORDER BY sort, id', bid(req)).map(etOut), members: members(bid(req)), location_types: LOCATION_TYPES, default_steps: DEFAULT_STEPS() };
+    return { event_types: db.all('SELECT * FROM event_types WHERE business_id = ? ORDER BY sort, id', bid(req)).map(etOut), members: members(bid(req)), location_types: LOCATION_TYPES, default_steps: DEFAULT_STEPS(), quick_date_steps: QUICK_DATE_STEPS() };
   });
   function saveEventType(req, existing) {
     const b = req.body || {};
@@ -425,7 +440,51 @@ module.exports = function adminRoutes(app) {
     return { ok: true };
   });
 
+  // ---------- Booked event dates (drives the "we're available" step) ----------
+  app.get('/api/admin/blocked-dates', (req) => {
+    requireRole('host')(req);
+    return db.all('SELECT id, date, note FROM blocked_dates WHERE business_id = ? ORDER BY date', bid(req));
+  });
+  app.post('/api/admin/blocked-dates', (req) => {
+    requireRole('admin')(req);
+    const raw = String((req.body || {}).dates || '');
+    const note = clampStr((req.body || {}).note || '', 200);
+    const dates = [...new Set(raw.split(/[\s,;]+/).map((d) => d.trim()).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)))].slice(0, 500);
+    if (!dates.length) throw new HttpError(422, 'Enter one or more dates as YYYY-MM-DD.');
+    let added = 0;
+    db.tx(() => {
+      for (const d of dates) {
+        const r = db.run('INSERT OR IGNORE INTO blocked_dates (business_id, date, note) VALUES (?,?,?)', bid(req), d, note);
+        if (r.changes) added++;
+      }
+    });
+    return { added, skipped: dates.length - added };
+  });
+  app.delete('/api/admin/blocked-dates/:id', (req) => {
+    requireRole('admin')(req);
+    db.run('DELETE FROM blocked_dates WHERE id = ? AND business_id = ?', int(req.params.id), bid(req));
+    return { ok: true };
+  });
+
   // ---------- Services (quote catalog) ----------
+  // Spreadsheet import. Always dry run first so the admin sees exactly what will change.
+  app.post('/api/admin/services/import', (req) => {
+    requireRole('admin')(req);
+    const { filename = '', data = '', mode = 'merge', confirm = false } = req.body || {};
+    if (!data) throw new HttpError(400, 'No file was uploaded.');
+    let buf;
+    try { buf = Buffer.from(String(data), 'base64'); } catch { throw new HttpError(400, 'That file could not be read.'); }
+    if (!buf.length) throw new HttpError(400, 'That file is empty.');
+    if (buf.length > 6_000_000) throw new HttpError(413, 'That file is too large. Keep it under 6MB.');
+    let parsed;
+    try { parsed = Importer.analyze(buf, String(filename)); }
+    catch (e) { throw new HttpError(400, e.message || 'That file could not be read.'); }
+    if (!confirm) return { preview: true, ...parsed };
+    const result = Importer.apply(bid(req), parsed, { mode: mode === 'replace' ? 'replace' : 'merge' });
+    B.logActivity(bid(req), null, 'import', `Imported ${result.added + result.updated} services from ${String(filename).slice(0, 80)}`);
+    return { preview: false, ...result, warnings: parsed.warnings };
+  });
+
   app.get('/api/admin/services', (req) => { requireRole('host')(req); return Q.catalog(bid(req), { all: true }); });
   app.post('/api/admin/services', (req) => {
     requireRole('admin')(req);
