@@ -25,6 +25,7 @@ function createLead(business, { source = 'booking', eventTypeId = null, meta = {
     utm: Object.fromEntries(Object.entries(meta.utm || {}).filter(([k]) => /^utm_|^gclid$|^fbclid$/.test(k)).map(([k, v]) => [k, String(v).slice(0, 200)])),
     referrer: clampStr(meta.referrer, 500), landing: clampStr(meta.landing, 500), user_agent: clampStr(meta.user_agent, 300),
     embedded: !!meta.embedded,
+    page_url: clampStr(meta.page_url || meta.landing, 500), page_title: clampStr(meta.page_title, 160),
   };
   const { lastId } = db.run('INSERT INTO leads (business_id, token, source, event_type_id, meta) VALUES (?,?,?,?,?)',
     business.id, t, source, eventTypeId, JSON.stringify(safeMeta));
