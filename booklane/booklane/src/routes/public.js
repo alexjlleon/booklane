@@ -205,7 +205,7 @@ module.exports = function publicRoutes(app) {
     const body = req.body && typeof req.body === 'object' ? req.body : {};
     const locked = !['draft', 'submitted'].includes(q.status);
     if (locked && (body.details || body.selections)) throw new HttpError(409, 'This quote is locked because a contract was requested. Contact us to make changes.');
-    if (body.details) db.run("UPDATE quotes SET details = ?, updated_at = datetime('now') WHERE id = ?", JSON.stringify({ ...db.json(q.details, {}), ...Q.sanitizeDetails({ ...db.json(q.details, {}), ...body.details }) }), q.id);
+    if (body.details) db.run("UPDATE quotes SET details = ?, updated_at = datetime('now') WHERE id = ?", JSON.stringify({ ...db.json(q.details, {}), ...Q.sanitizeDetails({ ...db.json(q.details, {}), ...body.details }, b) }), q.id);
     if (body.selections) Q.recalc(b, q, Q.sanitizeSelections(body.selections));
     const lead = q.lead_id ? db.get('SELECT * FROM leads WHERE id = ?', q.lead_id) : null;
     if (lead) {
@@ -235,16 +235,56 @@ module.exports = function publicRoutes(app) {
   }));
   app.post('/api/public/quotes/:token/callback', (req) => quoteAction(req, async (b, q, lead) => ({ quote: Q.publicQuote(await Q.requestCallback(b, q, lead, req.body || {}), b) })));
 
+  // Is the business free on a given event date? Used by the "we're available" step.
+  app.get('/api/public/b/:slug/date-check', (req) => {
+    const b = getBusiness(req.params.slug);
+    const date = String(req.query.date || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new HttpError(400, 'Pick a date first.');
+    const hit = db.get('SELECT note FROM blocked_dates WHERE business_id = ? AND date = ?', b.id, date);
+    return { date, available: !hit, note: hit ? String(hit.note || '').slice(0, 200) : '' };
+  });
+
   // ---------- Embed script ----------
   app.get('/embed.js', (req, res) => {
     res.set('Cache-Control', 'public, max-age=300');
     res.text(`(function(){var base=${JSON.stringify(baseUrl())};
-function frame(url,el){var f=document.createElement('iframe');f.src=url+(url.indexOf('?')>-1?'&':'?')+'embed=1';f.style.cssText='width:100%;border:0;min-height:640px;display:block;color-scheme:normal';f.setAttribute('title','${APP_NAME} booking');f.setAttribute('loading','lazy');el.appendChild(f);return f}
+function src(){try{return encodeURIComponent(location.href.slice(0,500))}catch(e){return ''}}
+function stitle(){try{return encodeURIComponent((document.title||'').slice(0,120))}catch(e){return ''}}
+function frame(url,el){var f=document.createElement('iframe');f.src=url+(url.indexOf('?')>-1?'&':'?')+'embed=1&src='+src()+'&stitle='+stitle();f.style.cssText='width:100%;border:0;min-height:640px;display:block;color-scheme:normal';f.setAttribute('title','${APP_NAME} booking');f.setAttribute('loading','lazy');el.appendChild(f);return f}
 window.addEventListener('message',function(e){if(e.origin!==base||!e.data||e.data.type!=='booklane:height')return;var fs=document.querySelectorAll('iframe');for(var i=0;i<fs.length;i++){if(fs[i].contentWindow===e.source){fs[i].style.height=e.data.height+'px'}}});
 function inline(){var els=document.querySelectorAll('[data-booklane]');for(var i=0;i<els.length;i++){var el=els[i];if(el.__bl)continue;el.__bl=1;frame(base+'/'+el.getAttribute('data-booklane').replace(/^\\//,''),el)}}
 function popup(path){var o=document.createElement('div');o.style.cssText='position:fixed;inset:0;background:rgba(15,12,30,.6);z-index:2147483646;display:flex;align-items:center;justify-content:center;padding:16px';var box=document.createElement('div');box.style.cssText='background:#fff;border-radius:16px;width:100%;max-width:980px;max-height:92vh;overflow:auto;position:relative';var x=document.createElement('button');x.innerHTML='&times;';x.setAttribute('aria-label','Close');x.style.cssText='position:absolute;top:8px;right:12px;font-size:28px;background:none;border:0;cursor:pointer;z-index:2';x.onclick=function(){o.remove()};o.onclick=function(e){if(e.target===o)o.remove()};box.appendChild(x);o.appendChild(box);document.body.appendChild(o);frame(base+'/'+path.replace(/^\\//,''),box)}
-window.Booklane={popup:popup,inline:inline};
+function cta(el){if(el.__bl)return;el.__bl=1;
+var path=el.getAttribute('data-booklane-cta').replace(/^\\//,'');
+var fieldName=el.getAttribute('data-field')||'event_date';
+var label=el.getAttribute('data-label')||'';
+var btn=el.getAttribute('data-button')||'Check availability';
+var ph=el.getAttribute('data-placeholder')||'';
+var color=el.getAttribute('data-color')||'';
+var itype=/date/.test(fieldName)?'date':/phone|tel/.test(fieldName)?'tel':/email/.test(fieldName)?'email':'text';
+var f=document.createElement('form');
+f.style.cssText='display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;font:inherit';
+var wrap=document.createElement('label');
+wrap.style.cssText='display:flex;flex-direction:column;gap:4px;flex:1;min-width:180px;font:inherit';
+if(label){var sp=document.createElement('span');sp.textContent=label;sp.style.cssText='font-size:14px;font-weight:600';wrap.appendChild(sp)}
+var input=document.createElement('input');
+input.type=itype;input.name=fieldName;input.placeholder=ph;input.required=true;
+input.style.cssText='font:inherit;padding:12px 14px;border:1px solid rgba(0,0,0,.18);border-radius:10px;width:100%;box-sizing:border-box;background:#fff';
+if(itype==='date'){try{input.min=new Date().toISOString().slice(0,10)}catch(e){}}
+wrap.appendChild(input);
+var go=document.createElement('button');
+go.type='submit';go.textContent=btn;
+go.style.cssText='font:inherit;font-weight:700;padding:12px 20px;border:0;border-radius:10px;cursor:pointer;color:#fff;background:'+(color||'#5b3df5');
+f.appendChild(wrap);f.appendChild(go);
+f.addEventListener('submit',function(e){e.preventDefault();
+  var v=(input.value||'').trim();if(!v){input.focus();return}
+  popup(path+(path.indexOf('?')>-1?'&':'?')+encodeURIComponent(fieldName)+'='+encodeURIComponent(v));
+});
+el.appendChild(f)}
+function ctas(){var els=document.querySelectorAll('[data-booklane-cta]');for(var i=0;i<els.length;i++)cta(els[i])}
+window.Booklane={popup:popup,inline:inline,ctas:ctas};
 document.addEventListener('click',function(e){var t=e.target.closest&&e.target.closest('[data-booklane-popup]');if(t){e.preventDefault();popup(t.getAttribute('data-booklane-popup'))}});
-if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',inline);else inline();})();`, 'application/javascript; charset=utf-8');
+function init(){inline();ctas()}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();})();`, 'application/javascript; charset=utf-8');
   });
 };
