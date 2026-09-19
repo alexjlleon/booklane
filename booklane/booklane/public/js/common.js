@@ -64,7 +64,12 @@
     const p = new URLSearchParams(location.search);
     const utm = {};
     for (const [k, v] of p) if (/^utm_|^gclid$|^fbclid$/.test(k)) utm[k] = v;
-    return { utm, referrer: document.referrer || '', landing: location.href, embedded: !!BL.data.embed };
+    // When embedded, the iframe's own URL is useless for attribution: the embed script
+    // passes the host page in ?src, and we fall back to the referrer if it didn't.
+    const embedded = !!BL.data.embed;
+    const page = embedded ? (p.get('src') || document.referrer || '') : location.href;
+    return { utm, referrer: document.referrer || '', landing: location.href, embedded,
+      page_url: page, page_title: p.get('stitle') || (embedded ? '' : document.title) };
   };
 
   // ---- Autosaver: debounced PATCH + beacon on page hide ----
