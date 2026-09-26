@@ -124,12 +124,110 @@ CREATE TABLE IF NOT EXISTS email_log (
 CREATE TABLE IF NOT EXISTS oauth_states (
   state TEXT PRIMARY KEY, user_id INTEGER NOT NULL, provider TEXT NOT NULL, created_at INTEGER NOT NULL
 );
+-- A bookable calendar: a market (Houston, Austin, ...) or a person (the album designer).
+-- Hours, date overrides and the connected Google/Outlook calendar all hang off user_id, which is
+-- how the scheduler already works, so a market gets a real calendar without special-casing anything.
+CREATE TABLE IF NOT EXISTS calendar_profiles (
+  id INTEGER PRIMARY KEY, business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL DEFAULT 'market', slug TEXT NOT NULL, name TEXT NOT NULL,
+  blurb TEXT, timezone TEXT, active INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (business_id, slug)
+);
+CREATE INDEX IF NOT EXISTS idx_calendar_profiles ON calendar_profiles (business_id, kind, active);
+-- One row per attempt to buy a session. A 'pending' row also holds the slot, so two people cannot
+-- pay for the same time; abandoned holds expire on their own and free the slot back up.
+CREATE TABLE IF NOT EXISTS orders (
+  id INTEGER PRIMARY KEY, business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  token TEXT NOT NULL UNIQUE,
+  event_type_id INTEGER REFERENCES event_types(id) ON DELETE SET NULL,
+  calendar_profile_id INTEGER REFERENCES calendar_profiles(id) ON DELETE SET NULL,
+  lead_id INTEGER REFERENCES leads(id) ON DELETE SET NULL,
+  booking_id INTEGER REFERENCES bookings(id) ON DELETE SET NULL,
+  product_name TEXT NOT NULL, amount_cents INTEGER NOT NULL DEFAULT 0, currency TEXT NOT NULL DEFAULT 'USD',
+  status TEXT NOT NULL DEFAULT 'pending', provider TEXT NOT NULL DEFAULT 'stripe',
+  provider_session_id TEXT, provider_payment_intent TEXT, provider_receipt_url TEXT,
+  customer_name TEXT, customer_email TEXT, customer_phone TEXT,
+  already_booked INTEGER NOT NULL DEFAULT 0, booking_number TEXT,
+  hold_host_user_id INTEGER, hold_start_utc TEXT, hold_end_utc TEXT, hold_expires_at INTEGER,
+  invitee_tz TEXT, answers TEXT NOT NULL DEFAULT '{}', last_error TEXT,
+  paid_at TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_orders_business ON orders (business_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_orders_hold ON orders (hold_host_user_id, status, hold_expires_at);
+CREATE INDEX IF NOT EXISTS idx_orders_provider_session ON orders (provider_session_id);
+-- Stripe redelivers webhooks, sometimes more than once. Remember what has already been handled.
+CREATE TABLE IF NOT EXISTS provider_events (
+  provider TEXT NOT NULL, event_id TEXT NOT NULL, kind TEXT,
+  received_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (provider, event_id)
+);
+-- One rule: when to write, who to, and what to say. Conditions are stored as JSON id lists;
+-- an empty list means "applies to everything", which is the common case.
+CREATE TABLE IF NOT EXISTS message_automations (
+  id INTEGER PRIMARY KEY, business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  channel TEXT NOT NULL DEFAULT 'email',        -- email | sms | both
+  kind TEXT NOT NULL DEFAULT 'transactional',   -- transactional | marketing
+  trigger TEXT NOT NULL DEFAULT 'before',       -- booked | before | after | cancelled | rescheduled
+  offset_min INTEGER NOT NULL DEFAULT 1440,     -- minutes before/after the appointment starts
+  event_type_ids TEXT NOT NULL DEFAULT '[]',
+  calendar_ids TEXT NOT NULL DEFAULT '[]',
+  service_match TEXT NOT NULL DEFAULT '[]',
+  match_mode TEXT NOT NULL DEFAULT 'any',       -- any | all
+  skip_if_rebooked INTEGER NOT NULL DEFAULT 0,
+  subject TEXT, body_html TEXT, sms_body TEXT,
+  active INTEGER NOT NULL DEFAULT 0,
+  sort INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_automations_business ON message_automations (business_id, active);
+-- The outbox. The unique key is what stops a second job run from sending the same thing twice.
+CREATE TABLE IF NOT EXISTS scheduled_messages (
+  id INTEGER PRIMARY KEY, business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  automation_id INTEGER REFERENCES message_automations(id) ON DELETE CASCADE,
+  booking_id INTEGER REFERENCES bookings(id) ON DELETE CASCADE,
+  lead_id INTEGER REFERENCES leads(id) ON DELETE SET NULL,
+  channel TEXT NOT NULL, to_addr TEXT NOT NULL,
+  send_after INTEGER NOT NULL, due_at TEXT,
+  status TEXT NOT NULL DEFAULT 'queued',        -- queued | sent | skipped | failed | cancelled
+  subject TEXT, body TEXT, attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT, skip_reason TEXT, sent_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (automation_id, booking_id, channel)
+);
+CREATE INDEX IF NOT EXISTS idx_sched_due ON scheduled_messages (status, send_after);
+CREATE INDEX IF NOT EXISTS idx_sched_booking ON scheduled_messages (booking_id);
+CREATE TABLE IF NOT EXISTS sms_log (
+  id INTEGER PRIMARY KEY, business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
+  direction TEXT NOT NULL DEFAULT 'out', to_addr TEXT, from_addr TEXT, body TEXT,
+  status TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'twilio', provider_sid TEXT, error TEXT,
+  segments INTEGER, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_sms_log ON sms_log (business_id, created_at);
+-- Someone who texts STOP must never be texted again. Checked on every single send.
+-- Provider credentials and small bits of app state. Secrets are encrypted with APP_SECRET and are
+-- never read back out to the browser; the environment is used for anything not stored here.
+CREATE TABLE IF NOT EXISTS app_settings (
+  key TEXT PRIMARY KEY, value TEXT, secret INTEGER NOT NULL DEFAULT 0,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS sms_optouts (
+  business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  phone TEXT NOT NULL, reason TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (business_id, phone)
+);
 `;
 raw.exec(SCHEMA);
 // Lightweight migrations for databases created by earlier versions
 for (const sql of [
   "ALTER TABLE memberships ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
   'ALTER TABLE memberships ADD COLUMN invite_token TEXT',
+  // 'call' is a plain scheduled call; 'session' is a sellable session with a price on it.
+  "ALTER TABLE event_types ADD COLUMN kind TEXT NOT NULL DEFAULT 'call'",
+  // A login-less user row that exists only to own a calendar (a market, or the album designer).
+  'ALTER TABLE users ADD COLUMN is_resource INTEGER NOT NULL DEFAULT 0',
 ]) { try { raw.exec(sql); } catch { /* column already exists */ } }
 
 const cache = new Map();
