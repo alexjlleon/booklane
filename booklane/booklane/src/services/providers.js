@@ -1,0 +1,284 @@
+'use strict';
+// The Integrations screen: is each provider connected, what is missing, and does it actually work.
+//
+// Nothing here returns a credential. Every check asks the provider a read-only question and reports
+// back what it said, so "connected" means the key was genuinely accepted rather than merely present.
+const https = require('node:https');
+const db = require('../db');
+const config = require('../lib/config');
+const stripe = require('../lib/stripe');
+const sms = require('../lib/sms');
+const { baseUrl, clampStr, int } = require('../lib/util');
+const { sendEmail, layout } = require('../lib/email');
+
+const DIAGNOSTIC_NOTE = 'stripe.last_diagnostic';
+
+// ---------------------------------------------------------------- shape
+
+const fields = (provider) => config.keysFor(provider).map((k) => config.describe(k));
+
+function stripeShape() {
+  const key = config.get('STRIPE_SECRET_KEY');
+  const missing = [];
+  if (!key) missing.push('STRIPE_SECRET_KEY');
+  if (!config.get('STRIPE_WEBHOOK_SECRET')) missing.push('STRIPE_WEBHOOK_SECRET');
+  return {
+    provider: 'stripe',
+    name: 'Stripe',
+    what: 'Takes card payments for sessions.',
+    ready: stripe.configured() && !!config.get('STRIPE_WEBHOOK_SECRET'),
+    mode: key ? (key.startsWith('sk_live_') ? 'live' : 'test') : null,
+    missing,
+    fields: fields('stripe'),
+    webhook: {
+      url: `${baseUrl()}/api/public/stripe/webhook`,
+      events: ['checkout.session.completed', 'checkout.session.expired', 'charge.refunded'],
+      // If this is zero after a real payment, the webhook is not wired up correctly.
+      received: db.get("SELECT COUNT(*) c FROM provider_events WHERE provider = 'stripe'").c,
+    },
+    activity: {
+      paid_orders: db.get("SELECT COUNT(*) c FROM orders WHERE status = 'paid'").c,
+      paid_total: (db.get("SELECT COALESCE(SUM(amount_cents),0) s FROM orders WHERE status = 'paid'").s || 0) / 100,
+      stuck: db.get("SELECT COUNT(*) c FROM orders WHERE status = 'paid' AND booking_id IS NULL").c,
+    },
+    last_test: config.readNote(DIAGNOSTIC_NOTE),
+  };
+}
+
+function twilioShape() {
+  const missing = [];
+  if (!config.get('TWILIO_ACCOUNT_SID')) missing.push('TWILIO_ACCOUNT_SID');
+  if (!config.get('TWILIO_AUTH_TOKEN')) missing.push('TWILIO_AUTH_TOKEN');
+  if (!config.get('TWILIO_FROM_NUMBER') && !config.get('TWILIO_MESSAGING_SERVICE_SID')) missing.push('TWILIO_FROM_NUMBER or TWILIO_MESSAGING_SERVICE_SID');
+  return {
+    provider: 'twilio',
+    name: 'Twilio',
+    what: 'Sends the text messages your automations schedule.',
+    ready: sms.configured(),
+    missing,
+    fields: fields('twilio'),
+    webhook: {
+      url: `${baseUrl()}/api/public/sms/inbound`,
+      label: 'Set this as "A message comes in" on your number, so replies and STOP requests reach us.',
+      received: db.get("SELECT COUNT(*) c FROM sms_log WHERE direction = 'in'").c,
+    },
+    activity: {
+      sent_7d: db.get("SELECT COUNT(*) c FROM sms_log WHERE direction = 'out' AND status != 'failed' AND created_at >= datetime('now','-7 day')").c,
+      segments_7d: db.get("SELECT COALESCE(SUM(segments),0) s FROM sms_log WHERE direction = 'out' AND status != 'failed' AND created_at >= datetime('now','-7 day')").s || 0,
+      failed_7d: db.get("SELECT COUNT(*) c FROM sms_log WHERE status = 'failed' AND created_at >= datetime('now','-7 day')").c,
+      optouts: db.get('SELECT COUNT(*) c FROM sms_optouts').c,
+    },
+    // Worth saying out loud: a working key is not the same as deliverable texts in the US.
+    note: 'US business texting also needs A2P 10DLC brand and campaign registration in Twilio. Until that is approved, carriers filter the messages even though Twilio accepts them.',
+  };
+}
+
+function resendShape() {
+  const from = config.get('EMAIL_FROM');
+  const missing = [];
+  if (!config.get('RESEND_API_KEY')) missing.push('RESEND_API_KEY');
+  if (!from) missing.push('EMAIL_FROM');
+  return {
+    provider: 'resend',
+    name: 'Resend',
+    what: 'Sends confirmations, reminders and every other email.',
+    ready: !!config.get('RESEND_API_KEY') && !!from,
+    missing,
+    fields: fields('resend'),
+    activity: {
+      sent_7d: db.get("SELECT COUNT(*) c FROM email_log WHERE status = 'sent' AND created_at >= datetime('now','-7 day')").c,
+      failed_7d: db.get("SELECT COUNT(*) c FROM email_log WHERE status = 'failed' AND created_at >= datetime('now','-7 day')").c,
+      // When there is no key the app logs emails instead of sending them, which is easy to miss.
+      logged_only_7d: db.get("SELECT COUNT(*) c FROM email_log WHERE status = 'logged' AND created_at >= datetime('now','-7 day')").c,
+    },
+    note: from && !/@/.test(from) ? 'The send-from address does not look like an email address.' : null,
+  };
+}
+
+function status() {
+  return { stripe: stripeShape(), twilio: twilioShape(), resend: resendShape(), mask: config.MASK };
+}
+
+// ---------------------------------------------------------------- live checks
+
+function resendRequest(path) {
+  const key = config.get('RESEND_API_KEY');
+  return new Promise((resolve, reject) => {
+    const req = https.request({ host: 'api.resend.com', port: 443, method: 'GET', path, headers: { Authorization: `Bearer ${key}` } }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let json = null;
+        try { json = JSON.parse(text); } catch { /* ignore */ }
+        if (res.statusCode >= 200 && res.statusCode < 300) return resolve(json || {});
+        reject(Object.assign(new Error((json && (json.message || json.name)) || `Resend returned ${res.statusCode}`), { status: res.statusCode }));
+      });
+    });
+    req.on('error', (e) => reject(new Error(`Could not reach Resend: ${e.message}`)));
+    req.setTimeout(15000, () => req.destroy(new Error('Resend timed out')));
+    req.end();
+  });
+}
+
+async function checkStripe() {
+  if (!stripe.configured()) return { ok: false, message: 'No secret key saved yet.' };
+  try {
+    const acct = await stripe.request('GET', '/v1/account', null);
+    const live = !config.get('STRIPE_SECRET_KEY').startsWith('sk_test_');
+    const bits = [];
+    if (acct.business_profile && acct.business_profile.name) bits.push(acct.business_profile.name);
+    if (acct.country) bits.push(acct.country);
+    return {
+      ok: true,
+      message: `Connected to ${bits.join(' · ') || acct.id} in ${live ? 'live' : 'test'} mode.`,
+      details: {
+        account: acct.id,
+        charges_enabled: !!acct.charges_enabled,
+        payouts_enabled: !!acct.payouts_enabled,
+        default_currency: acct.default_currency || null,
+      },
+      // A live key on an account that cannot charge yet is the trap worth naming.
+      warning: live && !acct.charges_enabled ? 'This account cannot take charges yet. Finish Stripe’s onboarding before switching a session live.' : null,
+    };
+  } catch (e) {
+    return { ok: false, message: e.message, status: e.status };
+  }
+}
+
+async function checkTwilio() {
+  if (!config.get('TWILIO_ACCOUNT_SID') || !config.get('TWILIO_AUTH_TOKEN')) return { ok: false, message: 'Account SID and auth token are both needed.' };
+  try {
+    const acct = await sms.account();
+    const out = { ok: true, message: `Connected to ${acct.friendly_name || acct.sid} (${acct.status}).`, details: { status: acct.status, type: acct.type || null } };
+    const number = config.get('TWILIO_FROM_NUMBER');
+    if (number) {
+      const found = await sms.lookupNumber(number);
+      const hit = (found.incoming_phone_numbers || [])[0];
+      if (!hit) out.warning = `${number} is not a number on this Twilio account, so texts will be rejected.`;
+      else if (hit.capabilities && hit.capabilities.sms === false) out.warning = `${number} cannot send SMS.`;
+      else out.message += ` ${number} is ready to send.`;
+    } else if (config.get('TWILIO_MESSAGING_SERVICE_SID')) {
+      out.message += ' Using a Messaging Service.';
+    }
+    if (acct.status && acct.status !== 'active') out.warning = `This Twilio account is ${acct.status}.`;
+    return out;
+  } catch (e) {
+    return { ok: false, message: e.message, status: e.status };
+  }
+}
+
+async function checkResend() {
+  if (!config.get('RESEND_API_KEY')) return { ok: false, message: 'No API key saved yet.' };
+  const from = config.get('EMAIL_FROM') || '';
+  const domain = (from.match(/@([^>\s]+)/) || [])[1] || null;
+  try {
+    const r = await resendRequest('/domains');
+    const list = r.data || r.domains || [];
+    const match = domain ? list.find((d) => String(d.name || '').toLowerCase() === domain.toLowerCase()) : null;
+    if (!domain) return { ok: true, message: 'Key accepted, but no send-from address is set.', warning: 'Set the send-from address so emails come from you.' };
+    if (!list.length) return { ok: true, message: 'Key accepted. No sending domains are set up in Resend yet.', warning: `Add and verify ${domain} in Resend, or emails will not be delivered.` };
+    if (!match) return { ok: true, message: `Key accepted, but ${domain} is not one of your Resend domains (${list.map((d) => d.name).join(', ')}).`, warning: `Either verify ${domain} in Resend or change the send-from address.` };
+    const verified = String(match.status || '').toLowerCase() === 'verified';
+    return {
+      ok: true,
+      message: `Key accepted and ${domain} is ${match.status}.`,
+      details: { domain: match.name, status: match.status, region: match.region || null },
+      warning: verified ? null : `${domain} is not verified yet, so Resend will refuse to send from it.`,
+    };
+  } catch (e) {
+    // A restricted key can send mail but not list domains. That is fine; say so rather than failing.
+    if (e.status === 401 || e.status === 403) return { ok: true, message: 'Key accepted, but it is not allowed to read domains, so verification cannot be checked here.', warning: null };
+    return { ok: false, message: e.message, status: e.status };
+  }
+}
+
+const CHECKS = { stripe: checkStripe, twilio: checkTwilio, resend: checkResend };
+async function check(provider) {
+  const fn = CHECKS[provider];
+  if (!fn) throw new Error('Unknown integration');
+  return { provider, ...(await fn()) };
+}
+
+// ---------------------------------------------------------------- send a test
+
+async function sendTestEmail(business, to) {
+  const r = await sendEmail({
+    to, businessId: business.id, fromName: business.name, replyTo: business.email,
+    subject: `Test email from ${business.name}`,
+    html: layout(business, {
+      heading: 'This is a test',
+      body: '<p>If you are reading this, Resend is connected and sending as you.</p><p>Nothing was sent to any customer.</p>',
+    }),
+  });
+  if (r.status === 'failed') throw new Error(r.error || 'Resend rejected it.');
+  if (r.status === 'logged') throw new Error('No Resend key is active, so the email was only written to the log.');
+  return { ok: true, to, status: r.status };
+}
+
+async function sendTestSms(business, to) {
+  const number = sms.normalizeNumber(to);
+  if (!number) throw new Error('That does not look like a mobile number.');
+  const body = `Test message from ${business.name}. Texting is connected. Reply STOP to opt out.`;
+  const r = await sms.sendSms({ to: number, body });
+  db.run('INSERT INTO sms_log (business_id, direction, to_addr, body, status, provider_sid, segments) VALUES (?,?,?,?,?,?,?)',
+    business.id, 'out', number, `[test] ${body}`, r.status || 'sent', r.sid, r.segments);
+  return { ok: true, to: number, segments: r.segments };
+}
+
+// ---------------------------------------------------------------- the $1 end-to-end test
+
+/**
+ * Prove the whole payment path, webhook included, with one real dollar.
+ *
+ * It deliberately does NOT charge a card from the server: it opens a Stripe Checkout page that the
+ * owner completes with their own card, so no card details ever pass through this app. The point of
+ * the exercise is the part that usually breaks, which is whether the webhook comes back.
+ */
+async function startDiagnosticCharge(business, user, { amountCents = 100 } = {}) {
+  if (!stripe.configured()) throw new Error('Save a Stripe secret key first.');
+  if (!config.get('STRIPE_WEBHOOK_SECRET')) throw new Error('Save the webhook signing secret first, otherwise this test cannot tell you whether the webhook works.');
+  const cents = int(amountCents, 100, 50, 5000);
+  const ref = `diag_${Date.now().toString(36)}`;
+  const session = await stripe.createCheckoutSession({
+    amountCents: cents,
+    currency: 'usd',
+    productName: 'Booklane connection test',
+    description: 'A one-off test payment. Refund it in Stripe once it lands.',
+    customerEmail: user.email,
+    clientReferenceId: ref,
+    // The webhook reads this and records the result instead of trying to create a booking.
+    metadata: { diagnostic: '1', ref, started_by: String(user.id) },
+    successUrl: `${baseUrl()}/app#/settings/integrations?tested=${ref}`,
+    cancelUrl: `${baseUrl()}/app#/settings/integrations?tested=cancelled`,
+    idempotencyKey: ref,
+  });
+  config.note(DIAGNOSTIC_NOTE, {
+    ref, status: 'awaiting_payment', amount: cents / 100,
+    started_at: new Date().toISOString(), started_by: user.email,
+    mode: config.get('STRIPE_SECRET_KEY').startsWith('sk_live_') ? 'live' : 'test',
+  });
+  return { url: session.url, ref, amount: cents / 100 };
+}
+
+/** Called from the Stripe webhook when metadata says this was the connection test. */
+function recordDiagnostic(event, obj) {
+  const prev = config.readNote(DIAGNOSTIC_NOTE) || {};
+  config.note(DIAGNOSTIC_NOTE, {
+    ...prev,
+    ref: (obj.metadata && obj.metadata.ref) || prev.ref || null,
+    status: 'webhook_received',
+    amount: typeof obj.amount_total === 'number' ? obj.amount_total / 100 : prev.amount,
+    payment_intent: typeof obj.payment_intent === 'string' ? obj.payment_intent : (obj.payment_intent && obj.payment_intent.id) || null,
+    event_id: event.id,
+    completed_at: new Date().toISOString(),
+  });
+  return 'connection test recorded';
+}
+
+const lastDiagnostic = () => config.readNote(DIAGNOSTIC_NOTE);
+
+module.exports = {
+  status, check, checkStripe, checkTwilio, checkResend,
+  sendTestEmail, sendTestSms, startDiagnosticCharge, recordDiagnostic, lastDiagnostic, DIAGNOSTIC_NOTE,
+};
