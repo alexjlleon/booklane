@@ -12,13 +12,17 @@
     const lastDay = (m) => { const [y, mo] = m.split('-').map(Number); return new Date(Date.UTC(y, mo, 0)).toISOString().slice(0, 10); };
     const maxMonth = () => { const d = new Date(Date.now() + (opts.maxDaysAhead || 60) * 86400000); return new Intl.DateTimeFormat('en-CA', { timeZone: st.tz, year: 'numeric', month: '2-digit' }).format(d).slice(0, 7); };
 
+    // Sessions pass their own URL so the calendar only shows one market's openings.
+    const slotsUrl = () => opts.slotsUrl || `/api/public/b/${encodeURIComponent(opts.slug)}/e/${encodeURIComponent(opts.eventSlug)}/slots`;
+
     async function load(month) {
-      const key = st.tz + '|' + month;
+      const url = slotsUrl();
+      const key = st.tz + '|' + month + '|' + url;
       if (st.cache[key]) return st.cache[key];
       const from = month === monthOf(today()) ? today() : month + '-01';
       const q = new URLSearchParams({ from, to: lastDay(month), tz: st.tz });
       if (opts.rescheduleToken) q.set('reschedule', opts.rescheduleToken);
-      const data = await api('GET', `/api/public/b/${encodeURIComponent(opts.slug)}/e/${encodeURIComponent(opts.eventSlug)}/slots?${q}`);
+      const data = await api('GET', `${url}${url.includes('?') ? '&' : '?'}${q}`);
       st.cache[key] = data.days || {};
       return st.cache[key];
     }
