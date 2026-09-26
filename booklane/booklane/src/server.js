@@ -8,6 +8,8 @@ const { baseUrl } = require('./lib/util');
 const calendars = require('./services/calendars');
 const L = require('./services/leads');
 const BK = require('./services/bookings');
+const MSG = require('./services/messaging');
+const SESS = require('./services/sessions');
 const db = require('./db');
 
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -44,7 +46,7 @@ app.get('/', (req, res) => {
     ${first ? `<p class="muted small">See a live example: <a href="/b/${first.slug}">/b/${first.slug}</a></p>` : ''}</div></main>` }));
 });
 
-app.get('/app', (req, res) => res.html(page({ title: `${APP_NAME} dashboard`, scripts: ['pricing.js', 'admin-core.js', 'admin-main.js', 'admin-setup.js', 'admin-business.js'], styles: ['app.css', 'admin.css'], bodyClass: 'admin' })));
+app.get('/app', (req, res) => res.html(page({ title: `${APP_NAME} dashboard`, scripts: ['pricing.js', 'admin-core.js', 'admin-main.js', 'admin-setup.js', 'admin-business.js', 'admin-sessions.js', 'admin-messaging.js', 'admin-integrations.js'], styles: ['app.css', 'admin.css'], bodyClass: 'admin' })));
 
 app.get('/oauth/:provider/start', (req, res) => {
   requireAuth(req);
@@ -73,10 +75,20 @@ let jobRunning = false;
 async function runJobs() {
   if (jobRunning) return;
   jobRunning = true;
-  try { await L.processAbandoned(); await BK.sendReminders(); db.run('DELETE FROM sessions WHERE expires_at < ?', Date.now()); } catch (e) { console.error('[jobs]', e); } finally { jobRunning = false; }
+  try {
+    await L.processAbandoned();
+    await BK.sendReminders();
+    await MSG.processDue();
+    SESS.releaseExpiredHolds();
+    db.run('DELETE FROM sessions WHERE expires_at < ?', Date.now());
+  } catch (e) { console.error('[jobs]', e); } finally { jobRunning = false; }
 }
 
 if (require.main === module) {
+  // Optional one-time demo data on a fresh database (Railway: set SEED_DEMO=true for the first deploy)
+  if (process.env.SEED_DEMO === 'true' && !db.get('SELECT 1 FROM businesses LIMIT 1')) {
+    try { require('../scripts/seed').seed(); } catch (e) { console.error('[seed]', e); }
+  }
   const port = Number(process.env.PORT) || 3000;
   http.createServer(app.handler).listen(port, () => {
     console.log(`${APP_NAME} running on ${baseUrl()} (port ${port})`);
