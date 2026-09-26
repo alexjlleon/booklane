@@ -1,24 +1,28 @@
 'use strict';
 const db = require('../db');
 const { esc } = require('./util');
+const config = require('./config');
 
-const FROM = process.env.EMAIL_FROM || 'Booklane <onboarding@resend.dev>';
+// Read at send time, not at load time, so a key saved in the admin screen takes effect immediately.
+const from = () => config.get('EMAIL_FROM') || 'Booklane <onboarding@resend.dev>';
+const apiKey = () => (config.get('RESEND_API_KEY') || '').trim();
 
 async function sendEmail({ to, subject, html, text, attachments, replyTo, businessId, fromName }) {
   const recipients = [].concat(to || []).map((s) => String(s).trim()).filter(Boolean);
   if (!recipients.length) return { status: 'skipped' };
   let status = 'logged', provider = 'log', error = null;
-  const key = process.env.RESEND_API_KEY;
+  const key = apiKey();
   if (key) {
     provider = 'resend';
     try {
-      let from = FROM;
-      if (fromName) { const addr = (FROM.match(/<([^>]+)>/) || [null, FROM])[1]; from = `${fromName.replace(/[<>"]/g, '')} <${addr}>`; }
+      const base = from();
+      let sender = base;
+      if (fromName) { const addr = (base.match(/<([^>]+)>/) || [null, base])[1]; sender = `${fromName.replace(/[<>"]/g, '')} <${addr}>`; }
       const r = await fetch('https://api.resend.com/emails', {
         method: 'POST',
         headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          from, to: recipients, subject, html, text, reply_to: replyTo || undefined,
+          from: sender, to: recipients, subject, html, text, reply_to: replyTo || undefined,
           attachments: (attachments || []).map((a) => ({ filename: a.filename, content: Buffer.from(a.content).toString('base64') })),
         }),
         signal: AbortSignal.timeout(15000),
