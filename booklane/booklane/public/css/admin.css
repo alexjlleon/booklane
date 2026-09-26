@@ -147,3 +147,11 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
   .drawer { padding: 16px; }
   .table-wrap { margin: 0 -20px; }
 }
+
+/* Sessions: order status pills and the payment-setup notice */
+.pill.paid, .pill.not_required { background: #e6f6ee; color: #17744a; }
+.pill.pending { background: #fff4e5; color: #8a4b00; }
+.pill.expired { background: #f3f1f1; color: #8a7f7f; }
+.pill.refunded { background: #ecebff; color: #4633c9; }
+.warn-box { border-color: #f0d9a8; background: #fffaf0; }
+.warn-box h2 { color: #8a5a00; }
