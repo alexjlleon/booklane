@@ -20,7 +20,8 @@ let server, base, hook, hookBase;
 const hookHits = [];
 
 async function req(method, url, body, { cookie, headers = {} } = {}) {
-  const res = await fetch(base + url, { method, headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...(cookie ? { Cookie: cookie } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined, redirect: 'manual' });
+  // Mirror the real admin client: any non-GET declares JSON, even with no body.
+  const res = await fetch(base + url, { method, headers: { ...(method === 'GET' ? {} : { 'Content-Type': 'application/json' }), ...(cookie ? { Cookie: cookie } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined, redirect: 'manual' });
   const text = await res.text();
   let data; try { data = JSON.parse(text); } catch { data = text; }
   return { status: res.status, data, cookie: (res.headers.get('set-cookie') || '').split(';')[0] };
@@ -529,4 +530,801 @@ test('short CTA: the embed passes an answer through and the lead is saved before
   assert.equal(JSON.parse(row.answers).event_date, '2027-08-21');
   assert.equal(row.phone, '713-555-0199');
   assert.equal(row.first_name, null, 'a CTA lead is useful before they give a name');
+});
+
+// ---------------------------------------------------------------------------
+// Sellable sessions: markets, the two branches, slot holds and Stripe
+// ---------------------------------------------------------------------------
+const crypto = require('node:crypto');
+const stripeLib = require('../src/lib/stripe');
+
+const WHSEC = 'whsec_test_secret';
+let checkoutCalls = [];
+
+function signWebhook(bodyStr, secret = WHSEC, tsOffset = 0) {
+  const ts = Math.floor(Date.now() / 1000) + tsOffset;
+  const sig = crypto.createHmac('sha256', secret).update(`${ts}.${bodyStr}`).digest('hex');
+  return `t=${ts},v1=${sig}`;
+}
+const postWebhook = (event, header) => req('POST', '/api/public/stripe/webhook', event, { headers: { 'Stripe-Signature': header === undefined ? signWebhook(JSON.stringify(event)) : header } });
+
+// Stub only the two calls that would leave the machine. Everything else is the real code path.
+function stubStripe() {
+  process.env.STRIPE_SECRET_KEY = 'sk_test_stubbed';
+  process.env.STRIPE_WEBHOOK_SECRET = WHSEC;
+  checkoutCalls = [];
+  stripeLib.createCheckoutSession = async (opts) => {
+    checkoutCalls.push(opts);
+    return { id: `cs_test_${checkoutCalls.length}`, url: `https://checkout.stripe.test/${checkoutCalls.length}` };
+  };
+  stripeLib.retrieveCheckoutSession = async (id) => ({ id, status: 'open', payment_status: 'unpaid' });
+}
+
+let sessSlug = 'engagement-session';
+let markets = [];
+
+test('seeding creates the five markets, the four sessions and the album flow', async () => {
+  stubStripe();
+  const r = await req('POST', '/api/admin/sessions/seed', {}, { cookie: ownerCookie });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.deepEqual(r.data.calendars, ['Houston', 'Austin', 'San Antonio', 'Dallas / Fort Worth', 'Phoenix', 'Album Designer']);
+  assert.ok(r.data.products.includes('Engagement Session'));
+  assert.ok(r.data.products.includes('Photo Album'));
+
+  // Running it again must not duplicate anything.
+  const again = await req('POST', '/api/admin/sessions/seed', {}, { cookie: ownerCookie });
+  assert.deepEqual(again.data.calendars, []);
+  assert.deepEqual(again.data.products, []);
+
+  const list = await req('GET', '/api/admin/sessions', null, { cookie: ownerCookie });
+  const eng = list.data.sessions.find((x) => x.slug === sessSlug);
+  assert.equal(eng.price_cents, 49500, 'engagement session is $495');
+  assert.equal(eng.calendar_ids.length, 5, 'offered in all five markets');
+  const album = list.data.sessions.find((x) => x.slug === 'photo-album');
+  assert.equal(album.calendar_ids.length, 1, 'the album books against one designer');
+
+  markets = (await req('GET', '/api/admin/session-calendars', null, { cookie: ownerCookie })).data;
+  assert.equal(markets.filter((m) => m.kind === 'market').length, 5);
+  assert.ok(markets.every((m) => m.has_hours), 'every calendar starts with hours');
+});
+
+test('the public session page offers the city choice and the price', async () => {
+  const r = await req('GET', `/api/public/b/${bizSlug}/s/${sessSlug}`);
+  assert.equal(r.status, 200);
+  const s = r.data.session;
+  assert.equal(s.price_display, '$495');
+  assert.equal(s.calendars.length, 5);
+  assert.match(s.labels.choose_label, /city/i);
+  assert.equal(s.payable, true, 'Stripe is stubbed in, so it is buyable');
+
+  // A single-calendar session hides the choice, which is what makes the album flow short.
+  const album = await req('GET', `/api/public/b/${bizSlug}/s/photo-album`);
+  assert.equal(album.data.session.calendars.length, 1);
+
+  const page = await fetch(`${base}/b/${bizSlug}/s/${sessSlug}`).then((x) => x.text());
+  assert.match(page, /session\.js/, 'the page loads the session flow');
+});
+
+async function firstSlot(slug, calendar, skip = 0) {
+  const from = T.addDays(T.utcToZoned(Date.now(), 'America/Chicago').date, 2);
+  const r = await req('GET', `/api/public/b/${bizSlug}/s/${slug}/slots?calendar=${calendar}&from=${from}&to=${T.addDays(from, 25)}&tz=America/Chicago`);
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const days = Object.keys(r.data.days).filter((d) => r.data.days[d].length).sort();
+  assert.ok(days.length > skip, 'the market has open days');
+  return { day: days[skip], start: r.data.days[days[skip]][0] };
+}
+
+test('each market shows only its own calendar', async () => {
+  const hou = await firstSlot(sessSlug, 'houston');
+  const contact = { first_name: 'Dana', last_name: 'Ruiz', email: 'dana@example.com', phone: '8325551234' };
+  const booked = await req('POST', `/api/public/b/${bizSlug}/s/${sessSlug}/claim`,
+    { calendar: 'houston', start: hou.start, timezone: 'America/Chicago', contact, booking_number: ' wu-1234 ' });
+  assert.equal(booked.status, 200, JSON.stringify(booked.data));
+
+  // The same instant is still free in Austin: separate calendars, separate diaries.
+  const austin = await req('GET', `/api/public/b/${bizSlug}/s/${sessSlug}/slots?calendar=austin&from=${hou.day}&to=${hou.day}&tz=America/Chicago`);
+  assert.ok((austin.data.days[hou.day] || []).includes(hou.start), 'booking Houston must not block Austin');
+
+  // But Houston itself no longer offers it.
+  const again = await req('GET', `/api/public/b/${bizSlug}/s/${sessSlug}/slots?calendar=houston&from=${hou.day}&to=${hou.day}&tz=America/Chicago`);
+  assert.ok(!(again.data.days[hou.day] || []).includes(hou.start), 'the booked time is gone from Houston');
+
+  // The booking number is recorded, upper-cased and trimmed, and flagged for matching.
+  const order = db.get("SELECT * FROM orders WHERE already_booked = 1 ORDER BY id DESC");
+  assert.equal(order.booking_number, 'WU-1234');
+  assert.equal(order.status, 'not_required');
+  assert.equal(order.amount_cents, 0);
+  const bk = db.get('SELECT * FROM bookings WHERE id = ?', order.booking_id);
+  assert.match(JSON.parse(bk.answers).payment, /already booked/i);
+  assert.equal(JSON.parse(bk.answers).location, 'Houston');
+});
+
+test('a missing booking number is refused when it is required', async () => {
+  const hou = await firstSlot(sessSlug, 'houston', 1);
+  const r = await req('POST', `/api/public/b/${bizSlug}/s/${sessSlug}/claim`,
+    { calendar: 'houston', start: hou.start, timezone: 'America/Chicago', contact: { first_name: 'No', last_name: 'Number', email: 'nn@example.com', phone: '8325550000' } });
+  assert.equal(r.status, 422);
+  assert.ok(r.data.details.booking_number, 'the field is called out by name');
+});
+
+let orderToken, heldStart, heldDay;
+
+test('buying holds the slot, and a second buyer cannot take it', async () => {
+  const slot = await firstSlot(sessSlug, 'phoenix');
+  heldStart = slot.start; heldDay = slot.day;
+  const contact = { first_name: 'Sam', last_name: 'Ortiz', email: 'sam@example.com', phone: '6025551111' };
+  const r = await req('POST', `/api/public/b/${bizSlug}/s/${sessSlug}/checkout`,
+    { calendar: 'phoenix', start: heldStart, timezone: 'America/Phoenix', contact });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.match(r.data.checkout_url, /^https:\/\/checkout\.stripe\.test\//);
+  orderToken = r.data.order_token;
+
+  // Stripe was asked for the right amount, in cents, with the order token attached.
+  const call = checkoutCalls[checkoutCalls.length - 1];
+  assert.equal(call.amountCents, 49500);
+  assert.equal(call.metadata.order_token, orderToken);
+  assert.match(call.productName, /Engagement Session .* Phoenix/);
+  assert.match(call.successUrl, new RegExp(`/session/${orderToken}`));
+
+  // Nothing is booked yet, but the time is off the market.
+  const order = db.get('SELECT * FROM orders WHERE token = ?', orderToken);
+  assert.equal(order.status, 'pending');
+  assert.equal(order.booking_id, null);
+  const slots = await req('GET', `/api/public/b/${bizSlug}/s/${sessSlug}/slots?calendar=phoenix&from=${heldDay}&to=${heldDay}&tz=America/Phoenix`);
+  assert.ok(!(slots.data.days[heldDay] || []).includes(heldStart), 'a held slot is not offered to anyone else');
+
+  const second = await req('POST', `/api/public/b/${bizSlug}/s/${sessSlug}/checkout`,
+    { calendar: 'phoenix', start: heldStart, timezone: 'America/Phoenix', contact: { first_name: 'Other', last_name: 'Buyer', email: 'other@example.com', phone: '6025552222' } });
+  assert.equal(second.status, 409, 'two people must never buy the same time');
+});
+
+test('nobody can skip payment by claiming a priced session is free', async () => {
+  const slot = await firstSlot(sessSlug, 'austin');
+  const r = await req('POST', `/api/public/b/${bizSlug}/s/${sessSlug}/claim`,
+    { calendar: 'austin', start: slot.start, timezone: 'America/Chicago', already_booked: false,
+      contact: { first_name: 'Free', last_name: 'Rider', email: 'free@example.com', phone: '5125550000' } });
+  assert.equal(r.status, 402, 'the free path is refused on a session that costs money');
+  assert.equal(db.get("SELECT COUNT(*) c FROM orders WHERE customer_email = 'free@example.com'").c, 0);
+});
+
+test('a signed webhook books the held slot, and a replay changes nothing', async () => {
+  const order = db.get('SELECT * FROM orders WHERE token = ?', orderToken);
+  const event = { id: 'evt_book_1', type: 'checkout.session.completed', data: { object: {
+    id: order.provider_session_id, client_reference_id: orderToken, payment_status: 'paid', amount_total: 49500, payment_intent: 'pi_test_1',
+  } } };
+
+  const ok = await postWebhook(event);
+  assert.equal(ok.status, 200, JSON.stringify(ok.data));
+  assert.equal(ok.data.result, 'booked');
+
+  const after = db.get('SELECT * FROM orders WHERE token = ?', orderToken);
+  assert.equal(after.status, 'paid');
+  assert.ok(after.booking_id, 'the booking exists');
+  assert.equal(after.provider_payment_intent, 'pi_test_1');
+  const bk = db.get('SELECT * FROM bookings WHERE id = ?', after.booking_id);
+  assert.equal(bk.start_utc, heldStart);
+  assert.match(JSON.parse(bk.answers).payment, /\$495/);
+  assert.equal(bk.email, 'sam@example.com');
+
+  const replay = await postWebhook(event);
+  assert.equal(replay.data.result, 'duplicate', 'Stripe redelivers; we must not double-book');
+  assert.equal(db.get("SELECT COUNT(*) c FROM bookings WHERE start_utc = ? AND host_user_id = ?", heldStart, bk.host_user_id).c, 1);
+
+  // The customer's return page now knows where to send them.
+  const poll = await req('GET', `/api/public/orders/${orderToken}`);
+  assert.equal(poll.data.order.status, 'paid');
+  assert.match(poll.data.order.redirect, /^\/booking\//);
+});
+
+test('a webhook with a bad, stale or missing signature is rejected outright', async () => {
+  const body = { id: 'evt_forged', type: 'checkout.session.completed', data: { object: { client_reference_id: orderToken, payment_status: 'paid' } } };
+  const str = JSON.stringify(body);
+
+  const forged = await postWebhook(body, `t=${Math.floor(Date.now() / 1000)},v1=${'0'.repeat(64)}`);
+  assert.equal(forged.status, 400, 'a forged signature must not be trusted');
+
+  const wrongSecret = await postWebhook(body, signWebhook(str, 'whsec_not_ours'));
+  assert.equal(wrongSecret.status, 400);
+
+  const stale = await postWebhook(body, signWebhook(str, WHSEC, -4000));
+  assert.equal(stale.status, 400, 'an old timestamp must not be replayable');
+
+  const none = await postWebhook(body, '');
+  assert.equal(none.status, 400);
+
+  // None of those were recorded, so a later genuine delivery still works.
+  assert.equal(db.get("SELECT COUNT(*) c FROM provider_events WHERE event_id = 'evt_forged'").c, 0);
+});
+
+test('an abandoned checkout gives the slot back', async () => {
+  const slot = await firstSlot(sessSlug, 'san-antonio');
+  const r = await req('POST', `/api/public/b/${bizSlug}/s/${sessSlug}/checkout`,
+    { calendar: 'san-antonio', start: slot.start, timezone: 'America/Chicago', contact: { first_name: 'Gone', last_name: 'Away', email: 'gone@example.com', phone: '2105550000' } });
+  assert.equal(r.status, 200);
+  const token = r.data.order_token;
+
+  const held = await req('GET', `/api/public/b/${bizSlug}/s/${sessSlug}/slots?calendar=san-antonio&from=${slot.day}&to=${slot.day}&tz=America/Chicago`);
+  assert.ok(!(held.data.days[slot.day] || []).includes(slot.start));
+
+  // Stripe tells us the page expired.
+  const order = db.get('SELECT * FROM orders WHERE token = ?', token);
+  const out = await postWebhook({ id: 'evt_exp_1', type: 'checkout.session.expired', data: { object: { id: order.provider_session_id, client_reference_id: token } } });
+  assert.equal(out.data.result, 'hold released');
+  assert.equal(db.get('SELECT status FROM orders WHERE token = ?', token).status, 'expired');
+
+  const back = await req('GET', `/api/public/b/${bizSlug}/s/${sessSlug}/slots?calendar=san-antonio&from=${slot.day}&to=${slot.day}&tz=America/Chicago`);
+  assert.ok((back.data.days[slot.day] || []).includes(slot.start), 'the time is on sale again');
+});
+
+test('a free session books with no card and no booking number', async () => {
+  const create = await req('POST', '/api/admin/sessions', {
+    name: 'Complimentary Consult', price_cents: 0, duration_min: 30,
+    calendar_ids: [markets.find((m) => m.slug === 'houston').id],
+  }, { cookie: ownerCookie });
+  assert.equal(create.status, 200, JSON.stringify(create.data));
+  const slug = create.data.slug;
+
+  const slot = await firstSlot(slug, 'houston');
+  const r = await req('POST', `/api/public/b/${bizSlug}/s/${slug}/claim`,
+    { calendar: 'houston', start: slot.start, timezone: 'America/Chicago', already_booked: false,
+      contact: { first_name: 'Free', last_name: 'Session', email: 'freebie@example.com', phone: '7135550000' } });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const order = db.get("SELECT * FROM orders WHERE customer_email = 'freebie@example.com'");
+  assert.equal(order.already_booked, 0);
+  assert.equal(order.amount_cents, 0);
+  assert.equal(JSON.parse(db.get('SELECT answers FROM bookings WHERE id = ?', order.booking_id).answers).payment, 'No charge');
+});
+
+test('the orders screen and its export show the money and the booking numbers', async () => {
+  const r = await req('GET', '/api/admin/orders', null, { cookie: ownerCookie });
+  assert.equal(r.status, 200);
+  assert.ok(r.data.summary.paid_total >= 495, 'the paid engagement session is counted');
+  assert.ok(r.data.rows.some((x) => x.booking_number === 'WU-1234'));
+  assert.ok(r.data.rows.some((x) => x.status === 'paid' && x.amount_display === '$495'));
+  assert.equal(r.data.summary.paid_but_unbooked, 0, 'nothing paid is left off a calendar');
+
+  const paidOnly = await req('GET', '/api/admin/orders?status=paid', null, { cookie: ownerCookie });
+  assert.ok(paidOnly.data.rows.every((x) => x.status === 'paid'));
+
+  const csv = await fetch(`${base}/api/admin/orders/export.csv`, { headers: { Cookie: ownerCookie } }).then((x) => x.text());
+  assert.match(csv, /^created_at,status,product_name/);
+  assert.match(csv, /WU-1234/);
+});
+
+test('session pages and admin endpoints are closed to outsiders', async () => {
+  // A stranger cannot list or change another business's sessions.
+  const anon = await req('GET', '/api/admin/sessions');
+  assert.equal(anon.status, 401);
+  const anonCal = await req('POST', '/api/admin/session-calendars', { name: 'Sneaky' });
+  assert.equal(anonCal.status, 401);
+
+  // Keys are never handed back to the browser.
+  const pay = await req('GET', '/api/admin/payments', null, { cookie: ownerCookie });
+  assert.equal(pay.data.configured, true);
+  assert.equal(pay.data.mode, 'test');
+  assert.ok(!JSON.stringify(pay.data).includes('sk_test'), 'the secret key must never reach the client');
+  assert.ok(!JSON.stringify(pay.data).includes(WHSEC));
+
+  // An unknown or switched-off session is a 404, not a hint.
+  assert.equal((await req('GET', `/api/public/b/${bizSlug}/s/not-a-session`)).status, 404);
+});
+
+test('markets and sessions with real bookings cannot be deleted by accident', async () => {
+  const cal = markets.find((m) => m.slug === 'houston');
+  const delCal = await req('DELETE', `/api/admin/session-calendars/${cal.id}`, null, { cookie: ownerCookie });
+  assert.equal(delCal.status, 409, 'Houston has upcoming sessions');
+  assert.match(delCal.data.error, /Switch it off/);
+
+  const eng = (await req('GET', '/api/admin/sessions', null, { cookie: ownerCookie })).data.sessions.find((x) => x.slug === sessSlug);
+  const delSess = await req('DELETE', `/api/admin/sessions/${eng.id}`, null, { cookie: ownerCookie });
+  assert.equal(delSess.status, 409, 'it has a paid order attached');
+});
+
+test('a bodyless DELETE reaches the handler instead of being turned away as non-JSON', async () => {
+  // This guard used to reject every delete in the admin UI, not just session ones.
+  const cal = await req('POST', '/api/admin/session-calendars', { name: 'Temporary Market' }, { cookie: ownerCookie });
+  assert.equal(cal.status, 200, JSON.stringify(cal.data));
+  const gone = await req('DELETE', `/api/admin/session-calendars/${cal.data.id}`, null, { cookie: ownerCookie });
+  assert.equal(gone.status, 200, JSON.stringify(gone.data));
+  assert.equal(db.get('SELECT 1 x FROM calendar_profiles WHERE id = ?', cal.data.id), undefined);
+
+  const dates = await req('POST', '/api/admin/blocked-dates', { dates: '2031-04-04' }, { cookie: ownerCookie });
+  assert.equal(dates.data.added, 1);
+  const row = db.get("SELECT id FROM blocked_dates WHERE date = '2031-04-04'");
+  assert.equal((await req('DELETE', `/api/admin/blocked-dates/${row.id}`, null, { cookie: ownerCookie })).status, 200);
+});
+
+// ---------------------------------------------------------------------------
+// Scheduled emails and texts
+// ---------------------------------------------------------------------------
+const MSG = require('../src/services/messaging');
+const smsLib = require('../src/lib/sms');
+const { resetRateLimits } = require('../src/lib/security');
+// These tests book more times in a few seconds than a real visitor would in a week.
+const freshLimits = () => resetRateLimits();
+
+let sentTexts = [];
+function stubTwilio() {
+  process.env.TWILIO_ACCOUNT_SID = 'AC' + '0'.repeat(32);
+  process.env.TWILIO_AUTH_TOKEN = 'twilio_test_token';
+  process.env.TWILIO_FROM_NUMBER = '+18325550000';
+  sentTexts = [];
+  smsLib.sendSms = async ({ to, body }) => {
+    sentTexts.push({ to, body });
+    return { sid: `SM${sentTexts.length}`, status: 'queued', segments: smsLib.segmentInfo(body).segments, to };
+  };
+}
+
+const mkAutomation = (patch = {}) => req('POST', '/api/admin/automations', {
+  name: 'Test rule', channel: 'email', trigger: 'before', offset_min: 1440,
+  subject: 'See you soon', body_html: 'Hi {{first_name}}, your {{session}} is {{when}}.', active: true, ...patch,
+}, { cookie: ownerCookie });
+
+test('an automation fires for a matching booking and skips one that does not match', async () => {
+  freshLimits(); stubTwilio();
+  const ets = (await req('GET', '/api/admin/event-types', null, { cookie: ownerCookie })).data.event_types;
+  const engagement = ets.find((e) => e.slug === 'engagement-session');
+  const discovery = ets.find((e) => e.slug === 'discovery-call');
+
+  // Scoped to engagement sessions only.
+  const a = await mkAutomation({ name: 'Engagement only', event_type_ids: [engagement.id], offset_min: 120 });
+  assert.equal(a.status, 200, JSON.stringify(a.data));
+  assert.equal(a.data.timing, '2 hours before the appointment');
+
+  const slot = await firstSlot('engagement-session', 'austin');
+  const booked = await req('POST', `/api/public/b/${bizSlug}/s/engagement-session/claim`,
+    { calendar: 'austin', start: slot.start, timezone: 'America/Chicago', booking_number: 'WU-9001',
+      contact: { first_name: 'Match', last_name: 'Me', email: 'match@example.com', phone: '5125559001' } });
+  assert.equal(booked.status, 200, JSON.stringify(booked.data));
+
+  const queued = db.all("SELECT * FROM scheduled_messages WHERE automation_id = ?", a.data.id);
+  assert.equal(queued.length, 1, 'one email queued for the matching session');
+  assert.equal(queued[0].to_addr, 'match@example.com');
+  // Due two hours before the appointment.
+  assert.equal(queued[0].send_after, Date.parse(slot.start) - 120 * 60000);
+
+  // A discovery call must not pick it up.
+  const day = nextWeekday(4);
+  const slots = await req('GET', `/api/public/b/${bizSlug}/e/discovery-call/slots?from=${day}&to=${day}&tz=America/Chicago`);
+  const call = await req('POST', `/api/public/b/${bizSlug}/e/discovery-call/book`,
+    { start: slots.data.days[day][0], timezone: 'America/Chicago', contact: { first_name: 'Other', last_name: 'Type', email: 'other@example.com', phone: '5125559002' } });
+  assert.equal(call.status, 200, JSON.stringify(call.data));
+  assert.equal(db.all('SELECT * FROM scheduled_messages WHERE automation_id = ?', a.data.id).length, 1, 'the other consultation type was skipped');
+  assert.equal(discovery.id !== engagement.id, true);
+});
+
+test('conditions can key off the services someone showed interest in', async () => {
+  freshLimits();
+  const a = await mkAutomation({ name: 'Photo booth follow-up', trigger: 'after', offset_min: 60, service_match: ['photo booth'] });
+  const day = nextWeekday(5);
+  const slots = await req('GET', `/api/public/b/${bizSlug}/e/discovery-call/slots?from=${day}&to=${day}&tz=America/Chicago`);
+
+  // Interested in a photo booth: should match.
+  const yes = await req('POST', `/api/public/b/${bizSlug}/e/discovery-call/book`,
+    { start: slots.data.days[day][0], timezone: 'America/Chicago', answers: { services: ['DJ / MC', 'Photo Booth (3 hours)'] },
+      contact: { first_name: 'Booth', last_name: 'Fan', email: 'booth@example.com', phone: '7135551000' } });
+  assert.equal(yes.status, 200, JSON.stringify(yes.data));
+
+  // Interested in something else: should not.
+  const no = await req('POST', `/api/public/b/${bizSlug}/e/discovery-call/book`,
+    { start: slots.data.days[day][1], timezone: 'America/Chicago', answers: { services: ['Uplighting'] },
+      contact: { first_name: 'Light', last_name: 'Only', email: 'light@example.com', phone: '7135551001' } });
+  assert.equal(no.status, 200, JSON.stringify(no.data));
+
+  const rows = db.all('SELECT to_addr FROM scheduled_messages WHERE automation_id = ?', a.data.id).map((r) => r.to_addr);
+  assert.deepEqual(rows, ['booth@example.com'], 'matched on a substring of the service name, and only that one');
+});
+
+test('texts wait until 8am in the customer\'s own timezone', async () => {
+  // 4am in Phoenix is inside quiet hours; the same instant is 7am in New York, also too early,
+  // so both must be pushed to 8am local rather than fired at dawn.
+  const at4amPhoenix = T.zonedToUtc(T.addDays(T.utcToZoned(Date.now(), 'America/Phoenix').date, 3), 4 * 60, 'America/Phoenix');
+  const held = MSG.holdForQuietHours(at4amPhoenix, 'America/Phoenix');
+  assert.equal(T.utcToZoned(held, 'America/Phoenix').minutes, 8 * 60, 'moved to 8am Phoenix time');
+
+  const at10pm = T.zonedToUtc(T.addDays(T.utcToZoned(Date.now(), 'America/Chicago').date, 3), 22 * 60, 'America/Chicago');
+  const pushed = MSG.holdForQuietHours(at10pm, 'America/Chicago');
+  const z = T.utcToZoned(pushed, 'America/Chicago');
+  assert.equal(z.minutes, 8 * 60);
+  assert.equal(z.date, T.addDays(T.utcToZoned(at10pm, 'America/Chicago').date, 1), 'a 10pm message waits for the morning');
+
+  // Midday is left exactly where it is.
+  const noon = T.zonedToUtc(T.addDays(T.utcToZoned(Date.now(), 'America/Chicago').date, 3), 12 * 60, 'America/Chicago');
+  assert.equal(MSG.holdForQuietHours(noon, 'America/Chicago'), noon);
+});
+
+test('a text goes out once, with merge fields filled in, and never twice', async () => {
+  freshLimits(); stubTwilio();
+  const a = await mkAutomation({ name: 'Morning of', channel: 'sms', trigger: 'before', offset_min: 0,
+    sms_body: 'Morning {{first_name}}! Today is your {{session}} at {{time}} in {{market}}. Reply here if you need us. - {{business_name}}' });
+  assert.equal(a.status, 200, JSON.stringify(a.data));
+
+  const slot = await firstSlot('engagement-session', 'dallas-fort-worth');
+  const booked = await req('POST', `/api/public/b/${bizSlug}/s/engagement-session/claim`,
+    { calendar: 'dallas-fort-worth', start: slot.start, timezone: 'America/Chicago', booking_number: 'WU-9100',
+      contact: { first_name: 'Tess', last_name: 'Tanner', email: 'tess@example.com', phone: '2145559100' } });
+  assert.equal(booked.status, 200, JSON.stringify(booked.data));
+
+  const row = db.get('SELECT * FROM scheduled_messages WHERE automation_id = ?', a.data.id);
+  assert.equal(row.channel, 'sms');
+  assert.equal(row.to_addr, '+12145559100', 'the number was normalised for the carrier');
+
+  // Make it due and run the worker.
+  db.run('UPDATE scheduled_messages SET send_after = ? WHERE id = ?', Date.now() - 1000, row.id);
+  const first = await MSG.processDue();
+  assert.equal(first.sent, 1, JSON.stringify(first));
+  assert.equal(sentTexts.length, 1);
+  assert.match(sentTexts[0].body, /^Morning Tess! Today is your Engagement Session at /);
+  assert.match(sentTexts[0].body, /in Dallas \/ Fort Worth\./);
+  assert.ok(!sentTexts[0].body.includes('{{'), 'no unreplaced placeholders reach a customer');
+
+  // The worker running again must not resend it.
+  const second = await MSG.processDue();
+  assert.equal(second.sent, 0);
+  assert.equal(sentTexts.length, 1, 'a second job tick must not send a duplicate');
+  assert.equal(db.get('SELECT status FROM scheduled_messages WHERE id = ?', row.id).status, 'sent');
+});
+
+test('replying STOP stops every future text, and the signature is checked first', async () => {
+  freshLimits(); stubTwilio();
+  const a = await mkAutomation({ name: 'Post-shoot text', channel: 'sms', trigger: 'after', offset_min: 120, sms_body: 'Thanks {{first_name}}!' });
+  const slot = await firstSlot('engagement-session', 'houston', 2);
+  await req('POST', `/api/public/b/${bizSlug}/s/engagement-session/claim`,
+    { calendar: 'houston', start: slot.start, timezone: 'America/Chicago', booking_number: 'WU-9200',
+      contact: { first_name: 'Quiet', last_name: 'Please', email: 'quiet@example.com', phone: '7135559200' } });
+  const queued = db.get("SELECT * FROM scheduled_messages WHERE automation_id = ? AND to_addr = '+17135559200'", a.data.id);
+  assert.ok(queued, 'the follow-up text was queued');
+
+  const params = { From: '+17135559200', To: '+18325550000', Body: 'STOP', MessageSid: 'SM_stop_1' };
+  const form = new URLSearchParams(params).toString();
+  const post = (sig) => fetch(`${base}/api/public/sms/inbound`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...(sig === null ? {} : { 'X-Twilio-Signature': sig }) }, body: form });
+
+  // A forged STOP must be refused: otherwise anyone could silence our messages to a real customer.
+  const forged = await post('Zm9yZ2VkIHNpZ25hdHVyZQ==');
+  assert.equal(forged.status, 403);
+  const unsigned = await post(null);
+  assert.equal(unsigned.status, 403);
+  assert.equal(db.get("SELECT COUNT(*) c FROM sms_optouts WHERE phone = '+17135559200'").c, 0, 'nothing recorded from a forged request');
+
+  // Now sign it the way Twilio does.
+  const crypto2 = require('node:crypto');
+  const url = `${base}/api/public/sms/inbound`;
+  const data = Object.keys(params).sort().reduce((acc, k) => acc + k + params[k], url);
+  const good = crypto2.createHmac('sha1', process.env.TWILIO_AUTH_TOKEN).update(Buffer.from(data, 'utf8')).digest('base64');
+  const real = await post(good);
+  assert.equal(real.status, 200);
+  assert.equal(real.headers.get('x-booklane-action'), 'opted_out');
+
+  // Recorded against the one business that actually texted them, not every tenant in the database.
+  assert.equal(db.get("SELECT COUNT(*) c FROM sms_optouts WHERE phone = '+17135559200'").c, 1);
+  assert.equal(db.get("SELECT business_id FROM sms_optouts WHERE phone = '+17135559200'").business_id, 1);
+  assert.equal(db.get('SELECT status FROM scheduled_messages WHERE id = ?', queued.id).status, 'cancelled', 'the pending text was pulled');
+
+  // And a new booking for that number queues no texts at all.
+  sentTexts = [];
+  const slot2 = await firstSlot('engagement-session', 'houston', 3);
+  await req('POST', `/api/public/b/${bizSlug}/s/engagement-session/claim`,
+    { calendar: 'houston', start: slot2.start, timezone: 'America/Chicago', booking_number: 'WU-9201',
+      contact: { first_name: 'Quiet', last_name: 'Please', email: 'quiet2@example.com', phone: '713-555-9200' } });
+  assert.equal(db.get("SELECT COUNT(*) c FROM scheduled_messages WHERE to_addr = '+17135559200' AND status = 'queued'").c, 0,
+    'someone who said STOP is never queued again');
+
+  // Texting START puts them back.
+  const startParams = { ...params, Body: 'START', MessageSid: 'SM_start_1' };
+  const startForm = new URLSearchParams(startParams).toString();
+  const sData = Object.keys(startParams).sort().reduce((acc, k) => acc + k + startParams[k], url);
+  const sSig = crypto2.createHmac('sha1', process.env.TWILIO_AUTH_TOKEN).update(Buffer.from(sData, 'utf8')).digest('base64');
+  const back = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Twilio-Signature': sSig }, body: startForm });
+  assert.equal(back.headers.get('x-booklane-action'), 'opted_in');
+  assert.equal(db.get("SELECT COUNT(*) c FROM sms_optouts WHERE phone = '+17135559200'").c, 0);
+});
+
+test('cancelling a booking pulls its pending messages; moving it re-times them', async () => {
+  freshLimits(); stubTwilio();
+  const a = await mkAutomation({ name: 'Day before', trigger: 'before', offset_min: 1440, subject: 'Tomorrow', body_html: 'See you tomorrow, {{first_name}}.' });
+  const day = nextWeekday(6);
+  const slots = await req('GET', `/api/public/b/${bizSlug}/e/discovery-call/slots?from=${day}&to=${day}&tz=America/Chicago`);
+  const bk = await req('POST', `/api/public/b/${bizSlug}/e/discovery-call/book`,
+    { start: slots.data.days[day][0], timezone: 'America/Chicago', contact: { first_name: 'Move', last_name: 'Me', email: 'move@example.com', phone: '7135552000' } });
+  assert.equal(bk.status, 200, JSON.stringify(bk.data));
+
+  let row = db.get("SELECT * FROM scheduled_messages WHERE automation_id = ? AND to_addr = 'move@example.com'", a.data.id);
+  assert.ok(row);
+  assert.equal(row.send_after, Date.parse(slots.data.days[day][0]) - 1440 * 60000);
+
+  // Move it: the old reminder is stale and must be replaced, not left pointing at the old time.
+  const later = slots.data.days[day][3];
+  const moved = await req('POST', `/api/public/bookings/${bk.data.token}/reschedule`, { start: later, timezone: 'America/Chicago' });
+  assert.equal(moved.status, 200, JSON.stringify(moved.data));
+  const live = db.all("SELECT * FROM scheduled_messages WHERE automation_id = ? AND to_addr = 'move@example.com' AND status = 'queued'", a.data.id);
+  assert.equal(live.length, 1, 'exactly one reminder, not two');
+  assert.equal(live[0].send_after, Date.parse(later) - 1440 * 60000, 're-timed to the new appointment');
+
+  // Cancel it: nothing should still be waiting to go out.
+  const off = await req('POST', `/api/public/bookings/${bk.data.token}/cancel`, { reason: 'plans changed' });
+  assert.equal(off.status, 200, JSON.stringify(off.data));
+  assert.equal(db.get("SELECT COUNT(*) c FROM scheduled_messages WHERE booking_id = ? AND status = 'queued'", row.booking_id).c, 0);
+  assert.equal(db.get('SELECT status FROM scheduled_messages WHERE id = ?', live[0].id).status, 'cancelled');
+});
+
+test('preview fills merge fields, counts SMS segments and flags a typo', async () => {
+  const r = await req('POST', '/api/admin/automations/preview', {
+    subject: 'Your {{session}}',
+    body_html: 'Hi {{first_name}}, see you {{when}} at {{location}}. Ask for {{frist_name}}.',
+    sms_body: 'Hi {{first_name|there}}, your {{session}} is {{time}}.',
+    channel: 'both', trigger: 'before', offset_min: 2880,
+  }, { cookie: ownerCookie });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.deepEqual(r.data.unknown_variables, ['frist_name'], 'a misspelt field is called out rather than shipped');
+  assert.ok(!r.data.sms_text.includes('{{'));
+  assert.equal(r.data.sms.encoding, 'GSM-7');
+  assert.equal(r.data.sms.segments, 1);
+  assert.equal(r.data.due_example, '2 days before the appointment');
+  assert.match(r.data.subject, /Engagement Session|Discovery call/);
+
+  // The fallback form fills in when the value is missing.
+  const noName = await req('POST', '/api/admin/automations/preview', { sms_body: 'Hi {{nickname|there}}!' }, { cookie: ownerCookie });
+  assert.equal(noName.data.sms_text, 'Hi there!');
+
+  // A curly apostrophe changes the encoding, which changes the bill.
+  const uni = await req('POST', '/api/admin/automations/preview', { sms_body: 'It’s tomorrow!' }, { cookie: ownerCookie });
+  assert.equal(uni.data.sms.encoding, 'UCS-2');
+});
+
+test('an automation cannot be switched on until it has something to send', async () => {
+  const noBody = await req('POST', '/api/admin/automations', { name: 'Empty', channel: 'email', trigger: 'before', active: true }, { cookie: ownerCookie });
+  assert.equal(noBody.status, 422);
+  assert.ok(noBody.data.details.body_html);
+
+  const noText = await req('POST', '/api/admin/automations', { name: 'No text', channel: 'sms', trigger: 'after', active: true, sms_body: '' }, { cookie: ownerCookie });
+  assert.equal(noText.status, 422);
+
+  // Saved switched off, it is allowed to be incomplete while it is being written.
+  const draft = await req('POST', '/api/admin/automations', { name: 'Draft', channel: 'email', trigger: 'before', active: false }, { cookie: ownerCookie });
+  assert.equal(draft.status, 200);
+  assert.equal(draft.data.active, false);
+  assert.equal(db.all("SELECT * FROM scheduled_messages WHERE automation_id = ?", draft.data.id).length, 0, 'a draft queues nothing');
+});
+
+test('the queue screen, manual run and cancel all work; outsiders are locked out', async () => {
+  freshLimits();
+  const list = await req('GET', '/api/admin/messages', null, { cookie: ownerCookie });
+  assert.equal(list.status, 200);
+  assert.ok(list.data.rows.length > 0);
+  assert.ok(list.data.summary.queued >= 0);
+  assert.equal(typeof list.data.summary.sms_ready, 'boolean');
+
+  const queued = list.data.rows.find((r) => r.status === 'queued');
+  if (queued) {
+    const off = await req('POST', `/api/admin/messages/${queued.id}/cancel`, {}, { cookie: ownerCookie });
+    assert.equal(off.status, 200);
+    const again = await req('POST', `/api/admin/messages/${queued.id}/cancel`, {}, { cookie: ownerCookie });
+    assert.equal(again.status, 409, 'cancelling twice is refused rather than silently ignored');
+  }
+
+  assert.equal((await req('GET', '/api/admin/automations')).status, 401);
+  assert.equal((await req('POST', '/api/admin/automations', { name: 'x' })).status, 401);
+  assert.equal((await req('GET', '/api/admin/messages')).status, 401);
+
+  // Twilio's credentials are never echoed back.
+  const cfg = await req('GET', '/api/admin/automations', null, { cookie: ownerCookie });
+  assert.equal(cfg.data.sms.ready, true);
+  assert.ok(!JSON.stringify(cfg.data).includes(process.env.TWILIO_AUTH_TOKEN));
+});
+
+test('the built-in 24h reminder steps aside once a "before" automation exists', async () => {
+  // Both firing would put two reminders in the same inbox.
+  const hasBefore = db.get("SELECT 1 x FROM message_automations WHERE business_id = 1 AND active = 1 AND trigger = 'before'");
+  assert.ok(hasBefore, 'this business has a before-automation from the earlier tests');
+  const before = db.get("SELECT COUNT(*) c FROM email_log WHERE subject LIKE 'Reminder:%'").c;
+  await runJobs();
+  const after = db.get("SELECT COUNT(*) c FROM email_log WHERE subject LIKE 'Reminder:%'").c;
+  assert.equal(after, before, 'no duplicate built-in reminder went out');
+});
+
+// ---------------------------------------------------------------------------
+// Integrations: Stripe, Twilio and Resend credentials
+// ---------------------------------------------------------------------------
+const appConfig = require('../src/lib/config');
+const providers = require('../src/services/providers');
+
+test('a saved key overrides the environment, and clearing it falls back', async () => {
+  // Railway value is in place from the earlier Stripe tests.
+  assert.equal(appConfig.source('STRIPE_SECRET_KEY'), 'env');
+  assert.equal(appConfig.get('STRIPE_SECRET_KEY'), 'sk_test_stubbed');
+
+  appConfig.set('STRIPE_SECRET_KEY', 'sk_test_saved_in_app', 1);
+  assert.equal(appConfig.source('STRIPE_SECRET_KEY'), 'app', 'what you type in the app wins');
+  assert.equal(appConfig.get('STRIPE_SECRET_KEY'), 'sk_test_saved_in_app');
+
+  // Stored encrypted, not sitting in the table in the clear.
+  const row = db.get("SELECT value, secret FROM app_settings WHERE key = 'STRIPE_SECRET_KEY'");
+  assert.equal(row.secret, 1);
+  assert.match(row.value, /^v1:/);
+  assert.ok(!row.value.includes('sk_test_saved_in_app'), 'the plain key is not in the database');
+
+  appConfig.clear('STRIPE_SECRET_KEY');
+  assert.equal(appConfig.source('STRIPE_SECRET_KEY'), 'env', 'clearing returns to the Railway value');
+  assert.equal(appConfig.get('STRIPE_SECRET_KEY'), 'sk_test_stubbed');
+});
+
+test('the integrations API never hands a secret back to the browser', async () => {
+  appConfig.set('RESEND_API_KEY', 're_super_secret_value_1234', 1);
+  appConfig.set('TWILIO_AUTH_TOKEN', 'twilio_secret_token_abcd', 1);
+
+  const r = await req('GET', '/api/admin/integrations/providers', null, { cookie: ownerCookie });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const blob = JSON.stringify(r.data);
+  assert.ok(!blob.includes('re_super_secret_value_1234'), 'the Resend key must never be returned');
+  assert.ok(!blob.includes('twilio_secret_token_abcd'), 'the Twilio token must never be returned');
+  assert.ok(!blob.includes('sk_test_stubbed'));
+  assert.ok(!blob.includes(WHSEC));
+
+  // What it does return is enough to show the state of things.
+  const key = r.data.resend.fields.find((f) => f.key === 'RESEND_API_KEY');
+  assert.equal(key.set, true);
+  assert.equal(key.source, 'app');
+  assert.match(key.hint, /^re_•+1234$/, 'only a masked tail comes back');
+  assert.equal(r.data.stripe.mode, 'test');
+  assert.ok(Array.isArray(r.data.stripe.webhook.events));
+  assert.match(r.data.twilio.webhook.url, /\/api\/public\/sms\/inbound$/);
+  // Non-secret fields are safe to show in full so they can be edited.
+  assert.equal(r.data.twilio.fields.find((f) => f.key === 'TWILIO_FROM_NUMBER').hint, '+18325550000');
+
+  appConfig.clear('RESEND_API_KEY');
+  appConfig.clear('TWILIO_AUTH_TOKEN');
+});
+
+test('leaving the mask in place keeps a key; an empty string clears it', async () => {
+  appConfig.set('STRIPE_WEBHOOK_SECRET', 'whsec_original_value', 1);
+
+  // The screen sends the mask back for anything the user did not retype.
+  const keep = await req('PUT', '/api/admin/integrations/providers/stripe',
+    { STRIPE_WEBHOOK_SECRET: appConfig.MASK }, { cookie: ownerCookie });
+  assert.equal(keep.status, 200);
+  assert.deepEqual(keep.data.changed, [], 'the mask changes nothing');
+  assert.equal(appConfig.get('STRIPE_WEBHOOK_SECRET'), 'whsec_original_value');
+
+  const change = await req('PUT', '/api/admin/integrations/providers/stripe',
+    { STRIPE_WEBHOOK_SECRET: 'whsec_brand_new' }, { cookie: ownerCookie });
+  assert.deepEqual(change.data.changed, ['STRIPE_WEBHOOK_SECRET']);
+  assert.equal(appConfig.get('STRIPE_WEBHOOK_SECRET'), 'whsec_brand_new');
+
+  const cleared = await req('PUT', '/api/admin/integrations/providers/stripe',
+    { STRIPE_WEBHOOK_SECRET: '' }, { cookie: ownerCookie });
+  assert.equal(cleared.status, 200);
+  assert.equal(appConfig.source('STRIPE_WEBHOOK_SECRET'), 'env', 'back to the Railway value');
+
+  // A key belonging to another provider is refused rather than quietly written.
+  appConfig.clear('RESEND_API_KEY');
+  const wrong = await req('PUT', '/api/admin/integrations/providers/stripe',
+    { RESEND_API_KEY: 're_nope' }, { cookie: ownerCookie });
+  assert.equal(wrong.status, 422);
+  assert.match(wrong.data.error, /does not belong to stripe/);
+  assert.notEqual(appConfig.get('RESEND_API_KEY'), 're_nope', 'nothing was written');
+
+  const unknownProvider = await req('PUT', '/api/admin/integrations/providers/paypal', {}, { cookie: ownerCookie });
+  assert.equal(unknownProvider.status, 404);
+});
+
+test('only an owner can write credentials; a host cannot even read them', async () => {
+  // Add a host to this business.
+  const invite = await req('POST', '/api/admin/team', { name: 'Hosty', email: 'hosty@test.dev', role: 'host' }, { cookie: ownerCookie });
+  assert.equal(invite.status, 200, JSON.stringify(invite.data));
+  const row = db.get("SELECT invite_token FROM memberships WHERE user_id = (SELECT id FROM users WHERE email = 'hosty@test.dev')");
+  const accepted = await req('POST', '/api/admin/auth/accept', { token: row.invite_token, name: 'Hosty', password: 'password123' });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.data));
+  const hostCookie = accepted.cookie;
+
+  assert.equal((await req('GET', '/api/admin/integrations/providers', null, { cookie: hostCookie })).status, 403);
+  assert.equal((await req('PUT', '/api/admin/integrations/providers/stripe', { STRIPE_SECRET_KEY: 'sk_test_x' }, { cookie: hostCookie })).status, 403);
+  assert.equal((await req('POST', '/api/admin/integrations/stripe/test-charge', { confirm: 'CHARGE' }, { cookie: hostCookie })).status, 403);
+  assert.equal(appConfig.get('STRIPE_SECRET_KEY'), 'sk_test_stubbed', 'the host changed nothing');
+
+  // And nobody unauthenticated gets near it.
+  assert.equal((await req('GET', '/api/admin/integrations/providers')).status, 401);
+  assert.equal((await req('PUT', '/api/admin/integrations/providers/twilio', { TWILIO_AUTH_TOKEN: 'x' })).status, 401);
+});
+
+test('the $1 test needs a typed confirmation and never creates a booking', async () => {
+  const bookingsBefore = db.get('SELECT COUNT(*) c FROM bookings').c;
+  const ordersBefore = db.get('SELECT COUNT(*) c FROM orders').c;
+
+  const noConfirm = await req('POST', '/api/admin/integrations/stripe/test-charge', {}, { cookie: ownerCookie });
+  assert.equal(noConfirm.status, 422, 'real money needs a deliberate confirmation');
+  assert.ok(noConfirm.data.details.confirm);
+
+  const wrongWord = await req('POST', '/api/admin/integrations/stripe/test-charge', { confirm: 'yes' }, { cookie: ownerCookie });
+  assert.equal(wrongWord.status, 422);
+
+  // With both keys in place and the confirmation typed, it opens a checkout.
+  appConfig.set('STRIPE_WEBHOOK_SECRET', WHSEC, 1);
+  const go = await req('POST', '/api/admin/integrations/stripe/test-charge', { confirm: 'charge' }, { cookie: ownerCookie });
+  assert.equal(go.status, 200, JSON.stringify(go.data));
+  assert.equal(go.data.amount, 1);
+  assert.match(go.data.ref, /^diag_/);
+  const call = checkoutCalls[checkoutCalls.length - 1];
+  assert.equal(call.amountCents, 100);
+  assert.equal(call.metadata.diagnostic, '1');
+
+  // Nothing was booked or sold by starting it.
+  assert.equal(db.get('SELECT COUNT(*) c FROM orders').c, ordersBefore, 'the test does not create an order');
+  assert.equal(providers.lastDiagnostic().status, 'awaiting_payment');
+
+  // The webhook for it records the result rather than hunting for an order.
+  const event = { id: 'evt_diag_1', type: 'checkout.session.completed', data: { object: {
+    id: 'cs_diag_1', client_reference_id: go.data.ref, payment_status: 'paid', amount_total: 100,
+    payment_intent: 'pi_diag_1', metadata: { diagnostic: '1', ref: go.data.ref },
+  } } };
+  const hook = await postWebhook(event);
+  assert.equal(hook.status, 200, JSON.stringify(hook.data));
+  assert.equal(hook.data.result, 'connection test recorded');
+
+  const last = providers.lastDiagnostic();
+  assert.equal(last.status, 'webhook_received');
+  assert.equal(last.amount, 1);
+  assert.equal(last.payment_intent, 'pi_diag_1');
+
+  assert.equal(db.get('SELECT COUNT(*) c FROM bookings').c, bookingsBefore, 'no booking was created');
+  assert.equal(db.get('SELECT COUNT(*) c FROM orders').c, ordersBefore, 'and no session order either');
+
+  // It shows up on the integrations screen as a passed test.
+  const view = await req('GET', '/api/admin/integrations/providers', null, { cookie: ownerCookie });
+  assert.equal(view.data.stripe.last_test.status, 'webhook_received');
+  assert.ok(view.data.stripe.webhook.received > 0);
+});
+
+test('a test email reports honestly when no key is live', async () => {
+  // With no Resend key the app only writes to the log, and saying "sent" would be a lie.
+  const before = appConfig.get('RESEND_API_KEY');
+  if (before) appConfig.clear('RESEND_API_KEY');
+  const prevEnv = process.env.RESEND_API_KEY;
+  delete process.env.RESEND_API_KEY;
+  appConfig.invalidate();
+
+  const r = await req('POST', '/api/admin/integrations/providers/resend/send-test', { to: 'owner@test.dev' }, { cookie: ownerCookie });
+  assert.equal(r.status, 422);
+  assert.match(r.data.error, /only written to the log/i);
+
+  if (prevEnv) process.env.RESEND_API_KEY = prevEnv;
+  appConfig.invalidate();
+});
+
+test('a test text refuses an unusable number before spending anything', async () => {
+  stubTwilio();
+  const bad = await req('POST', '/api/admin/integrations/providers/twilio/send-test', { to: '832-555-1234 ext 2' }, { cookie: ownerCookie });
+  assert.equal(bad.status, 422);
+  assert.match(bad.data.error, /does not look like a mobile number/);
+
+  const good = await req('POST', '/api/admin/integrations/providers/twilio/send-test', { to: '(832) 555-7777' }, { cookie: ownerCookie });
+  assert.equal(good.status, 200, JSON.stringify(good.data));
+  assert.equal(good.data.to, '+18325557777');
+  assert.equal(sentTexts[sentTexts.length - 1].to, '+18325557777');
+  assert.match(sentTexts[sentTexts.length - 1].body, /Reply STOP to opt out/, 'a test text still says how to opt out');
+  assert.match(db.get('SELECT body FROM sms_log ORDER BY id DESC LIMIT 1').body, /^\[test\]/, 'logged as a test, not as customer traffic');
+});
+
+test('changing a key takes effect immediately, without a restart', async () => {
+  stubTwilio();
+  // A number saved in the app is the one used on the very next send.
+  appConfig.set('TWILIO_FROM_NUMBER', '+18325559999', 1);
+  const status = await req('GET', '/api/admin/integrations/providers', null, { cookie: ownerCookie });
+  assert.equal(status.data.twilio.fields.find((f) => f.key === 'TWILIO_FROM_NUMBER').hint, '+18325559999');
+  assert.equal(status.data.twilio.ready, true);
+
+  // Clearing the account SID immediately makes texting unavailable rather than failing later.
+  const prev = process.env.TWILIO_ACCOUNT_SID;
+  delete process.env.TWILIO_ACCOUNT_SID;
+  appConfig.clear('TWILIO_ACCOUNT_SID');
+  const off = await req('GET', '/api/admin/integrations/providers', null, { cookie: ownerCookie });
+  assert.equal(off.data.twilio.ready, false);
+  assert.ok(off.data.twilio.missing.includes('TWILIO_ACCOUNT_SID'));
+  // And an automation cannot be switched on to send texts while it is unavailable.
+  const blocked = await req('POST', '/api/admin/automations', { name: 'Texty', channel: 'sms', trigger: 'before', sms_body: 'hi', active: true }, { cookie: ownerCookie });
+  assert.equal(blocked.status, 422);
+  assert.match(blocked.data.error, /not connected/i);
+
+  if (prev) process.env.TWILIO_ACCOUNT_SID = prev;
+  appConfig.clear('TWILIO_FROM_NUMBER');
+  appConfig.invalidate();
 });
