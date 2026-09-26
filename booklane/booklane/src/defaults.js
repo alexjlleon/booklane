@@ -108,4 +108,57 @@ const QUICK_DATE_STEPS = () => [
   { key: 'schedule', type: 'schedule', title: 'Pick a time for your consult call', subtitle: 'Fifteen minutes, no pressure.' },
 ];
 
-module.exports = { BUSINESS_SETTINGS, DEFAULT_STEPS, QUICK_DATE_STEPS, LOCATION_TYPES };
+// A sellable session: pick a calendar, say whether it's already paid for, otherwise buy it,
+// then pick a time. Every label here is editable, and the same shape covers an album design
+// session as covers an engagement shoot.
+const SESSION_SETTINGS = {
+  price_cents: 0,
+  currency: 'USD',
+  // The "which one?" step only appears when the session has more than one calendar behind it.
+  choose_label: 'Which city are you in?',
+  choose_hint: 'So we show you the right calendar.',
+  // The already-booked branch.
+  ask_booking_number: true,
+  booked_question: 'Have you already booked this session?',
+  booked_yes_label: 'Yes, it’s already paid for',
+  booked_no_label: 'Not yet',
+  booking_number_label: 'Booking number',
+  booking_number_hint: 'It’s on your contract and your confirmation email.',
+  booking_number_required: true,
+  booked_note: 'We’ll match this to your file before your session.',
+  // The buy branch.
+  price_heading: '',
+  price_blurb: 'Reserve your session now, then pick your time on the next screen.',
+  includes: [],
+  pay_cta: 'Pay and pick a time',
+  free_cta: 'Pick a time',
+  paid_note: '',
+  // How long a slot stays held while someone is on Stripe's payment page.
+  hold_minutes: 30,
+};
+
+const SESSION_STEPS = () => [
+  {
+    key: 'contact', type: 'contact', title: 'Who is this session for?', subtitle: 'So we can send your confirmation.',
+    fields: { first_name: 'required', last_name: 'required', email: 'required', phone: 'required', sms_consent: 'optional' },
+  },
+];
+
+// The markets Weddings Unlimited shoots in. Each becomes a calendar with its own hours.
+const DEFAULT_MARKETS = [
+  { name: 'Houston', timezone: 'America/Chicago' },
+  { name: 'Austin', timezone: 'America/Chicago' },
+  { name: 'San Antonio', timezone: 'America/Chicago' },
+  { name: 'Dallas / Fort Worth', timezone: 'America/Chicago' },
+  { name: 'Phoenix', timezone: 'America/Phoenix' },
+];
+
+// Seeded session products. Only the engagement price is known; the rest are set in the admin.
+const DEFAULT_SESSION_PRODUCTS = [
+  { name: 'Engagement Session', slug: 'engagement-session', duration_min: 90, price_cents: 49500, description: 'A relaxed shoot before the wedding, so you are comfortable in front of the camera on the day.' },
+  { name: 'Bridal Session', slug: 'bridal-session', duration_min: 120, price_cents: 0, description: 'A dedicated portrait session in your dress before the wedding.' },
+  { name: 'Boudoir Session', slug: 'boudoir-session', duration_min: 90, price_cents: 0, description: 'A private, guided session in a comfortable studio setting.' },
+  { name: 'Anniversary Session', slug: 'anniversary-session', duration_min: 90, price_cents: 0, description: 'Celebrate the year with new portraits.' },
+];
+
+module.exports = { BUSINESS_SETTINGS, DEFAULT_STEPS, QUICK_DATE_STEPS, SESSION_SETTINGS, SESSION_STEPS, DEFAULT_MARKETS, DEFAULT_SESSION_PRODUCTS, LOCATION_TYPES };
