@@ -205,6 +205,7 @@
     const s = b.settings;
     const tabs = `<div class="tabs">${Object.entries(TABS).map(([k, v]) => `<a href="#/settings/${k}" class="${k === tab ? 'on' : ''}">${v}</a>`).join('')}</div>`;
     let body = '';
+    let providerHost = '';
     if (tab === 'general') {
       body = `<div class="cols-even"><div class="panel"><h2>Business</h2>
         ${A.field('Business name', A.input('name', b.name))}
@@ -258,8 +259,11 @@
           <label class="label">Ask for in the contract request</label><div class="stack" style="margin-top:8px">${Object.entries({ billing_address: 'Billing address', venue_address: 'Venue address', event_start_time: 'Start time', event_end_time: 'End time', planner_name: 'Planner name' }).map(([k, v]) => A.toggle(`settings.quote.contract_fields.${k}`, Q.contract_fields[k], v)).join('')}</div></div></div></div>`;
     } else if (tab === 'integrations') {
       const BB = s.integrations.boothbook, W = s.integrations.webhook;
+      // Stripe, Twilio and Resend live above BoothBook. They are global credentials with their own
+      // save buttons, so they are filled in after paint rather than riding the settings form.
+      providerHost = '<div id="provider-cards"></div>';
       const events = ['lead.partial', 'lead.completed', 'booking.created', 'booking.cancelled', 'quote.submitted', 'contract.requested', 'callback.requested'];
-      body = `<div class="cols-even"><div class="panel"><h2>BoothBook</h2><p class="desc">Send contract requests to BoothBook as leads. BoothBook's API is invite only, so confirm the endpoint and field names with BoothBook support, then test here.</p>
+      body = `${providerHost}<div class="cols-even"><div class="panel"><h2>BoothBook</h2><p class="desc">Send contract requests to BoothBook as leads. BoothBook's API is invite only, so confirm the endpoint and field names with BoothBook support, then test here.</p>
         <div class="stack" style="margin-bottom:12px">${A.toggle('settings.integrations.boothbook.enabled', BB.enabled, 'Push contract requests to BoothBook')}</div>
         ${A.field('Endpoint URL', A.input('settings.integrations.boothbook.url', BB.url, 'placeholder="https://booking.yourdomain.com/api/…/leads"'))}
         <div class="grid-2">${A.field('Client key', A.input('settings.integrations.boothbook.key', BB.key))}${A.field('Client secret', A.input('settings.integrations.boothbook.secret', BB.secret, 'type="password" autocomplete="off"'))}</div>
@@ -332,6 +336,9 @@
   function settingsMount(root, p) {
     const tab = p.tab || 'general';
     const form = $('#settings-form', root);
+    // The provider cards manage global credentials with their own endpoints, so they are painted
+    // separately and never travel with this form's PATCH.
+    if (tab === 'integrations' && A.renderProviders) A.renderProviders($('#provider-cards', root));
     root.addEventListener('change', (e) => {
       if (e.target.dataset.qf === 'type') {
         const card = e.target.closest('[data-qfield]');
