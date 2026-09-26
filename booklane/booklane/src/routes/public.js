@@ -11,11 +11,16 @@ const L = require('../services/leads');
 const S = require('../services/scheduling');
 const Q = require('../services/quotes');
 const BK = require('../services/bookings');
+const SESS = require('../services/sessions');
+const MSG = require('../services/messaging');
+const stripe = require('../lib/stripe');
+const sms = require('../lib/sms');
 const { LOCATION_TYPES } = require('../defaults');
 
 const writeLimit = rateLimit({ windowMs: 60000, max: 90 });
 const createLimit = rateLimit({ windowMs: 10 * 60000, max: 40 });
 const bookLimit = rateLimit({ windowMs: 10 * 60000, max: 15 });
+const payLimit = rateLimit({ windowMs: 10 * 60000, max: 12 });
 
 function getBusiness(slug) {
   const b = B.bySlug(slug);
@@ -61,6 +66,116 @@ module.exports = function publicRoutes(app) {
     try { services = Q.catalog(b.id).map((s) => s.name); } catch { /* ignore */ }
     res.html(page({ title: `${et.name} · ${b.name}`, description: et.description || b.settings.tagline, business: b, embed: bool(req.query.embed), scripts: ['common.js', 'scheduler.js', 'booking.js'],
       data: { business: publicBusiness(b), eventType: publicEventType(et), serviceNames: services } }));
+  });
+
+  // ---------- Sessions you can buy ----------
+  app.get('/b/:slug/s/:event', (req, res) => {
+    const b = getBusiness(req.params.slug);
+    const et = SESS.bySlug(b, req.params.event);
+    res.html(page({ title: `${et.name} · ${b.name}`, description: et.description || b.settings.tagline, business: b, embed: bool(req.query.embed),
+      scripts: ['common.js', 'scheduler.js', 'session.js'],
+      data: { business: publicBusiness(b), session: SESS.publicSession(et, b), cancelled: req.query.cancelled ? true : false } }));
+  });
+
+  // Where Stripe sends them back to. The webhook usually lands first, but this page also asks
+  // Stripe directly, so a slow webhook never leaves someone staring at a spinner.
+  app.get('/session/:token', (req, res) => {
+    const order = SESS.orderByToken(req.params.token);
+    if (!order) throw new HttpError(404, 'Not found');
+    const b = B.byId(order.business_id);
+    res.set('X-Robots-Tag', 'noindex');
+    res.html(page({ title: `Finishing up · ${b.name}`, business: b, scripts: ['common.js', 'session-return.js'],
+      data: { business: publicBusiness(b), order: SESS.publicOrder(order) } }));
+  });
+
+  app.get('/api/public/b/:slug/s/:event', (req) => {
+    const b = getBusiness(req.params.slug);
+    return { session: SESS.publicSession(SESS.bySlug(b, req.params.event), b) };
+  });
+
+  app.get('/api/public/b/:slug/s/:event/slots', async (req) => {
+    const b = getBusiness(req.params.slug);
+    const et = SESS.bySlug(b, req.params.event);
+    const cal = SESS.resolveCalendar(b, et, req.query.calendar);
+    const tz = T.isValidTz(req.query.tz) ? req.query.tz : (cal.timezone || b.timezone);
+    const from = T.isDateStr(req.query.from) ? req.query.from : T.utcToZoned(Date.now(), tz).date;
+    let to = T.isDateStr(req.query.to) ? req.query.to : T.addDays(from, 30);
+    if (to < from) to = from;
+    if (Date.parse(to) - Date.parse(from) > 62 * 86400000) to = T.addDays(from, 62);
+    const slots = await S.computeSlots(et, from, to, tz, { restrictHostIds: [cal.user_id] });
+    const days = {};
+    for (const [d, list] of Object.entries(slots)) days[d] = list.map((s) => s.start);
+    return { timezone: tz, from, to, calendar: cal.slug, days };
+  });
+
+  // Book without a card. Either they already paid and have a booking number, or the session is
+  // free. The service refuses the free path on any session that actually has a price.
+  app.post('/api/public/b/:slug/s/:event/claim', async (req) => {
+    bookLimit(req);
+    const b = getBusiness(req.params.slug);
+    const et = SESS.bySlug(b, req.params.event);
+    const body = req.body || {};
+    const { booking } = await SESS.claimBooked(b, et, body, { alreadyBooked: body.already_booked !== false });
+    return { token: booking.token, redirect: `/booking/${booking.token}?new=1` };
+  });
+
+  // Not booked yet: hold the slot and hand back a Stripe Checkout URL.
+  app.post('/api/public/b/:slug/s/:event/checkout', async (req) => {
+    payLimit(req);
+    const b = getBusiness(req.params.slug);
+    const et = SESS.bySlug(b, req.params.event);
+    return SESS.startCheckout(b, et, req.body || {});
+  });
+
+  app.get('/api/public/orders/:token', async (req) => {
+    const order = SESS.orderByToken(req.params.token);
+    if (!order) throw new HttpError(404, 'Not found');
+    return { order: await SESS.reconcileOrder(order) };
+  });
+
+  // Stripe posts here. The signature check is what stops anyone faking a paid order, so an
+  // unverified body is never parsed as an event.
+  app.post('/api/public/stripe/webhook', async (req, res) => {
+    let event;
+    try {
+      event = stripe.verifyWebhook(req.rawBody, req.headers['stripe-signature']);
+    } catch (e) {
+      console.error('[stripe webhook] rejected:', e.message);
+      res.statusCode = 400;
+      return res.json({ error: 'Invalid signature' });
+    }
+    try {
+      const result = await SESS.handleStripeEvent(event);
+      return res.json({ received: true, result });
+    } catch (e) {
+      // Answer 500 so Stripe retries a transient failure rather than giving up on it.
+      console.error('[stripe webhook]', event.type, e.message);
+      res.statusCode = 500;
+      return res.json({ error: 'Could not process that event' });
+    }
+  });
+
+  // Twilio posts replies here. A STOP must be honoured, so the signature is checked first:
+  // without it, anyone could post a forged STOP and silence our messages to a real customer,
+  // or a forged reply that looks like it came from them.
+  app.post('/api/public/sms/inbound', (req, res) => {
+    const params = req.rawBody ? Object.fromEntries(new URLSearchParams(req.rawBody)) : {};
+    try {
+      sms.verifyWebhook(`${baseUrl()}/api/public/sms/inbound`, params, req.headers['x-twilio-signature']);
+    } catch (e) {
+      console.error('[sms inbound] rejected:', e.message);
+      res.statusCode = 403;
+      return res.text('<Response/>', 'text/xml');
+    }
+    let result = null;
+    try {
+      result = MSG.handleInboundSms({ from: params.From, to: params.To, body: params.Body, sid: params.MessageSid });
+    } catch (e) {
+      console.error('[sms inbound]', e.message);
+    }
+    // Twilio sends its own STOP confirmation, so stay quiet and do not double-reply.
+    res.set('X-Booklane-Action', (result && result.action) || 'none');
+    return res.text('<Response/>', 'text/xml');
   });
 
   app.get('/q/:token', (req, res) => {
