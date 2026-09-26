@@ -53,4 +53,7 @@ function rateLimit({ windowMs = 60000, max = 60, key = (req) => req.ip } = {}) {
 }
 setInterval(() => { const now = Date.now(); for (const [k, b] of buckets) if (b.reset < now) buckets.delete(k); }, 60000).unref();
 
-module.exports = { hashPassword, verifyPassword, token, encrypt, decrypt, rateLimit, APP_SECRET };
+// Tests book far more often than any real visitor would. Nothing calls this in production.
+function resetRateLimits() { buckets.clear(); }
+
+module.exports = { hashPassword, verifyPassword, token, encrypt, decrypt, rateLimit, resetRateLimits, APP_SECRET };
