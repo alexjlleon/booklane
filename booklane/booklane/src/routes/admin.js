@@ -6,7 +6,7 @@ const { hashPassword, verifyPassword, token, rateLimit } = require('../lib/secur
 const { createSession, destroySession, requireAuth, requireRole, ROLE_RANK } = require('../lib/auth');
 const { isEmail, clampStr, int, num, bool, slugify, deepMerge, baseUrl } = require('../lib/util');
 const { sendEmail, layout } = require('../lib/email');
-const { BUSINESS_SETTINGS, DEFAULT_STEPS, QUICK_DATE_STEPS, LOCATION_TYPES } = require('../defaults');
+const { BUSINESS_SETTINGS, DEFAULT_STEPS, QUICK_DATE_STEPS, SESSION_SETTINGS, SESSION_STEPS, LOCATION_TYPES } = require('../defaults');
 const B = require('../services/business');
 const L = require('../services/leads');
 const Q = require('../services/quotes');
@@ -14,7 +14,13 @@ const BK = require('../services/bookings');
 const calendars = require('../services/calendars');
 const { pushToBoothBook, sendWebhook, buildBoothBookPayload } = require('../services/integrations');
 const Importer = require('../services/catalog-import');
-const { createBusiness, uniqueSlug, ensureDefaultAvailability } = require('../services/setup');
+const SESS = require('../services/sessions');
+const MSG = require('../services/messaging');
+const stripe = require('../lib/stripe');
+const sms = require('../lib/sms');
+const appConfig = require('../lib/config');
+const providers = require('../services/providers');
+const { createBusiness, uniqueSlug, ensureDefaultAvailability, seedSessions } = require('../services/setup');
 
 const authLimit = rateLimit({ windowMs: 15 * 60000, max: 25 });
 const SECRET_MASK = '••••••••';
@@ -23,7 +29,7 @@ const isAdmin = (req) => ROLE_RANK[req.membership?.role] >= ROLE_RANK.admin;
 
 function meResponse(req) {
   return { user: req.user, business: req.membership ? { ...req.membership } : null, businesses: req.memberships || [],
-    app: { base_url: baseUrl(), calendars: Object.fromEntries(Object.entries(calendars.PROVIDERS).map(([k, p]) => [k, { label: p.label, configured: calendars.isConfigured(k) }])), email_provider: process.env.RESEND_API_KEY ? 'resend' : 'log' } };
+    app: { base_url: baseUrl(), calendars: Object.fromEntries(Object.entries(calendars.PROVIDERS).map(([k, p]) => [k, { label: p.label, configured: calendars.isConfigured(k) }])), email_provider: appConfig.get('RESEND_API_KEY') ? 'resend' : 'log' } };
 }
 
 function sanitizeSteps(steps) {
@@ -316,7 +322,9 @@ module.exports = function adminRoutes(app) {
   });
 
   // ---------- Event types ----------
-  const members = (businessId) => db.all("SELECT u.id, u.name, u.email, u.timezone, m.role FROM users u JOIN memberships m ON m.user_id = u.id WHERE m.business_id = ? AND m.status = 'active' ORDER BY u.name", businessId);
+  // Real people only. Market and designer calendars are login-less rows and belong on the
+  // Sessions screen, not in the team list or the host pickers.
+  const members = (businessId) => db.all("SELECT u.id, u.name, u.email, u.timezone, m.role FROM users u JOIN memberships m ON m.user_id = u.id WHERE m.business_id = ? AND m.status = 'active' AND COALESCE(u.is_resource,0) = 0 ORDER BY u.name", businessId);
   function etOut(et) {
     return { ...BK.hydrateEt(et), active: !!et.active, hosts: db.all('SELECT user_id FROM event_type_hosts WHERE event_type_id = ?', et.id).map((r) => r.user_id),
       bookings_30d: db.get("SELECT COUNT(*) c FROM bookings WHERE event_type_id = ? AND created_at >= datetime('now','-30 days')", et.id).c };
@@ -466,6 +474,390 @@ module.exports = function adminRoutes(app) {
     return { ok: true };
   });
 
+  // ---------- Sessions you can sell (markets, products, orders) ----------
+  function sessionOut(et) {
+    const s = SESS.hydrate({ ...et });
+    return {
+      id: et.id, slug: et.slug, name: et.name, description: et.description || '', active: !!et.active, sort: et.sort,
+      duration_min: et.duration_min, buffer_after: et.buffer_after, min_notice_min: et.min_notice_min,
+      max_days_ahead: et.max_days_ahead, slot_interval_min: et.slot_interval_min, location_type: et.location_type, location_value: et.location_value,
+      price: s.session.price_cents / 100, price_cents: s.session.price_cents, currency: s.session.currency,
+      session: s.session, steps: s.steps,
+      calendar_ids: SESS.calendarsForProduct(et).map((c) => c.id),
+      public_url: `${baseUrl()}/b/${B.byId(et.business_id).slug}/s/${et.slug}`,
+      sold: db.get("SELECT COUNT(*) c FROM orders WHERE event_type_id = ? AND status = 'paid'", et.id).c,
+    };
+  }
+
+  app.get('/api/admin/payments', (req) => {
+    requireRole('admin')(req);
+    // Never send the keys back, only whether they are set and which mode they are in.
+    return {
+      configured: stripe.configured(),
+      mode: stripe.configured() ? (stripe.liveMode() ? 'live' : 'test') : null,
+      webhook_secret_set: !!process.env.STRIPE_WEBHOOK_SECRET,
+      webhook_url: `${baseUrl()}/api/public/stripe/webhook`,
+      needs: [stripe.configured() ? null : 'STRIPE_SECRET_KEY', process.env.STRIPE_WEBHOOK_SECRET ? null : 'STRIPE_WEBHOOK_SECRET'].filter(Boolean),
+    };
+  });
+
+  app.get('/api/admin/session-calendars', (req) => {
+    requireRole('host')(req);
+    return SESS.listCalendars(bid(req), { includeInactive: true }).map((c) => ({
+      id: c.id, user_id: c.user_id, kind: c.kind, slug: c.slug, name: c.name, blurb: c.blurb || '',
+      timezone: c.timezone || c.user_timezone, active: !!c.active, sort: c.sort,
+      has_hours: !!db.get('SELECT 1 FROM availability_rules WHERE user_id = ?', c.user_id),
+      connections: db.all('SELECT provider, account_email, last_error FROM calendar_connections WHERE user_id = ?', c.user_id),
+      upcoming: db.get("SELECT COUNT(*) c FROM bookings WHERE host_user_id = ? AND status = 'confirmed' AND start_utc > datetime('now')", c.user_id).c,
+    }));
+  });
+  app.post('/api/admin/session-calendars', (req) => {
+    requireRole('admin')(req);
+    const b = B.byId(bid(req));
+    return SESS.createCalendar(b, req.body || {});
+  });
+  app.patch('/api/admin/session-calendars/:id', (req) => {
+    requireRole('admin')(req);
+    return SESS.updateCalendar(B.byId(bid(req)), req.params.id, req.body || {});
+  });
+  app.delete('/api/admin/session-calendars/:id', (req) => {
+    requireRole('admin')(req);
+    const cal = SESS.calendarById(bid(req), req.params.id);
+    if (!cal) throw new HttpError(404, 'Not found');
+    const future = db.get("SELECT COUNT(*) c FROM bookings WHERE host_user_id = ? AND status = 'confirmed' AND start_utc > datetime('now')", cal.user_id).c;
+    // Deleting would orphan real sessions, so refuse and let them switch it off instead.
+    if (future) throw new HttpError(409, `${cal.name} still has ${future} upcoming session${future === 1 ? '' : 's'}. Switch it off instead of deleting it.`);
+    db.run('DELETE FROM calendar_profiles WHERE id = ?', cal.id);
+    return { ok: true };
+  });
+
+  app.get('/api/admin/sessions', (req) => {
+    requireRole('host')(req);
+    return {
+      sessions: SESS.listProducts(bid(req), { includeInactive: true }).map(sessionOut),
+      calendars: SESS.listCalendars(bid(req), { includeInactive: true }).map((c) => ({ id: c.id, name: c.name, kind: c.kind, active: !!c.active })),
+      summary: SESS.revenueSummary(bid(req)),
+      location_types: LOCATION_TYPES,
+      defaults: SESSION_SETTINGS,
+    };
+  });
+
+  function saveSession(req, existing) {
+    const b = B.byId(bid(req));
+    const body = req.body || {};
+    const name = clampStr(String(body.name || '').trim(), 120);
+    if (!name) throw new HttpError(422, 'Give the session a name', { name: 'Required' });
+    const priceCents = body.price_cents !== undefined ? int(body.price_cents, 0, 0, 100000000) : Math.round(num(body.price, 0) * 100);
+    const session = deepMerge(existing ? SESS.hydrate({ ...existing }).session : SESSION_SETTINGS, {
+      ...(body.session && typeof body.session === 'object' ? body.session : {}),
+      price_cents: priceCents,
+      currency: clampStr(String(body.currency || (existing ? SESS.hydrate({ ...existing }).session.currency : 'USD')).toUpperCase(), 3),
+    });
+    // Money and hold windows are the two places a typo hurts, so clamp them here.
+    session.price_cents = int(session.price_cents, 0, 0, 100000000);
+    session.hold_minutes = int(session.hold_minutes, 30, 10, 180);
+    session.includes = (Array.isArray(session.includes) ? session.includes : []).slice(0, 12).map((x) => clampStr(String(x), 120)).filter(Boolean);
+
+    const fields = {
+      name,
+      description: clampStr(body.description || '', 1000),
+      duration_min: int(body.duration_min, existing?.duration_min || 90, 5, 1440),
+      buffer_after: int(body.buffer_after, existing?.buffer_after ?? 30, 0, 480),
+      min_notice_min: int(body.min_notice_min, existing?.min_notice_min ?? 1440, 0, 100000),
+      max_days_ahead: int(body.max_days_ahead, existing?.max_days_ahead ?? 180, 1, 730),
+      slot_interval_min: int(body.slot_interval_min, existing?.slot_interval_min ?? 30, 5, 240),
+      location_type: LOCATION_TYPES[body.location_type] ? body.location_type : (existing?.location_type || 'in_person'),
+      location_value: clampStr(body.location_value || '', 300),
+      active: body.active !== undefined ? (bool(body.active) ? 1 : 0) : (existing ? existing.active : 1),
+      steps: JSON.stringify(body.steps ? sanitizeSteps(body.steps) : (existing ? db.json(existing.steps, SESSION_STEPS()) : SESSION_STEPS())),
+      settings: JSON.stringify(deepMerge(existing ? db.json(existing.settings, {}) : {}, { session })),
+    };
+
+    let et;
+    if (existing) {
+      db.run(`UPDATE event_types SET name=?, description=?, duration_min=?, buffer_after=?, min_notice_min=?, max_days_ahead=?,
+          slot_interval_min=?, location_type=?, location_value=?, active=?, steps=?, settings=? WHERE id = ? AND business_id = ?`,
+      fields.name, fields.description, fields.duration_min, fields.buffer_after, fields.min_notice_min, fields.max_days_ahead,
+      fields.slot_interval_min, fields.location_type, fields.location_value, fields.active, fields.steps, fields.settings, existing.id, b.id);
+      et = db.get('SELECT * FROM event_types WHERE id = ?', existing.id);
+    } else {
+      let slug = slugify(body.slug || name) || 'session';
+      let s = slug; let i = 2;
+      while (db.get('SELECT 1 FROM event_types WHERE business_id = ? AND slug = ?', b.id, s)) s = `${slug}-${i++}`;
+      const sort = (db.get('SELECT MAX(sort) m FROM event_types WHERE business_id = ?', b.id) || {}).m || 0;
+      const { lastId } = db.run(`INSERT INTO event_types (business_id, slug, name, description, duration_min, buffer_after, min_notice_min,
+          max_days_ahead, slot_interval_min, location_type, location_value, active, kind, steps, settings, sort)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'session',?,?,?)`,
+      b.id, s, fields.name, fields.description, fields.duration_min, fields.buffer_after, fields.min_notice_min,
+      fields.max_days_ahead, fields.slot_interval_min, fields.location_type, fields.location_value, fields.active, fields.steps, fields.settings, sort + 1);
+      et = db.get('SELECT * FROM event_types WHERE id = ?', lastId);
+    }
+    if (Array.isArray(body.calendar_ids)) SESS.setProductCalendars(b, et, body.calendar_ids);
+    return sessionOut(db.get('SELECT * FROM event_types WHERE id = ?', et.id));
+  }
+
+  app.post('/api/admin/sessions', (req) => { requireRole('admin')(req); return saveSession(req, null); });
+  app.patch('/api/admin/sessions/:id', (req) => {
+    requireRole('admin')(req);
+    const existing = db.get("SELECT * FROM event_types WHERE id = ? AND business_id = ? AND kind = 'session'", int(req.params.id), bid(req));
+    if (!existing) throw new HttpError(404, 'Not found');
+    return saveSession(req, existing);
+  });
+  app.delete('/api/admin/sessions/:id', (req) => {
+    requireRole('admin')(req);
+    const et = db.get("SELECT * FROM event_types WHERE id = ? AND business_id = ? AND kind = 'session'", int(req.params.id), bid(req));
+    if (!et) throw new HttpError(404, 'Not found');
+    const sold = db.get("SELECT COUNT(*) c FROM orders WHERE event_type_id = ? AND status = 'paid'", et.id).c;
+    // Keeping the row keeps the paid orders readable, so switch it off rather than deleting.
+    if (sold) throw new HttpError(409, `${et.name} has ${sold} paid order${sold === 1 ? '' : 's'} attached. Switch it off instead of deleting it.`);
+    db.run('DELETE FROM event_types WHERE id = ?', et.id);
+    return { ok: true };
+  });
+
+  app.get('/api/admin/orders', (req) => {
+    requireRole('host')(req);
+    const { rows, total } = SESS.listOrders(bid(req), {
+      status: ['pending', 'paid', 'expired', 'failed', 'refunded', 'not_required'].includes(req.query.status) ? req.query.status : null,
+      eventTypeId: req.query.session ? int(req.query.session) : null,
+      limit: int(req.query.limit, 100, 1, 500), offset: int(req.query.offset, 0, 0),
+    });
+    return { rows, total, summary: SESS.revenueSummary(bid(req)) };
+  });
+
+  app.get('/api/admin/orders/export.csv', (req, res) => {
+    requireRole('admin')(req);
+    const { rows } = SESS.listOrders(bid(req), { limit: 5000 });
+    const cols = ['created_at', 'status', 'product_name', 'calendar', 'amount', 'already_booked', 'booking_number', 'customer_name', 'customer_email', 'customer_phone', 'start', 'timezone', 'booking_status', 'error'];
+    const cell = (v) => { const s = v === null || v === undefined ? '' : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+    res.set('Content-Disposition', 'attachment; filename="session-orders.csv"');
+    res.text([cols.join(','), ...rows.map((r) => cols.map((c) => cell(r[c])).join(','))].join('\n'), 'text/csv; charset=utf-8');
+  });
+
+  // Seed the markets and the starter session products. Idempotent: matched by slug.
+  app.post('/api/admin/sessions/seed', (req) => {
+    requireRole('admin')(req);
+    return seedSessions(B.byId(bid(req)), req.body || {});
+  });
+
+  // ---------- Integrations: Stripe, Twilio, Resend ----------
+  // Reading status needs admin. Writing a credential needs owner: a saved live Stripe key is the
+  // difference between reading the dashboard and being able to take money as this business.
+  app.get('/api/admin/integrations/providers', (req) => {
+    requireRole('admin')(req);
+    return providers.status();
+  });
+
+  app.put('/api/admin/integrations/providers/:provider', (req) => {
+    requireRole('owner')(req);
+    const provider = String(req.params.provider);
+    if (!['stripe', 'twilio', 'resend'].includes(provider)) throw new HttpError(404, 'Unknown integration');
+    const body = req.body || {};
+    const allowed = new Set(appConfig.keysFor(provider));
+    for (const key of Object.keys(body)) {
+      if (key !== 'clear' && !allowed.has(key)) throw new HttpError(422, `${key} does not belong to ${provider}`);
+    }
+    // A field left as the mask means "leave it alone"; an empty string clears it back to Railway.
+    const changed = appConfig.applyPatch(body, { provider, userId: req.user.id });
+    for (const key of (Array.isArray(body.clear) ? body.clear : [])) {
+      if (allowed.has(key)) { appConfig.clear(key); changed.push(`${key} (cleared)`); }
+    }
+    if (changed.length) B.logActivity(bid(req), null, 'integration', `${provider} credentials updated by ${req.user.email}: ${changed.join(', ')}`);
+    return { ok: true, changed, status: providers.status()[provider] };
+  });
+
+  app.post('/api/admin/integrations/providers/:provider/check', async (req) => {
+    requireRole('admin')(req);
+    try {
+      return await providers.check(String(req.params.provider));
+    } catch (e) {
+      throw new HttpError(422, e.message);
+    }
+  });
+
+  app.post('/api/admin/integrations/providers/:provider/send-test', async (req) => {
+    requireRole('admin')(req);
+    const provider = String(req.params.provider);
+    const business = B.byId(bid(req));
+    const to = clampStr(String((req.body || {}).to || '').trim(), 160);
+    try {
+      if (provider === 'resend') return await providers.sendTestEmail(business, to || req.user.email);
+      if (provider === 'twilio') return await providers.sendTestSms(business, to || req.user.phone);
+      throw new Error('That integration has nothing to send.');
+    } catch (e) {
+      throw new HttpError(422, e.message);
+    }
+  });
+
+  // A real dollar through the whole path. Typed confirmation, because it is real money.
+  app.post('/api/admin/integrations/stripe/test-charge', async (req) => {
+    requireRole('owner')(req);
+    const body = req.body || {};
+    if (String(body.confirm || '').trim().toUpperCase() !== 'CHARGE') {
+      throw new HttpError(422, 'Type CHARGE to confirm a real payment.', { confirm: 'Type CHARGE to confirm' });
+    }
+    try {
+      const r = await providers.startDiagnosticCharge(B.byId(bid(req)), req.user, { amountCents: int(body.amount_cents, 100, 50, 5000) });
+      B.logActivity(bid(req), null, 'integration', `${req.user.email} started a $${r.amount.toFixed(2)} Stripe connection test`);
+      return r;
+    } catch (e) {
+      throw new HttpError(422, e.message);
+    }
+  });
+
+  // ---------- Scheduled emails and texts ----------
+  const CHANNELS = ['email', 'sms', 'both'];
+  const KINDS = ['transactional', 'marketing'];
+
+  function automationIn(req, existing) {
+    const body = req.body || {};
+    const name = clampStr(String(body.name || '').trim(), 120);
+    if (!name) throw new HttpError(422, 'Give the automation a name', { name: 'Required' });
+    const trigger = Object.keys(MSG.TRIGGERS).includes(body.trigger) ? body.trigger : (existing?.trigger || 'before');
+    const channel = CHANNELS.includes(body.channel) ? body.channel : (existing?.channel || 'email');
+    const ids = (v, fallback) => JSON.stringify((Array.isArray(v) ? v : fallback).map((x) => int(x, 0)).filter(Boolean).slice(0, 60));
+    const strings = (v, fallback) => JSON.stringify((Array.isArray(v) ? v : fallback).map((x) => clampStr(String(x).trim(), 120)).filter(Boolean).slice(0, 40));
+    const out = {
+      name, trigger, channel,
+      kind: KINDS.includes(body.kind) ? body.kind : (existing?.kind || 'transactional'),
+      // Cap at a year so a stray keystroke cannot park a message in the queue forever.
+      offset_min: int(body.offset_min, existing?.offset_min ?? 1440, 0, 525600),
+      event_type_ids: ids(body.event_type_ids, existing ? db.json(existing.event_type_ids, []) : []),
+      calendar_ids: ids(body.calendar_ids, existing ? db.json(existing.calendar_ids, []) : []),
+      service_match: strings(body.service_match, existing ? db.json(existing.service_match, []) : []),
+      match_mode: body.match_mode === 'all' ? 'all' : 'any',
+      skip_if_rebooked: body.skip_if_rebooked !== undefined ? (bool(body.skip_if_rebooked) ? 1 : 0) : (existing?.skip_if_rebooked ?? 0),
+      subject: clampStr(body.subject || '', 200),
+      body_html: clampStr(body.body_html || '', 20000),
+      sms_body: clampStr(body.sms_body || '', 1600),
+      active: body.active !== undefined ? (bool(body.active) ? 1 : 0) : (existing?.active ?? 0),
+    };
+    if (out.active) {
+      // Refuse to switch on something that would send nothing, or nothing sendable.
+      if ((channel === 'email' || channel === 'both') && !out.body_html.trim()) throw new HttpError(422, 'Write the email before switching this on', { body_html: 'Required' });
+      if ((channel === 'sms' || channel === 'both') && !out.sms_body.trim()) throw new HttpError(422, 'Write the text before switching this on', { sms_body: 'Required' });
+      if ((channel === 'sms' || channel === 'both') && !sms.configured()) throw new HttpError(422, 'Text messaging is not connected yet, so this cannot send texts.', { channel: 'Texts are not set up' });
+    }
+    return out;
+  }
+
+  app.get('/api/admin/automations', (req) => {
+    requireRole('host')(req);
+    const businessId = bid(req);
+    return {
+      automations: MSG.listAutomations(businessId),
+      summary: MSG.summary(businessId),
+      triggers: MSG.TRIGGERS,
+      variables: MSG.VARIABLES,
+      event_types: db.all('SELECT id, name, kind FROM event_types WHERE business_id = ? ORDER BY sort, id', businessId),
+      calendars: SESS.listCalendars(businessId, { includeInactive: true }).map((c) => ({ id: c.id, name: c.name, kind: c.kind })),
+      services: db.all('SELECT name FROM services WHERE business_id = ? AND active = 1 ORDER BY sort, id', businessId).map((r) => r.name),
+      sms: {
+        ready: sms.configured(),
+        inbound_url: `${baseUrl()}/api/public/sms/inbound`,
+        needs: sms.configured() ? [] : ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM_NUMBER or TWILIO_MESSAGING_SERVICE_SID'],
+      },
+    };
+  });
+
+  app.post('/api/admin/automations', (req) => {
+    requireRole('admin')(req);
+    const f = automationIn(req, null);
+    const sort = (db.get('SELECT MAX(sort) m FROM message_automations WHERE business_id = ?', bid(req)) || {}).m || 0;
+    const { lastId } = db.run(`INSERT INTO message_automations (business_id, name, channel, kind, trigger, offset_min,
+        event_type_ids, calendar_ids, service_match, match_mode, skip_if_rebooked, subject, body_html, sms_body, active, sort)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    bid(req), f.name, f.channel, f.kind, f.trigger, f.offset_min, f.event_type_ids, f.calendar_ids, f.service_match,
+    f.match_mode, f.skip_if_rebooked, f.subject, f.body_html, f.sms_body, f.active, sort + 1);
+    return MSG.listAutomations(bid(req)).find((a) => a.id === lastId);
+  });
+
+  function getAutomation(req) {
+    const a = db.get('SELECT * FROM message_automations WHERE id = ? AND business_id = ?', int(req.params.id), bid(req));
+    if (!a) throw new HttpError(404, 'Not found');
+    return a;
+  }
+
+  app.patch('/api/admin/automations/:id', (req) => {
+    requireRole('admin')(req);
+    const existing = getAutomation(req);
+    const f = automationIn(req, existing);
+    db.run(`UPDATE message_automations SET name=?, channel=?, kind=?, trigger=?, offset_min=?, event_type_ids=?, calendar_ids=?,
+        service_match=?, match_mode=?, skip_if_rebooked=?, subject=?, body_html=?, sms_body=?, active=?, updated_at=datetime('now')
+      WHERE id = ? AND business_id = ?`,
+    f.name, f.channel, f.kind, f.trigger, f.offset_min, f.event_type_ids, f.calendar_ids, f.service_match,
+    f.match_mode, f.skip_if_rebooked, f.subject, f.body_html, f.sms_body, f.active, existing.id, bid(req));
+    // Timing or conditions may have changed, so anything not yet sent is stale.
+    const dropped = db.run("UPDATE scheduled_messages SET status = 'cancelled', skip_reason = 'the automation was edited' WHERE automation_id = ? AND status = 'queued'", existing.id).changes;
+    const out = MSG.listAutomations(bid(req)).find((a) => a.id === existing.id);
+    return { ...out, requeued_note: dropped ? `${dropped} queued message${dropped === 1 ? '' : 's'} dropped; new bookings use the updated version` : null };
+  });
+
+  app.delete('/api/admin/automations/:id', (req) => {
+    requireRole('admin')(req);
+    const a = getAutomation(req);
+    db.run('DELETE FROM message_automations WHERE id = ?', a.id);
+    return { ok: true };
+  });
+
+  app.post('/api/admin/automations/preview', (req) => {
+    requireRole('host')(req);
+    const body = req.body || {};
+    const base = body.id ? db.get('SELECT * FROM message_automations WHERE id = ? AND business_id = ?', int(body.id), bid(req)) : {};
+    return MSG.preview(B.byId(bid(req)), { ...(base || {}), ...body }, { bookingId: body.booking_id });
+  });
+
+  const getAutomationById = (businessId, id) => db.get('SELECT * FROM message_automations WHERE id = ? AND business_id = ?', int(id), businessId);
+  app.post('/api/admin/automations/test', async (req) => {
+    requireRole('admin')(req);
+    const body = req.body || {};
+    const base = body.id ? getAutomationById(bid(req), body.id) : {};
+    const channel = body.channel === 'sms' ? 'sms' : 'email';
+    const to = clampStr(String(body.to || '').trim(), 160) || (channel === 'sms' ? req.user.phone : req.user.email);
+    try {
+      return await MSG.sendTest(B.byId(bid(req)), { ...(base || {}), ...body }, { to, channel });
+    } catch (e) {
+      throw new HttpError(422, e.message);
+    }
+  });
+
+  app.get('/api/admin/messages', (req) => {
+    requireRole('host')(req);
+    return {
+      rows: MSG.listQueue(bid(req), {
+        status: ['queued', 'sent', 'failed', 'skipped', 'cancelled'].includes(req.query.status) ? req.query.status : null,
+        limit: int(req.query.limit, 100, 1, 500),
+      }),
+      summary: MSG.summary(bid(req)),
+    };
+  });
+
+  // Nudge the queue by hand, for when someone does not want to wait for the next minute tick.
+  app.post('/api/admin/messages/run', async (req) => {
+    requireRole('admin')(req);
+    return MSG.processDue({ limit: 40 });
+  });
+
+  app.post('/api/admin/messages/:id/cancel', (req) => {
+    requireRole('admin')(req);
+    const r = db.run("UPDATE scheduled_messages SET status = 'cancelled', skip_reason = 'cancelled by hand' WHERE id = ? AND business_id = ? AND status = 'queued'", int(req.params.id), bid(req));
+    if (!r.changes) throw new HttpError(409, 'That message has already gone out or was cancelled.');
+    return { ok: true };
+  });
+
+  app.get('/api/admin/sms-optouts', (req) => {
+    requireRole('host')(req);
+    return db.all('SELECT phone, reason, created_at FROM sms_optouts WHERE business_id = ? ORDER BY created_at DESC LIMIT 500', bid(req));
+  });
+
+  // Only ever removed because the person asked us to start again.
+  app.delete('/api/admin/sms-optouts/:phone', (req) => {
+    requireRole('admin')(req);
+    const number = sms.normalizeNumber(req.params.phone);
+    if (!number) throw new HttpError(422, 'That is not a number we recognise.');
+    db.run('DELETE FROM sms_optouts WHERE business_id = ? AND phone = ?', bid(req), number);
+    return { ok: true };
+  });
+
   // ---------- Services (quote catalog) ----------
   // Spreadsheet import. Always dry run first so the admin sees exactly what will change.
   app.post('/api/admin/services/import', (req) => {
@@ -538,7 +930,7 @@ module.exports = function adminRoutes(app) {
   // ---------- Team ----------
   app.get('/api/admin/team', (req) => {
     requireRole('host')(req);
-    return db.all('SELECT u.id, u.name, u.email, u.timezone, m.role, m.status FROM users u JOIN memberships m ON m.user_id = u.id WHERE m.business_id = ? ORDER BY m.status, u.name', bid(req)).map((m) => ({ ...m, has_hours: !!db.get('SELECT 1 FROM availability_rules WHERE user_id = ?', m.id), calendars: db.all('SELECT provider, account_email FROM calendar_connections WHERE user_id = ?', m.id) }));
+    return db.all('SELECT u.id, u.name, u.email, u.timezone, m.role, m.status FROM users u JOIN memberships m ON m.user_id = u.id WHERE m.business_id = ? AND COALESCE(u.is_resource,0) = 0 ORDER BY m.status, u.name', bid(req)).map((m) => ({ ...m, has_hours: !!db.get('SELECT 1 FROM availability_rules WHERE user_id = ?', m.id), calendars: db.all('SELECT provider, account_email FROM calendar_connections WHERE user_id = ?', m.id) }));
   });
   app.post('/api/admin/team', async (req) => {
     requireRole('admin')(req);
