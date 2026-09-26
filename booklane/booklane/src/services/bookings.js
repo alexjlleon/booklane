@@ -12,6 +12,7 @@ const L = require('./leads');
 const S = require('./scheduling');
 const calendars = require('./calendars');
 const { sendWebhook } = require('./integrations');
+const MSG = require('./messaging');
 
 function hydrateEt(et) {
   if (!et) return et;
@@ -44,7 +45,9 @@ function locationText(et, contact, joinUrl) {
 function bookingView(b) {
   const et = hydrateEt(db.get('SELECT * FROM event_types WHERE id = ?', b.event_type_id));
   const business = B.byId(b.business_id);
-  const host = b.host_user_id ? db.get('SELECT id, name, email FROM users WHERE id = ?', b.host_user_id) : null;
+  const host = b.host_user_id ? db.get('SELECT id, name, email, is_resource FROM users WHERE id = ?', b.host_user_id) : null;
+  // A market or designer calendar is not a person: its address is a placeholder, so never mail it.
+  if (host?.is_resource) host.email = null;
   return { b, et, business, host };
 }
 
@@ -103,14 +106,21 @@ function assertFree(et, hostId, startMs, endMs, excludeId = 0) {
   }
 }
 
-async function createBooking({ business, et, startIso, tz, contact = {}, answers = {}, lead, quote }) {
+async function createBooking({ business, et, startIso, tz, contact = {}, answers = {}, lead, quote, restrictHostIds, excludeOrderId, force = false }) {
   const startMs = Date.parse(startIso);
   if (!Number.isFinite(startMs)) throw new HttpError(400, 'Pick a valid time');
   if (!T.isValidTz(tz)) tz = business.timezone;
   validateContact(et, contact, business);
-  const hosts = await S.availableHostsAt(et, startMs);
-  if (!hosts.length) throw new HttpError(409, 'Sorry, that time was just taken. Please pick another time.');
-  const hostId = S.pickHost(et, hosts);
+  let hostId;
+  if (force && Array.isArray(restrictHostIds) && restrictHostIds.length === 1) {
+    // The slot was held and paid for. Honour the hold even if someone edited the hours meanwhile;
+    // assertFree below still refuses a genuine clash with another confirmed booking.
+    hostId = Number(restrictHostIds[0]);
+  } else {
+    const hosts = await S.availableHostsAt(et, startMs, { restrictHostIds, excludeOrderId });
+    if (!hosts.length) throw new HttpError(409, 'Sorry, that time was just taken. Please pick another time.');
+    hostId = S.pickHost(et, hosts);
+  }
   const endMs = startMs + et.duration_min * 60000;
   const name = [contact.first_name, contact.last_name].map((x) => String(x || '').trim()).filter(Boolean).join(' ');
   const cleanAnswers = L.sanitizeAnswers(answers);
@@ -138,6 +148,11 @@ async function createBooking({ business, et, startIso, tz, contact = {}, answers
     B.logActivity(business.id, lead.id, 'booking', `Booked ${et.name} for ${T.formatDateTime(startMs, business.timezone)} with ${host?.name}`, { booking_id: bookingId });
   }
   const booking = db.get('SELECT * FROM bookings WHERE id = ?', bookingId);
+  // Queue the scheduled emails and texts for this booking. Never let a template mistake stop a
+  // booking that has already been paid for and written to the calendar.
+  for (const trigger of ['booked', 'before', 'after']) {
+    try { MSG.scheduleFor(booking, trigger); } catch (e) { console.error('[messaging schedule]', trigger, e.message); }
+  }
   sendBookingEmails('created', booking).catch((e) => console.error('[booking email]', e));
   const payload = { booking: bookingPayload(booking), lead: lead ? L.leadPayload(db.get('SELECT * FROM leads WHERE id = ?', lead.id)) : null };
   sendWebhook(business, 'booking.created', payload, lead?.id).then(() => lead && sendWebhook(business, 'lead.completed', payload.lead, lead.id)).catch((e) => console.error('[webhook]', e));
@@ -157,6 +172,8 @@ async function cancelBooking(booking, reason, by = 'invitee') {
   const b = db.get('SELECT * FROM bookings WHERE id = ?', booking.id);
   const business = B.byId(b.business_id);
   if (b.lead_id) B.logActivity(business.id, b.lead_id, 'booking', `Call cancelled by ${by}${reason ? `: ${reason}` : ''}`);
+  // Nothing scheduled should still go out for an appointment that is not happening.
+  try { MSG.cancelQueued(b.id); MSG.scheduleFor(b, 'cancelled'); } catch (e) { console.error('[messaging cancel]', e.message); }
   sendBookingEmails('cancelled', b).catch((e) => console.error('[booking email]', e));
   sendWebhook(business, 'booking.cancelled', bookingPayload(b), b.lead_id).catch((e) => console.error('[webhook]', e));
   return b;
@@ -188,6 +205,8 @@ async function rescheduleBooking(booking, startIso, tz) {
   if (ext) db.run('UPDATE bookings SET external_events = ?, location = CASE WHEN ? IS NOT NULL THEN ? ELSE location END WHERE id = ?', JSON.stringify([ext]), ext.join_url, ext.join_url, b.id);
   const business = B.byId(b.business_id);
   if (b.lead_id) B.logActivity(business.id, b.lead_id, 'booking', `Call rescheduled to ${T.formatDateTime(startMs, business.timezone)}`);
+  // The old "2 hours before" is now pointing at the wrong moment, so recompute the whole queue.
+  try { MSG.rescheduleQueued(b); MSG.scheduleFor(b, 'rescheduled'); } catch (e) { console.error('[messaging reschedule]', e.message); }
   sendBookingEmails('rescheduled', b).catch((e) => console.error('[booking email]', e));
   return b;
 }
@@ -195,7 +214,11 @@ async function rescheduleBooking(booking, startIso, tz) {
 async function sendReminders() {
   const due = db.all(`SELECT * FROM bookings WHERE status = 'confirmed' AND reminder_sent_at IS NULL AND start_utc > ? AND start_utc <= ?`,
     new Date().toISOString(), new Date(Date.now() + 24 * 3600000).toISOString());
+  // Businesses that have written their own "before the appointment" automation own their reminders;
+  // sending this built-in one too would be a duplicate in the customer's inbox.
+  const handled = new Set(db.all("SELECT DISTINCT business_id FROM message_automations WHERE active = 1 AND trigger = 'before'").map((r) => r.business_id));
   for (const b of due) {
+    if (handled.has(b.business_id)) { db.run("UPDATE bookings SET reminder_sent_at = datetime('now') WHERE id = ?", b.id); continue; }
     if (Date.parse(b.created_at.replace(' ', 'T') + 'Z') > Date.now() - 2 * 3600000) { db.run("UPDATE bookings SET reminder_sent_at = datetime('now') WHERE id = ?", b.id); continue; }
     const { et, business } = bookingView(b);
     db.run("UPDATE bookings SET reminder_sent_at = datetime('now') WHERE id = ?", b.id);
