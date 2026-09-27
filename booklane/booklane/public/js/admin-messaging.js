@@ -25,7 +25,7 @@
       const s = d.summary;
 
       const smsBanner = d.sms.ready ? '' : `<div class="panel warn-box"><h2>Texting is not connected yet</h2>
-        <p class="desc">Automations can still send emails. Texts need Twilio credentials in Railway: <b>${d.sms.needs.map(esc).join('</b>, <b>')}</b>.</p>
+        <p class="desc">Automations can still send emails. Texts need Twilio credentials under <a href="#/settings/integrations">Settings &rarr; Integrations</a>: <b>${d.sms.needs.map(esc).join('</b>, <b>')}</b>.</p>
         <div class="small">Once the number exists, point its <b>A messaging comes in</b> webhook at <code class="code">${esc(d.sms.inbound_url)}</code> <button type="button" class="btn btn-link btn-sm" data-copy="${esc(d.sms.inbound_url)}">Copy</button> so replies and STOP requests reach us.</div></div>`;
 
       return `${smsBanner}
