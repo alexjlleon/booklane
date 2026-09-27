@@ -244,8 +244,8 @@ async function submit(business, form, body = {}) {
   if (shape.charges) {
     const pay = f.steps.find((s) => s.type === 'payment');
     const PROD = require('./products');
-    const stripe = require('../lib/stripe');
-    if (!stripe.configured()) throw new HttpError(503, 'Card payments are not switched on yet. Please call us and we will take your order.');
+    const payments = require('../lib/payments');
+    if (!payments.configured(business.id)) throw new HttpError(503, 'Card payments are not switched on yet. Please call us and we will take your order.');
 
     if (pay.source === 'product') {
       const prodStep = f.steps.find((s) => s.type === 'product');
@@ -295,7 +295,7 @@ async function submit(business, form, body = {}) {
 
 /** A form that charges a set amount, with no product behind it. */
 async function fixedCheckout(business, form, pay, lead, contact, answers) {
-  const stripe = require('../lib/stripe');
+  const payments = require('../lib/payments');
   const { token } = require('../lib/security');
   const t = token(20);
   const label = clampStr(pay.label || form.name, 160);
@@ -311,17 +311,18 @@ async function fixedCheckout(business, form, pay, lead, contact, answers) {
 
   const base = baseUrl();
   try {
-    const cs = await stripe.createCheckoutSession({
+    const cs = await payments.createCheckout(business, {
       amountCents: pay.amount_cents,
+      items: [{ label, unit_cents: pay.amount_cents, qty: 1 }],
       productName: label,
       successUrl: `${base}/b/${business.slug}/f/${form.slug}/done?order=${t}`,
       cancelUrl: `${base}/b/${business.slug}/f/${form.slug}?cancelled=${t}`,
       customerEmail: String(contact.email || '').trim().toLowerCase() || undefined,
-      clientReferenceId: t,
-      metadata: { order_token: t, business: business.slug, form: form.slug },
+      referenceId: t,
+      metadata: { business: business.slug, form: form.slug },
       idempotencyKey: `form-${t}`,
     });
-    db.run('UPDATE orders SET provider_session_id = ? WHERE id = ?', cs.id, orderId);
+    db.run('UPDATE orders SET provider = ?, provider_session_id = ? WHERE id = ?', cs.provider, cs.orderId || cs.id, orderId);
     return { kind: 'checkout', checkout_url: cs.url, order_token: t, total_cents: pay.amount_cents, schedules_after: false };
   } catch (e) {
     db.run("UPDATE orders SET status = 'failed', last_error = ? WHERE id = ?", clampStr(e.message, 300), orderId);

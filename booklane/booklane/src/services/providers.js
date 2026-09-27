@@ -7,6 +7,8 @@ const https = require('node:https');
 const db = require('../db');
 const config = require('../lib/config');
 const stripe = require('../lib/stripe');
+const square = require('../lib/square');
+const payments = require('../lib/payments');
 const sms = require('../lib/sms');
 const { baseUrl, clampStr, int } = require('../lib/util');
 const { sendEmail, layout } = require('../lib/email');
@@ -15,23 +17,24 @@ const DIAGNOSTIC_NOTE = 'stripe.last_diagnostic';
 
 // ---------------------------------------------------------------- shape
 
-const fields = (provider) => config.keysFor(provider).map((k) => config.describe(k));
+const fields = (provider, bizId) => config.keysFor(provider).map((k) => config.describe(k, bizId));
 
-function stripeShape() {
-  const key = config.get('STRIPE_SECRET_KEY');
+function stripeShape(business) {
+  const bizId = business && business.id;
+  const key = config.get('STRIPE_SECRET_KEY', bizId);
   const missing = [];
   if (!key) missing.push('STRIPE_SECRET_KEY');
-  if (!config.get('STRIPE_WEBHOOK_SECRET')) missing.push('STRIPE_WEBHOOK_SECRET');
+  if (!config.get('STRIPE_WEBHOOK_SECRET', bizId)) missing.push('STRIPE_WEBHOOK_SECRET');
   return {
     provider: 'stripe',
     name: 'Stripe',
     what: 'Takes card payments for sessions.',
-    ready: stripe.configured() && !!config.get('STRIPE_WEBHOOK_SECRET'),
+    ready: stripe.configured() && !!config.get('STRIPE_WEBHOOK_SECRET', bizId),
     mode: key ? (key.startsWith('sk_live_') ? 'live' : 'test') : null,
     missing,
-    fields: fields('stripe'),
+    fields: fields('stripe', bizId),
     webhook: {
-      url: `${baseUrl()}/api/public/stripe/webhook`,
+      url: business ? payments.webhookUrl(business, 'stripe') : `${baseUrl()}/api/public/stripe/webhook`,
       events: ['checkout.session.completed', 'checkout.session.expired', 'charge.refunded'],
       // If this is zero after a real payment, the webhook is not wired up correctly.
       received: db.get("SELECT COUNT(*) c FROM provider_events WHERE provider = 'stripe'").c,
@@ -42,6 +45,36 @@ function stripeShape() {
       stuck: db.get("SELECT COUNT(*) c FROM orders WHERE status = 'paid' AND booking_id IS NULL").c,
     },
     last_test: config.readNote(DIAGNOSTIC_NOTE),
+  };
+}
+
+function squareShape(business) {
+  const bizId = business && business.id;
+  const token = config.get('SQUARE_ACCESS_TOKEN', bizId);
+  const loc = config.get('SQUARE_LOCATION_ID', bizId);
+  const missing = [];
+  if (!token) missing.push('SQUARE_ACCESS_TOKEN');
+  if (!loc) missing.push('SQUARE_LOCATION_ID');
+  if (!config.get('SQUARE_WEBHOOK_SIGNATURE_KEY', bizId)) missing.push('SQUARE_WEBHOOK_SIGNATURE_KEY');
+  return {
+    provider: 'square',
+    name: 'Square',
+    what: 'Takes card payments, plus Cash App Pay and Afterpay, on Square-hosted checkout.',
+    ready: square.configured(bizId) && !!config.get('SQUARE_WEBHOOK_SIGNATURE_KEY', bizId),
+    mode: token ? square.environment(bizId) : null,
+    missing,
+    fields: fields('square', bizId),
+    webhook: {
+      url: business ? payments.webhookUrl(business, 'square') : '',
+      events: ['payment.created', 'payment.updated', 'refund.updated'],
+      // Square signs the notification URL as well as the body, so this has to match exactly.
+      note: 'Paste this URL into Square exactly as shown. Square signs it along with the body, so even a trailing slash will make every event fail its signature check.',
+      received: db.get("SELECT COUNT(*) c FROM provider_events WHERE provider = 'square'").c,
+    },
+    activity: {
+      paid_orders: db.get("SELECT COUNT(*) c FROM orders WHERE status = 'paid' AND provider = 'square'").c,
+      paid_total: (db.get("SELECT COALESCE(SUM(amount_cents),0) s FROM orders WHERE status = 'paid' AND provider = 'square'").s || 0) / 100,
+    },
   };
 }
 
@@ -95,8 +128,21 @@ function resendShape() {
   };
 }
 
-function status() {
-  return { stripe: stripeShape(), twilio: twilioShape(), resend: resendShape(), mask: config.MASK };
+function status(business) {
+  const bizId = business && business.id;
+  return {
+    stripe: stripeShape(business),
+    square: squareShape(business),
+    twilio: twilioShape(),
+    resend: resendShape(),
+    // Which one this business takes cards through, and what it would use if nothing is chosen.
+    payments: {
+      chosen: (config.get('PAYMENT_PROVIDER', bizId) || '').toLowerCase() || null,
+      effective: business ? payments.providerFor(bizId) : null,
+      ready: business ? payments.configured(bizId) : false,
+    },
+    mask: config.MASK,
+  };
 }
 
 // ---------------------------------------------------------------- live checks
@@ -194,7 +240,24 @@ async function checkResend() {
 }
 
 const CHECKS = { stripe: checkStripe, twilio: checkTwilio, resend: checkResend };
-async function check(provider) {
+async function checkSquare(business) {
+  const bizId = business && business.id;
+  if (!square.configured(bizId)) return { ok: false, message: 'Save an access token and a location ID first.' };
+  try {
+    const r = await square.checkConnection(bizId);
+    return {
+      ok: r.ok,
+      mode: r.mode,
+      message: r.ok ? `Connected to ${r.location_name} (${r.mode}).` : r.error,
+      locations: r.locations,
+    };
+  } catch (e) {
+    return { ok: false, message: e.message };
+  }
+}
+
+async function check(provider, business) {
+  if (provider === 'square') return { provider, ...(await checkSquare(business)) };
   const fn = CHECKS[provider];
   if (!fn) throw new Error('Unknown integration');
   return { provider, ...(await fn()) };

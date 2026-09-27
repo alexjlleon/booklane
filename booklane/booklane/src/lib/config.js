@@ -20,34 +20,58 @@ const KEYS = {
   TWILIO_MESSAGING_SERVICE_SID: { secret: false, provider: 'twilio', label: 'Messaging Service SID' },
   RESEND_API_KEY: { secret: true, provider: 'resend', label: 'API key' },
   EMAIL_FROM: { secret: false, provider: 'resend', label: 'Send from' },
+  // Square is the other way to take a card. A business uses one or the other, never both at once.
+  SQUARE_ACCESS_TOKEN: { secret: true, provider: 'square', label: 'Access token' },
+  SQUARE_LOCATION_ID: { secret: false, provider: 'square', label: 'Location ID' },
+  SQUARE_WEBHOOK_SIGNATURE_KEY: { secret: true, provider: 'square', label: 'Webhook signature key' },
+  SQUARE_ENVIRONMENT: { secret: false, provider: 'square', label: 'Environment' },
+  // Which one this business actually uses: 'stripe' or 'square'.
+  PAYMENT_PROVIDER: { secret: false, provider: 'payments', label: 'Card payments through' },
 };
 
 const MASK = '•'.repeat(8);
 
-let cache = null;
-function all() {
-  if (cache) return cache;
-  cache = new Map();
+// One cache per scope: 'global' for the platform-wide values, or the business id.
+const caches = new Map();
+function all(businessId) {
+  const scope = businessId ? String(businessId) : 'global';
+  if (caches.has(scope)) return caches.get(scope);
+  const map = new Map();
   try {
-    for (const row of db.all('SELECT key, value, secret FROM app_settings')) {
+    const rows = businessId
+      ? db.all('SELECT key, value, secret FROM business_credentials WHERE business_id = ?', businessId)
+      : db.all('SELECT key, value, secret FROM app_settings');
+    for (const row of rows) {
       const v = row.secret ? decrypt(row.value) : row.value;
-      if (v !== null && v !== undefined && v !== '') cache.set(row.key, v);
+      if (v !== null && v !== undefined && v !== '') map.set(row.key, v);
     }
   } catch { /* table not created yet on a very old database */ }
-  return cache;
+  caches.set(scope, map);
+  return map;
 }
-const invalidate = () => { cache = null; };
+const invalidate = (businessId) => {
+  if (businessId === undefined) caches.clear();
+  else caches.delete(businessId ? String(businessId) : 'global');
+};
 
-/** The value the app should actually use: stored first, then the environment. */
-function get(name) {
-  const stored = all().get(name);
-  if (stored) return stored;
+/**
+ * The value the app should actually use, most specific first:
+ * this business, then the platform default, then the environment.
+ */
+function get(name, businessId) {
+  if (businessId) {
+    const own = all(businessId).get(name);
+    if (own) return own;
+  }
+  const shared = all().get(name);
+  if (shared) return shared;
   const env = process.env[name];
   return env ? String(env) : '';
 }
 
-/** 'app' when it came from the database, 'env' from the environment, null when unset. */
-function source(name) {
+/** Where the value came from: 'business', 'app', 'env', or null when unset. */
+function source(name, businessId) {
+  if (businessId && all(businessId).get(name)) return 'business';
   if (all().get(name)) return 'app';
   return process.env[name] ? 'env' : null;
 }
@@ -63,42 +87,50 @@ function hint(value) {
 }
 
 /** What the admin screen is allowed to know about one credential. */
-function describe(name) {
-  const value = get(name);
+function describe(name, businessId) {
+  const value = get(name, businessId);
   return {
     key: name,
     label: KEYS[name] ? KEYS[name].label : name,
     set: !!value,
-    source: source(name),
+    source: source(name, businessId),
     hint: KEYS[name] && KEYS[name].secret ? hint(value) : value,
     secret: !!(KEYS[name] && KEYS[name].secret),
   };
 }
 
-function set(name, value, userId) {
+function set(name, value, userId, businessId) {
   if (!KEYS[name]) throw new Error(`Unknown setting ${name}`);
   const clean = String(value == null ? '' : value).trim();
-  if (!clean) return clear(name);
+  if (!clean) return clear(name, businessId);
   const secret = KEYS[name].secret ? 1 : 0;
-  db.run(`INSERT INTO app_settings (key, value, secret, updated_by, updated_at) VALUES (?,?,?,?,datetime('now'))
-    ON CONFLICT(key) DO UPDATE SET value = excluded.value, secret = excluded.secret, updated_by = excluded.updated_by, updated_at = datetime('now')`,
-  name, secret ? encrypt(clean) : clean, secret, userId || null);
-  invalidate();
-  return describe(name);
+  const stored = secret ? encrypt(clean) : clean;
+  if (businessId) {
+    db.run(`INSERT INTO business_credentials (business_id, key, value, secret, updated_by, updated_at) VALUES (?,?,?,?,?,datetime('now'))
+      ON CONFLICT(business_id, key) DO UPDATE SET value = excluded.value, secret = excluded.secret, updated_by = excluded.updated_by, updated_at = datetime('now')`,
+    businessId, name, stored, secret, userId || null);
+  } else {
+    db.run(`INSERT INTO app_settings (key, value, secret, updated_by, updated_at) VALUES (?,?,?,?,datetime('now'))
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, secret = excluded.secret, updated_by = excluded.updated_by, updated_at = datetime('now')`,
+    name, stored, secret, userId || null);
+  }
+  invalidate(businessId);
+  return describe(name, businessId);
 }
 
 /** Remove the stored value, which falls back to the environment variable if there is one. */
-function clear(name) {
-  db.run('DELETE FROM app_settings WHERE key = ?', name);
-  invalidate();
-  return describe(name);
+function clear(name, businessId) {
+  if (businessId) db.run('DELETE FROM business_credentials WHERE business_id = ? AND key = ?', businessId, name);
+  else db.run('DELETE FROM app_settings WHERE key = ?', name);
+  invalidate(businessId);
+  return describe(name, businessId);
 }
 
 /**
  * Apply a patch from the admin form. A field left as the mask means "leave it alone", which is how
  * the screen can show that a key exists without ever having received its value.
  */
-function applyPatch(patch, { provider, userId } = {}) {
+function applyPatch(patch, { provider, userId, businessId } = {}) {
   const changed = [];
   for (const [name, meta] of Object.entries(KEYS)) {
     if (provider && meta.provider !== provider) continue;
@@ -107,7 +139,7 @@ function applyPatch(patch, { provider, userId } = {}) {
     if (raw === undefined || raw === null) continue;
     const str = String(raw);
     if (str === MASK || str.trim() === MASK) continue;
-    set(name, str, userId);
+    set(name, str, userId, businessId);
     changed.push(name);
   }
   return changed;

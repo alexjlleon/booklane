@@ -1176,24 +1176,28 @@ test('the integrations API never hands a secret back to the browser', async () =
 });
 
 test('leaving the mask in place keeps a key; an empty string clears it', async () => {
-  appConfig.set('STRIPE_WEBHOOK_SECRET', 'whsec_original_value', 1);
+  // Payment credentials saved through the admin belong to the business that saved them, so this
+  // reads them back at that scope. The platform-wide value underneath is the fallback.
+  const myBiz = db.get('SELECT id FROM businesses WHERE slug = ?', bizSlug).id;
+  appConfig.set('STRIPE_WEBHOOK_SECRET', 'whsec_original_value', 1, myBiz);
 
   // The screen sends the mask back for anything the user did not retype.
   const keep = await req('PUT', '/api/admin/integrations/providers/stripe',
     { STRIPE_WEBHOOK_SECRET: appConfig.MASK }, { cookie: ownerCookie });
   assert.equal(keep.status, 200);
   assert.deepEqual(keep.data.changed, [], 'the mask changes nothing');
-  assert.equal(appConfig.get('STRIPE_WEBHOOK_SECRET'), 'whsec_original_value');
+  assert.equal(appConfig.get('STRIPE_WEBHOOK_SECRET', myBiz), 'whsec_original_value');
 
   const change = await req('PUT', '/api/admin/integrations/providers/stripe',
     { STRIPE_WEBHOOK_SECRET: 'whsec_brand_new' }, { cookie: ownerCookie });
   assert.deepEqual(change.data.changed, ['STRIPE_WEBHOOK_SECRET']);
-  assert.equal(appConfig.get('STRIPE_WEBHOOK_SECRET'), 'whsec_brand_new');
+  assert.equal(appConfig.get('STRIPE_WEBHOOK_SECRET', myBiz), 'whsec_brand_new');
+  assert.equal(appConfig.source('STRIPE_WEBHOOK_SECRET', myBiz), 'business');
 
   const cleared = await req('PUT', '/api/admin/integrations/providers/stripe',
     { STRIPE_WEBHOOK_SECRET: '' }, { cookie: ownerCookie });
   assert.equal(cleared.status, 200);
-  assert.equal(appConfig.source('STRIPE_WEBHOOK_SECRET'), 'env', 'back to the Railway value');
+  assert.equal(appConfig.source('STRIPE_WEBHOOK_SECRET', myBiz), 'env', 'back to the Railway value');
 
   // A key belonging to another provider is refused rather than quietly written.
   appConfig.clear('RESEND_API_KEY');
@@ -1576,4 +1580,164 @@ test('a form switched off is not reachable', async () => {
   assert.equal((await req('GET', `/b/${bizSlug}/f/${ctaFormSlug}`)).status, 404);
   const blocked = await req('POST', `/api/public/b/${bizSlug}/f/${ctaFormSlug}/submit`, { answers: { interest: 'DJ' }, contact: { first_name: 'X', email: 'x@example.com' } });
   assert.equal(blocked.status, 404, 'and it stops accepting submissions too');
+});
+
+// ---------------------------------------------------------------------------
+// Two payment providers, and the isolation between businesses.
+// The point of these is that money is scoped to a business: its own credentials,
+// its own webhook URL, and no way to reach across to another company's account.
+// ---------------------------------------------------------------------------
+const appConfigP = require('../src/lib/config');
+const squareLib = require('../src/lib/square');
+const paymentsLib = require('../src/lib/payments');
+
+test('a credential saved for one business does not leak to another', () => {
+  const a = db.get('SELECT id FROM businesses WHERE slug = ?', bizSlug).id;
+  const b = db.run("INSERT INTO businesses (slug, name, timezone) VALUES ('other-co','Other Co','America/Chicago')").lastId;
+
+  appConfigP.set('SQUARE_ACCESS_TOKEN', 'token-for-A', null, a);
+  appConfigP.set('SQUARE_LOCATION_ID', 'LOC_A', null, a);
+
+  assert.equal(appConfigP.get('SQUARE_ACCESS_TOKEN', a), 'token-for-A');
+  assert.equal(appConfigP.get('SQUARE_ACCESS_TOKEN', b), '', 'the other business sees nothing');
+  assert.equal(appConfigP.source('SQUARE_ACCESS_TOKEN', a), 'business');
+  assert.equal(appConfigP.source('SQUARE_ACCESS_TOKEN', b), null);
+
+  // Stored encrypted, not in the clear.
+  const row = db.get('SELECT value, secret FROM business_credentials WHERE business_id = ? AND key = ?', a, 'SQUARE_ACCESS_TOKEN');
+  assert.equal(row.secret, 1);
+  assert.ok(!String(row.value).includes('token-for-A'), 'the token is not readable in the database');
+
+  // Square needs a location as well as a token, so one without the other is not "configured".
+  assert.equal(squareLib.configured(a), true);
+  assert.equal(squareLib.configured(b), false);
+
+  appConfigP.clear('SQUARE_ACCESS_TOKEN', a);
+  appConfigP.clear('SQUARE_LOCATION_ID', a);
+  db.run('DELETE FROM businesses WHERE id = ?', b);
+  appConfigP.invalidate();
+});
+
+test('a Square webhook is checked against that business own signing key', () => {
+  const crypto = require('node:crypto');
+  const a = db.get('SELECT id FROM businesses WHERE slug = ?', bizSlug).id;
+  const KEY = 'square-signing-key-for-A';
+  appConfigP.set('SQUARE_WEBHOOK_SIGNATURE_KEY', KEY, null, a);
+
+  const url = `${base}/api/public/square/webhook/${bizSlug}`;
+  const body = JSON.stringify({ event_id: 'evt_sq_1', type: 'payment.updated', data: { object: { payment: { id: 'pay_1', status: 'COMPLETED' } } } });
+  const sign = (k, u, b) => crypto.createHmac('sha256', k).update(u + b).digest('base64');
+
+  // The real signature is accepted.
+  const good = squareLib.verifyWebhook(body, { 'x-square-hmacsha256-signature': sign(KEY, url, body) }, url, a);
+  assert.equal(good.type, 'payment.updated');
+
+  // Everything else is refused: a changed body, another key, a different URL, no header at all.
+  const rejects = [
+    ['tampered body', body.replace('COMPLETED', 'FAILED'), sign(KEY, url, body), url],
+    ['someone else key', body, sign('not-the-key', url, body), url],
+    ['different URL', body, sign(KEY, url, body), `${url}x`],
+  ];
+  for (const [why, b, sig, u] of rejects) {
+    assert.throws(() => squareLib.verifyWebhook(b, { 'x-square-hmacsha256-signature': sig }, u, a), /Signature does not match/, why);
+  }
+  assert.throws(() => squareLib.verifyWebhook(body, {}, url, a), /Missing signature/);
+
+  appConfigP.clear('SQUARE_WEBHOOK_SIGNATURE_KEY', a);
+  appConfigP.invalidate();
+});
+
+test('a forged Square webhook is rejected over HTTP, not just in the library', async () => {
+  const a = db.get('SELECT id FROM businesses WHERE slug = ?', bizSlug).id;
+  appConfigP.set('SQUARE_WEBHOOK_SIGNATURE_KEY', 'a-real-key', null, a);
+  const forged = await req('POST', `/api/public/square/webhook/${bizSlug}`,
+    { event_id: 'evt_forged', type: 'payment.updated', data: { object: { payment: { id: 'p', status: 'COMPLETED' } } } },
+    { headers: { 'x-square-hmacsha256-signature': 'obviously-wrong' } });
+  assert.equal(forged.status, 400);
+  assert.match(forged.data.error, /Invalid signature/);
+
+  const unknownBiz = await req('POST', '/api/public/square/webhook/no-such-business', { type: 'payment.updated' });
+  assert.equal(unknownBiz.status, 404);
+
+  appConfigP.clear('SQUARE_WEBHOOK_SIGNATURE_KEY', a);
+  appConfigP.invalidate();
+});
+
+test('each business gets its own webhook URL, and the provider follows the credentials', () => {
+  const biz = db.get('SELECT * FROM businesses WHERE slug = ?', bizSlug);
+
+  // With nothing saved, Square is not an option.
+  assert.equal(paymentsLib.providerFor(biz.id) === 'square', false);
+
+  appConfigP.set('SQUARE_ACCESS_TOKEN', 'tok', null, biz.id);
+  appConfigP.set('SQUARE_LOCATION_ID', 'LOC', null, biz.id);
+  assert.equal(paymentsLib.providerFor(biz.id), 'square', 'saving Square credentials is enough to switch to it');
+
+  // An explicit choice beats inference, so a business can keep both sets of keys and still decide.
+  appConfigP.set('PAYMENT_PROVIDER', 'stripe', null, biz.id);
+  assert.equal(paymentsLib.providerFor(biz.id), 'stripe');
+
+  const d = paymentsLib.describe(biz);
+  assert.match(d.square.webhook_url, new RegExp(`/api/public/square/webhook/${bizSlug}$`));
+  assert.match(d.stripe.webhook_url, new RegExp(`/api/public/stripe/webhook/${bizSlug}$`));
+  assert.notEqual(d.square.webhook_url, d.stripe.webhook_url, 'the two providers do not share an endpoint');
+
+  appConfigP.clear('PAYMENT_PROVIDER', biz.id);
+  appConfigP.clear('SQUARE_ACCESS_TOKEN', biz.id);
+  appConfigP.clear('SQUARE_LOCATION_ID', biz.id);
+  appConfigP.invalidate();
+});
+
+test('Square builds an itemised checkout and never sends a price the browser chose', async () => {
+  const biz = db.get('SELECT * FROM businesses WHERE slug = ?', bizSlug);
+  appConfigP.set('SQUARE_ACCESS_TOKEN', 'tok', null, biz.id);
+  appConfigP.set('SQUARE_LOCATION_ID', 'LOC_1', null, biz.id);
+
+  // Capture what would go to Square rather than calling it.
+  const realCreate = squareLib.createCheckout;
+  let sent = null;
+  squareLib.createCheckout = async (args) => { sent = args; return { id: 'pl_1', url: 'https://square.link/u/abc', orderId: 'ord_1' }; };
+
+  const out = await paymentsLib.createCheckout(biz, {
+    items: [{ label: 'Wedding Album', detail: '8x8 / Velvet', unit_cents: 19000, qty: 2 }, { label: 'Extra spread', unit_cents: 5000, qty: 3 }],
+    currency: 'USD', referenceId: 'tok_abc', customerEmail: 'buyer@example.com',
+    successUrl: 'https://example.com/done',
+  });
+  assert.equal(out.provider, 'square');
+  assert.equal(out.url, 'https://square.link/u/abc');
+  assert.equal(sent.items.length, 2, 'both lines are itemised for the buyer');
+  assert.equal(sent.referenceId, 'tok_abc', 'our own order token rides along so the webhook can match it');
+  assert.equal(sent.bizId, biz.id, 'and it is charged to this business account, not a shared one');
+
+  squareLib.createCheckout = realCreate;
+  appConfigP.clear('SQUARE_ACCESS_TOKEN', biz.id);
+  appConfigP.clear('SQUARE_LOCATION_ID', biz.id);
+  appConfigP.invalidate();
+});
+
+test('both providers report a payment in the same shape', async () => {
+  const biz = db.get('SELECT * FROM businesses WHERE slug = ?', bizSlug);
+
+  const fromStripe = await paymentsLib.readEvent('stripe', {
+    id: 'evt_1', type: 'checkout.session.completed',
+    data: { object: { id: 'cs_1', payment_status: 'paid', client_reference_id: 'tok_9', payment_intent: 'pi_1', amount_total: 49500 } },
+  }, biz);
+  assert.equal(fromStripe.kind, 'paid');
+  assert.equal(fromStripe.referenceId, 'tok_9');
+  assert.equal(fromStripe.amountCents, 49500);
+
+  const fromSquare = await paymentsLib.readEvent('square', {
+    event_id: 'evt_2', type: 'payment.updated',
+    data: { object: { payment: { id: 'pay_9', status: 'COMPLETED', reference_id: 'tok_9', amount_money: { amount: 49500 }, receipt_url: 'https://sq/r' } } },
+  }, biz);
+  assert.equal(fromSquare.kind, 'paid');
+  assert.equal(fromSquare.referenceId, 'tok_9', 'same field name, whoever sent it');
+  assert.equal(fromSquare.amountCents, 49500);
+
+  // A payment that has not completed is never treated as money in.
+  const pending = await paymentsLib.readEvent('square', {
+    event_id: 'evt_3', type: 'payment.updated',
+    data: { object: { payment: { id: 'pay_x', status: 'PENDING', amount_money: { amount: 100 } } } },
+  }, biz);
+  assert.equal(pending.kind, 'pending');
 });

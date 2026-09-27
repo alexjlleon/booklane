@@ -16,6 +16,7 @@ const PROD = require('../services/products');
 const FORMS = require('../services/forms');
 const MSG = require('../services/messaging');
 const stripe = require('../lib/stripe');
+const payments = require('../lib/payments');
 const sms = require('../lib/sms');
 const { LOCATION_TYPES } = require('../defaults');
 
@@ -293,6 +294,38 @@ module.exports = function publicRoutes(app) {
 
   // Stripe posts here. The signature check is what stops anyone faking a paid order, so an
   // unverified body is never parsed as an event.
+  /**
+   * One webhook endpoint per provider per business.
+   *
+   * The business is in the path rather than the body because the signature has to be checked with
+   * that business's own key before any field of the payload is read -- and Square signs the
+   * notification URL along with the body, so the URL has to be the one registered anyway.
+   */
+  app.post('/api/public/:provider/webhook/:slug', async (req, res) => {
+    const provider = req.params.provider === 'square' ? 'square' : 'stripe';
+    let business;
+    try { business = getBusiness(req.params.slug); } catch { res.statusCode = 404; return res.json({ error: 'Unknown business' }); }
+
+    let event;
+    try {
+      event = payments.verifyWebhook(provider, req.rawBody, req.headers, { business });
+    } catch (e) {
+      console.error(`[${provider} webhook] rejected:`, e.message);
+      res.statusCode = 400;
+      return res.json({ error: 'Invalid signature' });
+    }
+    try {
+      const result = await SESS.handleStripeEvent(event, { provider, business });
+      return res.json({ received: true, result });
+    } catch (e) {
+      // Answer 500 so the provider retries a transient failure rather than giving up on it.
+      console.error(`[${provider} webhook]`, event.type, e.message);
+      res.statusCode = 500;
+      return res.json({ error: 'Could not process that event' });
+    }
+  });
+
+  // The original Stripe endpoint, kept working for any webhook already registered against it.
   app.post('/api/public/stripe/webhook', async (req, res) => {
     let event;
     try {
@@ -303,7 +336,7 @@ module.exports = function publicRoutes(app) {
       return res.json({ error: 'Invalid signature' });
     }
     try {
-      const result = await SESS.handleStripeEvent(event);
+      const result = await SESS.handleStripeEvent(event, { provider: 'stripe' });
       return res.json({ received: true, result });
     } catch (e) {
       // Answer 500 so Stripe retries a transient failure rather than giving up on it.

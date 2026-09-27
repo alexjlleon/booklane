@@ -15,6 +15,7 @@ const { HttpError } = require('../lib/router');
 const { slugify, clampStr, int, baseUrl, deepMerge, money, isEmail } = require('../lib/util');
 const { SESSION_SETTINGS, SESSION_STEPS } = require('../defaults');
 const stripe = require('../lib/stripe');
+const payments = require('../lib/payments');
 const B = require('./business');
 const L = require('./leads');
 const S = require('./scheduling');
@@ -210,8 +211,8 @@ function publicSession(et, business) {
     price_display: money(s.price_cents / 100, s.currency),
     price_cents: s.price_cents,
     currency: s.currency,
-    payable: s.price_cents > 0 && stripe.configured(),
-    payments_ready: stripe.configured(),
+    payable: s.price_cents > 0 && payments.configured(business.id),
+    payments_ready: payments.configured(business.id),
     calendars: cals.map((c) => ({ slug: c.slug, name: c.name, blurb: c.blurb || '' })),
     labels: {
       choose_label: s.choose_label, choose_hint: s.choose_hint,
@@ -311,7 +312,7 @@ async function startCheckout(business, et, body) {
   const { cal, startMs, endMs, tz, contact, lead } = await prepare(business, et, body);
   const s = et.session;
   if (!(s.price_cents > 0)) throw new HttpError(409, 'This session has no price set yet.');
-  if (!stripe.configured()) throw new HttpError(503, 'Card payments are not switched on yet. Please call us and we will book it for you.');
+  if (!payments.configured(business.id)) throw new HttpError(503, 'Card payments are not switched on yet. Please call us and we will book it for you.');
 
   const holdMs = Math.max(10, Math.min(180, int(s.hold_minutes, 30))) * 60000;
   const expiresAt = Date.now() + holdMs;
@@ -342,26 +343,29 @@ async function startCheckout(business, et, body) {
 
   const when = T.formatDateTime(startMs, tz);
   try {
-    const checkout = await stripe.createCheckoutSession({
+    const checkout = await payments.createCheckout(business, {
       amountCents: s.price_cents,
+      items: [{ label: `${et.name} — ${cal.name}`, detail: `${when} (${tz})`, unit_cents: s.price_cents, qty: 1 }],
       currency: s.currency,
       productName: `${et.name} — ${cal.name}`,
       description: `${when} (${tz})`,
       customerEmail: email,
-      clientReferenceId: t,
-      metadata: { order_token: t, business_id: String(business.id), event_type: et.slug, calendar: cal.slug },
+      referenceId: t,
+      metadata: { business_id: String(business.id), event_type: et.slug, calendar: cal.slug },
       successUrl: `${baseUrl()}/session/${t}?paid=1`,
       cancelUrl: `${baseUrl()}/b/${business.slug}/s/${et.slug}?cancelled=${t}`,
       expiresAt,
       idempotencyKey: `order-${t}`,
     });
-    db.run('UPDATE orders SET provider_session_id = ? WHERE id = ?', checkout.id, orderId);
+    db.run('UPDATE orders SET provider = ?, provider_session_id = ? WHERE id = ?', checkout.provider, checkout.orderId || checkout.id, orderId);
     B.logActivity(business.id, lead.id, 'booking', `Started checkout for ${et.name} in ${cal.name} at ${when}`);
     return { order_token: t, checkout_url: checkout.url };
   } catch (e) {
     // Never leave a hold behind for a checkout that was never created.
     db.run("UPDATE orders SET status = 'failed', last_error = ? WHERE id = ?", clampStr(e.message, 300), orderId);
-    if (e instanceof stripe.StripeError) throw new HttpError(502, 'We could not start the payment. Please try again, or call us and we will book it for you.');
+    // Whichever provider refused, the customer gets the same plain sentence.
+    const square = require('../lib/square');
+    if (e instanceof stripe.StripeError || e instanceof square.SquareError) throw new HttpError(502, 'We could not start the payment. Please try again, or call us and we will book it for you.');
     throw e;
   }
 }
@@ -417,9 +421,16 @@ async function finalizeOrder(order, { paymentIntent, receiptUrl, amountPaidCents
   }
 }
 
-/** Handle one verified Stripe event. Returns a short string for the log. */
-async function handleStripeEvent(event) {
-  const seen = db.run('INSERT OR IGNORE INTO provider_events (provider, event_id, kind) VALUES (?,?,?)', 'stripe', String(event.id), String(event.type || ''));
+/**
+ * Handle one already-verified event from either provider.
+ *
+ * The signature was checked before we got here. Everything below reads the event through the
+ * payments layer, so Stripe and Square arrive in the same shape and only the matching differs.
+ */
+async function handleStripeEvent(event, { provider = 'stripe', business } = {}) {
+  const payments = require('../lib/payments');
+  const eventId = String(event.id || event.event_id || '');
+  const seen = db.run('INSERT OR IGNORE INTO provider_events (provider, event_id, kind) VALUES (?,?,?)', provider, eventId, String(event.type || ''));
   if (!seen.changes) return 'duplicate';
 
   const obj = event.data?.object || {};
@@ -431,39 +442,38 @@ async function handleStripeEvent(event) {
     }
     return 'connection test event ignored';
   }
+  // From here on the event is read through the payments layer, so Stripe and Square look the same.
+  const read = await payments.readEvent(provider, event, business);
   const findOrder = () => {
-    const byRef = obj.client_reference_id || obj.metadata?.order_token;
-    if (byRef) { const o = orderByToken(byRef); if (o) return o; }
-    if (obj.id) return db.get('SELECT * FROM orders WHERE provider_session_id = ?', obj.id);
+    if (read.referenceId) { const o = orderByToken(read.referenceId); if (o) return o; }
+    if (read.sessionId) { const o = db.get('SELECT * FROM orders WHERE provider_session_id = ?', read.sessionId); if (o) return o; }
+    if (read.paymentId) return db.get('SELECT * FROM orders WHERE provider_payment_intent = ?', read.paymentId);
     return null;
   };
 
-  if (event.type === 'checkout.session.completed' || event.type === 'checkout.session.async_payment_succeeded') {
+  if (read.kind === 'paid') {
     const order = findOrder();
     if (!order) return 'no matching order';
-    if (obj.payment_status && obj.payment_status !== 'paid' && obj.payment_status !== 'no_payment_required') return `not paid yet (${obj.payment_status})`;
-    const pi = typeof obj.payment_intent === 'string' ? obj.payment_intent : obj.payment_intent?.id;
     // A product order has no slot waiting to be confirmed: record the payment and hand back a
     // scheduling link instead of trying to create a booking nobody has picked a time for.
     if (order.order_kind === 'product') {
-      await require('./products').markPaid(order, { paymentIntent: pi, amountPaidCents: obj.amount_total });
+      await require('./products').markPaid(order, { paymentIntent: read.paymentId, receiptUrl: read.receiptUrl, amountPaidCents: read.amountCents });
       return 'paid';
     }
-    await finalizeOrder(order, { paymentIntent: pi, amountPaidCents: obj.amount_total });
+    await finalizeOrder(order, { paymentIntent: read.paymentId, receiptUrl: read.receiptUrl, amountPaidCents: read.amountCents });
     return 'booked';
   }
-  if (event.type === 'checkout.session.expired' || event.type === 'checkout.session.async_payment_failed') {
+  if (read.kind === 'expired' || read.kind === 'failed') {
     const order = findOrder();
     if (!order || order.booking_id) return 'nothing to release';
-    db.run("UPDATE orders SET status = ?, hold_expires_at = 0 WHERE id = ? AND status = 'pending'", event.type.endsWith('expired') ? 'expired' : 'failed', order.id);
+    db.run("UPDATE orders SET status = ?, hold_expires_at = 0 WHERE id = ? AND status = 'pending'", read.kind, order.id);
     return order.order_kind === 'product' ? 'order abandoned' : 'hold released';
   }
-  if (event.type === 'charge.refunded') {
-    const pi = typeof obj.payment_intent === 'string' ? obj.payment_intent : obj.payment_intent?.id;
-    if (pi) db.run("UPDATE orders SET status = 'refunded' WHERE provider_payment_intent = ?", pi);
+  if (read.kind === 'refunded') {
+    if (read.paymentId) db.run("UPDATE orders SET status = 'refunded' WHERE provider_payment_intent = ?", read.paymentId);
     return 'refund recorded';
   }
-  return 'ignored';
+  return read.kind === 'pending' ? `not paid yet (${read.status || 'pending'})` : 'ignored';
 }
 
 /**
@@ -472,14 +482,14 @@ async function handleStripeEvent(event) {
  */
 async function reconcileOrder(order) {
   if (order.booking_id) return publicOrder(db.get('SELECT * FROM orders WHERE id = ?', order.id));
-  if (order.provider_session_id && stripe.configured()) {
+  if (order.provider_session_id) {
     try {
-      const s = await stripe.retrieveCheckoutSession(order.provider_session_id);
-      if (s.payment_status === 'paid' || s.payment_status === 'no_payment_required') {
-        const pi = typeof s.payment_intent === 'string' ? s.payment_intent : s.payment_intent?.id;
-        const receipt = s.payment_intent?.charges?.data?.[0]?.receipt_url || null;
-        await finalizeOrder(order, { paymentIntent: pi, receiptUrl: receipt, amountPaidCents: s.amount_total });
-      } else if (s.status === 'expired') {
+      const business = B.byId(order.business_id);
+      const look = await payments.lookupCheckout(business, order);
+      if (look.paid) {
+        const receipt = look.receiptUrl || look.raw?.payment_intent?.charges?.data?.[0]?.receipt_url || null;
+        await finalizeOrder(order, { paymentIntent: look.paymentId, receiptUrl: receipt, amountPaidCents: look.amountCents });
+      } else if (look.raw && look.raw.status === 'expired') {
         db.run("UPDATE orders SET status = 'expired', hold_expires_at = 0 WHERE id = ? AND status = 'pending'", order.id);
       }
     } catch (e) {

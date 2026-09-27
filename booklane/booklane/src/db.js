@@ -262,6 +262,18 @@ CREATE TABLE IF NOT EXISTS app_settings (
   updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+-- Credentials belonging to one business.
+--
+-- app_settings stays as the platform-wide fallback, so nothing that works today stops working:
+-- a key saved here wins for this business, then the platform default, then the environment. That
+-- chain is what lets a second company bring its own payment account without touching the first.
+CREATE TABLE IF NOT EXISTS business_credentials (
+  business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  key TEXT NOT NULL, value TEXT, secret INTEGER NOT NULL DEFAULT 0,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (business_id, key)
+);
 CREATE TABLE IF NOT EXISTS sms_optouts (
   business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
   phone TEXT NOT NULL, reason TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),

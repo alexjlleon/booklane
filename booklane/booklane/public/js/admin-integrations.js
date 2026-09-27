@@ -14,6 +14,10 @@
     TWILIO_MESSAGING_SERVICE_SID: 'Optional. Use instead of a single number if you have a Messaging Service. Starts MG.',
     RESEND_API_KEY: 'Resend dashboard → API Keys. Starts re_.',
     EMAIL_FROM: 'How emails appear, e.g. Weddings Unlimited <hello@weddingsunlimited.com>. The domain must be verified in Resend.',
+    SQUARE_ACCESS_TOKEN: 'Square Developer console → your application → Credentials → Access token. Use the Production token to take real money.',
+    SQUARE_LOCATION_ID: 'Square Developer console → Locations. Payments are taken against this location.',
+    SQUARE_WEBHOOK_SIGNATURE_KEY: 'From the webhook subscription you add below, not the API key.',
+    SQUARE_ENVIRONMENT: 'production or sandbox. Sandbox takes fake cards, for testing the flow.',
   };
 
   // Rendered into a placeholder on the existing Integrations tab.
@@ -28,9 +32,37 @@
       return;
     }
     A.cache.providers = s;
-    host.innerHTML = ['stripe', 'twilio', 'resend'].map((p) => card(s[p], s.mask)).join('');
+    // Card payments first, with the choice of provider above them, then the rest.
+    host.innerHTML = paymentChoice(s) + ['stripe', 'square', 'twilio', 'resend'].map((p) => card(s[p], s.mask)).join('');
     wire(host);
   };
+
+  /**
+   * Which provider this business takes cards through.
+   *
+   * Two businesses on this install can use different ones, and each supplies its own keys, so
+   * nothing here is shared. The choice is only offered once something is actually set up.
+   */
+  function paymentChoice(s) {
+    const pay = s.payments || {};
+    const ready = { stripe: s.stripe.ready, square: s.square.ready };
+    const options = ['stripe', 'square'];
+    const current = pay.chosen || pay.effective || '';
+    return `<div class="panel">
+      <div class="row between"><h2 style="font-size:16px;font-weight:800">Card payments</h2>
+        ${pay.ready ? `<span class="pill booked">Taking payments through ${esc(s[pay.effective] ? s[pay.effective].name : pay.effective)}</span>` : '<span class="pill lost">Not taking payments yet</span>'}</div>
+      <p class="desc">Pick one. Each business on this install connects its own account, so your keys are yours alone.</p>
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        ${options.map((p) => `<label class="opt radio${current === p ? ' is-on' : ''}" style="flex:1;min-width:200px">
+          <input type="radio" name="payprovider" value="${p}" data-payprovider ${current === p ? 'checked' : ''}>
+          <span class="tick"></span>
+          <span class="opt-stack"><span>${esc(s[p].name)}</span>
+          <span class="opt-hint">${ready[p] ? 'Ready' : 'Needs its keys below'}</span></span>
+        </label>`).join('')}
+      </div>
+      ${current && !ready[current] ? `<div class="help" style="margin-top:8px">${esc(s[current].name)} is chosen but not finished: ${esc((s[current].missing || []).join(', '))}.</div>` : ''}
+    </div>`;
+  }
 
   function stateBadge(p) {
     if (p.ready) return '<span class="pill booked">Connected</span>';
@@ -43,6 +75,9 @@
     if (p.provider === 'stripe') {
       return `${a.paid_orders || 0} paid order${a.paid_orders === 1 ? '' : 's'} · ${A.money(a.paid_total || 0)} taken · ${p.webhook.received || 0} webhook event${p.webhook.received === 1 ? '' : 's'} received`
         + (a.stuck ? ` · <span style="color:#c0392b">${a.stuck} paid but not booked</span>` : '');
+    }
+    if (p.provider === 'square') {
+      return `${a.paid_orders || 0} paid order${a.paid_orders === 1 ? '' : 's'} · ${A.money(a.paid_total || 0)} taken · ${p.webhook.received || 0} webhook event${p.webhook.received === 1 ? '' : 's'} received`;
     }
     if (p.provider === 'twilio') {
       return `${a.sent_7d || 0} text${a.sent_7d === 1 ? '' : 's'} in 7 days · ${a.segments_7d || 0} segment${a.segments_7d === 1 ? '' : 's'} · ${a.optouts || 0} opted out`
@@ -115,6 +150,17 @@
       if (!box) return;
       box.innerHTML = `<div class="${ok ? 'ok-box' : 'panel warn-box'}" style="padding:10px 12px"><div class="small">${ok ? '' : '<b>Not working: </b>'}${esc(message)}</div>${extra || ''}</div>`;
     };
+
+    // Switching provider is its own tiny save, so it takes effect without touching any key.
+    host.addEventListener('change', async (e) => {
+      const pick = e.target.closest('[data-payprovider]');
+      if (!pick || !pick.checked) return;
+      try {
+        await A.guard(() => api('PUT', '/integrations/providers/payments', { PAYMENT_PROVIDER: pick.value }), null);
+        A.toast(`Card payments set to ${pick.value === 'square' ? 'Square' : 'Stripe'}`);
+        await A.renderProviders(host);
+      } catch (err) { /* toast already shown */ }
+    });
 
     host.addEventListener('click', async (e) => {
       const save = e.target.closest('[data-save]');

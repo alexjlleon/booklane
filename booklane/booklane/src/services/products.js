@@ -19,7 +19,7 @@ const db = require('../db');
 const { token } = require('../lib/security');
 const { HttpError } = require('../lib/router');
 const { slugify, clampStr, int, baseUrl, deepMerge, money, isEmail } = require('../lib/util');
-const stripe = require('../lib/stripe');
+const payments = require('../lib/payments');
 const B = require('./business');
 const L = require('./leads');
 
@@ -219,7 +219,7 @@ function publicProduct(business, p) {
     })),
     price_rules: (x.price_rules || []).map((r) => ({ when: r.when || {}, price_cents: Math.max(0, int(r.price_cents, 0)) })),
     base_pages: int((x.settings || {}).base_pages, 0, 0, 500),
-    payments_ready: stripe.configured(),
+    payments_ready: payments.configured(business.id),
     schedules_after: !!x.followup_event_type_id,
     copy: c,
   };
@@ -250,7 +250,7 @@ function contactFrom(body) {
 async function startCheckout(business, product, body = {}) {
   const p = hydrate(product);
   const priced = priceSelection(p, body.selection || {});
-  if (!stripe.configured()) throw new HttpError(503, 'Card payments are not switched on yet. Please call us and we will take your order.');
+  if (!payments.configured(business.id)) throw new HttpError(503, 'Card payments are not switched on yet. Please call us and we will take your order.');
   const contact = contactFrom(body);
 
   let lead = body.lead_token ? L.byToken(body.lead_token) : null;
@@ -276,18 +276,20 @@ async function startCheckout(business, product, body = {}) {
 
   const base = baseUrl();
   try {
-    const cs = await stripe.createCheckoutSession({
+    const cs = await payments.createCheckout(business, {
       items: priced.lines,
       currency: p.currency,
       description: summary,
       successUrl: `${base}/b/${business.slug}/p/${p.slug}/done?order=${t}`,
       cancelUrl: `${base}/b/${business.slug}/p/${p.slug}?cancelled=${t}`,
       customerEmail: contact.email,
-      clientReferenceId: t,
-      metadata: { order_token: t, business: business.slug, product: p.slug },
+      referenceId: t,
+      metadata: { business: business.slug, product: p.slug },
       idempotencyKey: `order-${t}`,
     });
-    db.run('UPDATE orders SET provider_session_id = ? WHERE id = ?', cs.id, orderId);
+    // Square is queried by its order id, Stripe by its checkout session id. Store whichever the
+    // provider will answer to later, and remember which provider it was.
+    db.run('UPDATE orders SET provider = ?, provider_session_id = ? WHERE id = ?', cs.provider, cs.orderId || cs.id, orderId);
     return { checkout_url: cs.url, order_token: t, total_cents: priced.total_cents };
   } catch (e) {
     db.run("UPDATE orders SET status = 'failed', last_error = ? WHERE id = ?", clampStr(e.message, 300), orderId);
@@ -354,13 +356,11 @@ async function sendPaidEmail(business, order) {
 /** Ask Stripe directly on the return page, because the webhook can lag a second or two. */
 async function reconcile(order) {
   let o = db.get('SELECT * FROM orders WHERE id = ?', order.id);
-  if (o.status === 'pending' && o.provider_session_id && stripe.configured()) {
+  if (o.status === 'pending' && o.provider_session_id) {
     try {
-      const cs = await stripe.retrieveCheckoutSession(o.provider_session_id);
-      if (cs && (cs.payment_status === 'paid' || cs.payment_status === 'no_payment_required')) {
-        const pi = typeof cs.payment_intent === 'string' ? cs.payment_intent : cs.payment_intent?.id;
-        o = (await markPaid(o, { paymentIntent: pi, amountPaidCents: cs.amount_total })) || o;
-      }
+      const business = B.byId(o.business_id);
+      const look = await payments.lookupCheckout(business, o);
+      if (look.paid) o = (await markPaid(o, { paymentIntent: look.paymentId, amountPaidCents: look.amountCents, receiptUrl: look.receiptUrl })) || o;
     } catch { /* leave it pending; the webhook is the source of truth */ }
   }
   return o;

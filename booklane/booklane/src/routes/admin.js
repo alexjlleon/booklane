@@ -996,31 +996,35 @@ module.exports = function adminRoutes(app) {
   // difference between reading the dashboard and being able to take money as this business.
   app.get('/api/admin/integrations/providers', (req) => {
     requireRole('admin')(req);
-    return providers.status();
+    return providers.status(B.byId(bid(req)));
   });
 
   app.put('/api/admin/integrations/providers/:provider', (req) => {
     requireRole('owner')(req);
     const provider = String(req.params.provider);
-    if (!['stripe', 'twilio', 'resend'].includes(provider)) throw new HttpError(404, 'Unknown integration');
+    if (!['stripe', 'square', 'twilio', 'resend', 'payments'].includes(provider)) throw new HttpError(404, 'Unknown integration');
+    const business = B.byId(bid(req));
+    // Card credentials belong to this business. Twilio and Resend stay shared for now, which is why
+    // only the payment providers are scoped.
+    const scoped = ['stripe', 'square', 'payments'].includes(provider) ? business.id : undefined;
     const body = req.body || {};
     const allowed = new Set(appConfig.keysFor(provider));
     for (const key of Object.keys(body)) {
       if (key !== 'clear' && !allowed.has(key)) throw new HttpError(422, `${key} does not belong to ${provider}`);
     }
     // A field left as the mask means "leave it alone"; an empty string clears it back to Railway.
-    const changed = appConfig.applyPatch(body, { provider, userId: req.user.id });
+    const changed = appConfig.applyPatch(body, { provider, userId: req.user.id, businessId: scoped });
     for (const key of (Array.isArray(body.clear) ? body.clear : [])) {
-      if (allowed.has(key)) { appConfig.clear(key); changed.push(`${key} (cleared)`); }
+      if (allowed.has(key)) { appConfig.clear(key, scoped); changed.push(`${key} (cleared)`); }
     }
     if (changed.length) B.logActivity(bid(req), null, 'integration', `${provider} credentials updated by ${req.user.email}: ${changed.join(', ')}`);
-    return { ok: true, changed, status: providers.status()[provider] };
+    return { ok: true, changed, status: providers.status(business)[provider] };
   });
 
   app.post('/api/admin/integrations/providers/:provider/check', async (req) => {
     requireRole('admin')(req);
     try {
-      return await providers.check(String(req.params.provider));
+      return await providers.check(String(req.params.provider), B.byId(bid(req)));
     } catch (e) {
       throw new HttpError(422, e.message);
     }
