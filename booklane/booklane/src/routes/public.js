@@ -12,6 +12,7 @@ const S = require('../services/scheduling');
 const Q = require('../services/quotes');
 const BK = require('../services/bookings');
 const SESS = require('../services/sessions');
+const PROD = require('../services/products');
 const MSG = require('../services/messaging');
 const stripe = require('../lib/stripe');
 const sms = require('../lib/sms');
@@ -88,6 +89,89 @@ module.exports = function publicRoutes(app) {
       data: { business: publicBusiness(b), order: SESS.publicOrder(order) } }));
   });
 
+  // ---------- Products you can buy outright ----------
+  // A product is paid for first and scheduled afterwards, which is the opposite order to a session.
+  // Nothing here trusts a price from the browser: every total is recomputed from the product row.
+  app.get('/b/:slug/p/:product', (req, res) => {
+    const b = getBusiness(req.params.slug);
+    const p = PROD.bySlug(b, req.params.product);
+    res.html(page({ title: `${p.name} · ${b.name}`, description: p.description || b.settings.tagline, business: b, embed: bool(req.query.embed),
+      scripts: ['common.js', 'product.js'],
+      data: { business: publicBusiness(b), product: PROD.publicProduct(b, p), cancelled: req.query.cancelled ? true : false } }));
+  });
+
+  // Where Stripe sends them back to.
+  app.get('/b/:slug/p/:product/done', (req, res) => {
+    const b = getBusiness(req.params.slug);
+    PROD.bySlug(b, req.params.product);
+    const order = PROD.orderByToken(req.query.order);
+    if (!order || order.business_id !== b.id) throw new HttpError(404, 'Not found');
+    res.set('X-Robots-Tag', 'noindex');
+    res.html(page({ title: `Thank you · ${b.name}`, business: b, scripts: ['common.js', 'scheduler.js', 'product-return.js'],
+      data: { business: publicBusiness(b), order: PROD.publicOrder(b, order), orderToken: order.token } }));
+  });
+
+  // The link in the confirmation email, for anyone who closed the tab before booking their call.
+  app.get('/b/:slug/schedule/:token', (req, res) => {
+    const b = getBusiness(req.params.slug);
+    const order = PROD.orderByScheduleToken(req.params.token);
+    if (!order || order.business_id !== b.id) throw new HttpError(404, 'Not found');
+    res.set('X-Robots-Tag', 'noindex');
+    res.html(page({ title: `Book your call · ${b.name}`, business: b, scripts: ['common.js', 'scheduler.js', 'product-return.js'],
+      data: { business: publicBusiness(b), order: PROD.publicOrder(b, order), orderToken: order.token } }));
+  });
+
+  app.get('/api/public/b/:slug/p/:product', (req) => {
+    const b = getBusiness(req.params.slug);
+    return { product: PROD.publicProduct(b, PROD.bySlug(b, req.params.product)) };
+  });
+
+  // The running total the page shows comes from here, so what they read is what they will be charged.
+  app.post('/api/public/b/:slug/p/:product/quote', (req) => {
+    const b = getBusiness(req.params.slug);
+    const p = PROD.bySlug(b, req.params.product);
+    const priced = PROD.priceSelection(p, (req.body || {}).selection || {});
+    return {
+      total_cents: priced.total_cents,
+      lines: priced.lines.map((l) => ({ label: l.label, detail: l.detail || '', qty: l.qty, unit_cents: l.unit_cents, line_cents: l.unit_cents * l.qty })),
+    };
+  });
+
+  app.post('/api/public/b/:slug/p/:product/checkout', async (req) => {
+    writeLimit(req);
+    const b = getBusiness(req.params.slug);
+    const p = PROD.bySlug(b, req.params.product);
+    return PROD.startCheckout(b, p, req.body || {});
+  });
+
+  app.get('/api/public/orders/:token/slots', async (req) => {
+    const order = PROD.orderByToken(req.params.token);
+    if (!order || order.order_kind !== 'product') throw new HttpError(404, 'Not found');
+    const b = B.byId(order.business_id);
+    const prod = order.product_id ? PROD.hydrate(db.get('SELECT * FROM products WHERE id = ?', order.product_id)) : null;
+    if (!prod || !prod.followup_event_type_id) throw new HttpError(409, 'There is nothing to schedule for this order.');
+    const row = db.get('SELECT * FROM event_types WHERE id = ? AND business_id = ? AND active = 1', prod.followup_event_type_id, b.id);
+    if (!row) throw new HttpError(404, 'That booking page is not available.');
+    const et = BK.hydrateEt(row);
+    const tz = T.isValidTz(req.query.tz) ? req.query.tz : b.timezone;
+    const from = T.isDateStr(req.query.from) ? req.query.from : T.utcToZoned(Date.now(), tz).date;
+    let to = T.isDateStr(req.query.to) ? req.query.to : T.addDays(from, 30);
+    if (to < from) to = from;
+    if (Date.parse(to) - Date.parse(from) > 62 * 86400000) to = T.addDays(from, 62);
+    const slots = await S.computeSlots(et, from, to, tz);
+    const days = {};
+    for (const [d, list] of Object.entries(slots)) days[d] = list.map((x) => x.start);
+    return { timezone: tz, from, to, days, event: { name: et.name, duration_min: et.duration_min } };
+  });
+
+  app.post('/api/public/orders/:token/schedule', async (req) => {
+    writeLimit(req);
+    const order = PROD.orderByToken(req.params.token);
+    if (!order || order.order_kind !== 'product') throw new HttpError(404, 'Not found');
+    const b = B.byId(order.business_id);
+    return { order: await PROD.scheduleFollowup(b, order, req.body || {}) };
+  });
+
   app.get('/api/public/b/:slug/s/:event', (req) => {
     const b = getBusiness(req.params.slug);
     return { session: SESS.publicSession(SESS.bySlug(b, req.params.event), b) };
@@ -127,9 +211,15 @@ module.exports = function publicRoutes(app) {
     return SESS.startCheckout(b, et, req.body || {});
   });
 
+  // One path, two kinds of order. A session order reports where to send them once the slot is
+  // booked; a product order reports what they bought and whether a call still needs scheduling.
   app.get('/api/public/orders/:token', async (req) => {
     const order = SESS.orderByToken(req.params.token);
     if (!order) throw new HttpError(404, 'Not found');
+    if (order.order_kind === 'product') {
+      const b = B.byId(order.business_id);
+      return { order: PROD.publicOrder(b, await PROD.reconcile(order)) };
+    }
     return { order: await SESS.reconcileOrder(order) };
   });
 

@@ -155,3 +155,8 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
 .pill.refunded { background: #ecebff; color: #4633c9; }
 .warn-box { border-color: #f0d9a8; background: #fffaf0; }
 .warn-box h2 { color: #8a5a00; }
+
+/* ---------- Products editor: nested option groups and their rows ---------- */
+.panel.sub { background: var(--surface-2); border-style: dashed; margin-top: 14px; }
+.table.compact th, .table.compact td { padding: 6px 8px; font-size: 13.5px; vertical-align: top; }
+.table.compact .input { padding: 7px 9px; }

@@ -158,6 +158,37 @@ CREATE INDEX IF NOT EXISTS idx_orders_business ON orders (business_id, created_a
 CREATE INDEX IF NOT EXISTS idx_orders_hold ON orders (hold_host_user_id, status, hold_expires_at);
 CREATE INDEX IF NOT EXISTS idx_orders_provider_session ON orders (provider_session_id);
 -- Stripe redelivers webhooks, sometimes more than once. Remember what has already been handled.
+CREATE TABLE IF NOT EXISTS products (
+  id INTEGER PRIMARY KEY, business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  slug TEXT NOT NULL, name TEXT NOT NULL, description TEXT, image_url TEXT,
+  -- Charged on top of whatever the chosen options cost. Zero when the options carry the whole price,
+  -- which is how the albums work: the 8x8 and the 10x10 are two priced choices of one option group.
+  base_cents INTEGER NOT NULL DEFAULT 0, currency TEXT NOT NULL DEFAULT 'USD',
+  -- [{ id, label, hint, required, applies_to:[choiceId], choices:[{ id, label, price_cents }] }]
+  -- applies_to lets a group show only when another group's choice is picked, so the cover choice
+  -- appears for the 10x10 and not for the 8x8.
+  option_groups TEXT NOT NULL DEFAULT '[]',
+  -- [{ id, label, hint, price_cents, max_qty }]
+  addons TEXT NOT NULL DEFAULT '[]',
+  min_qty INTEGER NOT NULL DEFAULT 1, max_qty INTEGER NOT NULL DEFAULT 10, default_qty INTEGER NOT NULL DEFAULT 1,
+  -- The booking page offered once it is paid for, e.g. the album design call.
+  followup_event_type_id INTEGER REFERENCES event_types(id) ON DELETE SET NULL,
+  settings TEXT NOT NULL DEFAULT '{}',
+  active INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (business_id, slug)
+);
+-- One row per cart line, priced by the server. The order's amount is the sum of these, never a
+-- number the browser sent.
+CREATE TABLE IF NOT EXISTS order_items (
+  id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+  kind TEXT NOT NULL,
+  label TEXT NOT NULL, detail TEXT,
+  unit_cents INTEGER NOT NULL DEFAULT 0, qty INTEGER NOT NULL DEFAULT 1,
+  sort INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items (order_id);
 CREATE TABLE IF NOT EXISTS provider_events (
   provider TEXT NOT NULL, event_id TEXT NOT NULL, kind TEXT,
   received_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (provider, event_id)
@@ -228,6 +259,14 @@ for (const sql of [
   "ALTER TABLE event_types ADD COLUMN kind TEXT NOT NULL DEFAULT 'call'",
   // A login-less user row that exists only to own a calendar (a market, or the album designer).
   'ALTER TABLE users ADD COLUMN is_resource INTEGER NOT NULL DEFAULT 0',
+  // Orders grew from one session to a cart of lines; 'product' orders are scheduled after payment,
+  // not before, so the slot columns stay empty for them.
+  'ALTER TABLE orders ADD COLUMN product_id INTEGER',
+  "ALTER TABLE orders ADD COLUMN order_kind TEXT NOT NULL DEFAULT 'session'",
+  'ALTER TABLE orders ADD COLUMN schedule_token TEXT',
+  // An album's price is a combination (size x cover), not a single choice, so the price lives in a
+  // rule table rather than on one option. Extra spreads are priced the same way, by size and paper.
+  "ALTER TABLE products ADD COLUMN price_rules TEXT NOT NULL DEFAULT '[]'",
 ]) { try { raw.exec(sql); } catch { /* column already exists */ } }
 
 const cache = new Map();

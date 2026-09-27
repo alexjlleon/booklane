@@ -443,6 +443,12 @@ async function handleStripeEvent(event) {
     if (!order) return 'no matching order';
     if (obj.payment_status && obj.payment_status !== 'paid' && obj.payment_status !== 'no_payment_required') return `not paid yet (${obj.payment_status})`;
     const pi = typeof obj.payment_intent === 'string' ? obj.payment_intent : obj.payment_intent?.id;
+    // A product order has no slot waiting to be confirmed: record the payment and hand back a
+    // scheduling link instead of trying to create a booking nobody has picked a time for.
+    if (order.order_kind === 'product') {
+      await require('./products').markPaid(order, { paymentIntent: pi, amountPaidCents: obj.amount_total });
+      return 'paid';
+    }
     await finalizeOrder(order, { paymentIntent: pi, amountPaidCents: obj.amount_total });
     return 'booked';
   }
@@ -450,7 +456,7 @@ async function handleStripeEvent(event) {
     const order = findOrder();
     if (!order || order.booking_id) return 'nothing to release';
     db.run("UPDATE orders SET status = ?, hold_expires_at = 0 WHERE id = ? AND status = 'pending'", event.type.endsWith('expired') ? 'expired' : 'failed', order.id);
-    return 'hold released';
+    return order.order_kind === 'product' ? 'order abandoned' : 'hold released';
   }
   if (event.type === 'charge.refunded') {
     const pi = typeof obj.payment_intent === 'string' ? obj.payment_intent : obj.payment_intent?.id;

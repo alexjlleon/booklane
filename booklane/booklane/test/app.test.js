@@ -1328,3 +1328,131 @@ test('changing a key takes effect immediately, without a restart', async () => {
   appConfig.clear('TWILIO_FROM_NUMBER');
   appConfig.invalidate();
 });
+
+// ---------------------------------------------------------------------------
+// Products bought outright: matrix pricing, then scheduling after payment.
+// The point of these is that the money is decided by the server, never the page.
+// ---------------------------------------------------------------------------
+let albumId;
+
+test('a product prices a combination from its own table', async () => {
+  const made = await req('POST', '/api/admin/products', {
+    name: 'Wedding Album',
+    description: 'Flush mount, laid out with you.',
+    base_price: 0,
+    min_qty: 1, max_qty: 3,
+    settings: { base_pages: 20 },
+    option_groups: [
+      { id: 'size', label: 'Size', layout: 'cards', required: true, choices: [{ id: 'sq8', label: '8x8 Square' }, { id: 'ls811', label: '8x11 Landscape' }] },
+      { id: 'cover', label: 'Cover', layout: 'swatches', required: true, choices: [{ id: 'printed', label: 'Printed' }, { id: 'velvet', label: 'Velvet' }] },
+    ],
+    price_rules: [
+      { when: { size: 'sq8', cover: 'printed' }, price_cents: 16600 },
+      { when: { size: 'sq8', cover: 'velvet' }, price_cents: 19000 },
+      { when: { size: 'ls811', cover: 'printed' }, price_cents: 19000 },
+    ],
+    addons: [{ id: 'spreads', label: 'Extra spread (2 pages)', unit_label: 'per spread', ui: 'stepper', per_unit: true, max_qty: 20,
+      price_rules: [{ when: { size: 'sq8' }, price_cents: 5000 }, { when: { size: 'ls811' }, price_cents: 7500 }] }],
+  }, { cookie: ownerCookie });
+  assert.equal(made.status, 200, JSON.stringify(made.data));
+  albumId = made.data.id;
+
+  const quote = (selection) => req('POST', `/api/public/b/${bizSlug}/p/${made.data.slug}/quote`, { selection });
+
+  const plain = await quote({ options: { size: 'sq8', cover: 'printed' } });
+  assert.equal(plain.status, 200);
+  assert.equal(plain.data.total_cents, 16600, 'the 8x8 printed comes from the rule table');
+
+  const velvet = await quote({ options: { size: 'sq8', cover: 'velvet' } });
+  assert.equal(velvet.data.total_cents, 19000);
+
+  // Extra spreads are priced by size, and sit in every copy, so they scale with the order.
+  const withPages = await quote({ options: { size: 'ls811', cover: 'printed' }, addons: { spreads: 4 } });
+  assert.equal(withPages.data.total_cents, 19000 + 4 * 7500);
+  const twoCopies = await quote({ options: { size: 'ls811', cover: 'printed' }, addons: { spreads: 4 }, qty: 2 });
+  assert.equal(twoCopies.data.total_cents, 2 * (19000 + 4 * 7500), 'two copies cost exactly twice one copy');
+
+  // A combination nobody has priced refuses rather than falling back to zero.
+  const gap = await quote({ options: { size: 'ls811', cover: 'velvet' } });
+  assert.equal(gap.status, 409);
+  assert.match(gap.data.error, /do not have a price/i);
+
+  // A required choice cannot be skipped.
+  const missing = await quote({ options: { size: 'sq8' } });
+  assert.equal(missing.status, 422);
+  assert.ok(missing.data.details['options.cover']);
+});
+
+test('a price sent by the browser is ignored', async () => {
+  const p = await req('GET', '/api/admin/products', null, { cookie: ownerCookie });
+  const album = p.data.products.find((x) => x.id === albumId);
+  // Everything a tampered page could plausibly send: its own prices, on every shape we accept.
+  const tampered = await req('POST', `/api/public/b/${bizSlug}/p/${album.slug}/quote`, {
+    selection: {
+      options: { size: 'sq8', cover: 'velvet' },
+      addons: { spreads: 1 },
+      qty: 1,
+      price_cents: 1, total_cents: 1, amount_cents: 1,
+      lines: [{ label: 'Album', unit_cents: 1, qty: 1 }],
+    },
+    total_cents: 1,
+    amount_cents: 1,
+  });
+  assert.equal(tampered.status, 200);
+  assert.equal(tampered.data.total_cents, 19000 + 5000, 'the server re-prices from its own table');
+});
+
+test('a price matrix can be pasted, and adds the choices it names', async () => {
+  const pasted = await req('POST', `/api/admin/products/${albumId}/price-matrix`, {
+    target: 'product',
+    text: [
+      'Variation, Cover, Price',                 // a header line is ignored
+      '8x11 Landscape, Velvet, $240.00',         // fills the gap the test above found
+      '12x12 Square | Crystal (leather) | 1,298.00', // thousands separator, pipes, a new size
+      'not a priced row at all',
+    ].join('\n'),
+  }, { cookie: ownerCookie });
+  assert.equal(pasted.status, 200, JSON.stringify(pasted.data));
+  assert.equal(pasted.data.rules, 2, 'two readable rows, header and prose skipped');
+  assert.equal(pasted.data.choices_added, 2, '12x12 Square and Crystal (leather) were new');
+
+  const slug = pasted.data.product.slug;
+  const filled = await req('POST', `/api/public/b/${bizSlug}/p/${slug}/quote`, { selection: { options: { size: 'ls811', cover: 'velvet' } } });
+  assert.equal(filled.data.total_cents, 24000, 'the gap is now priced');
+
+  const big = await req('GET', `/api/public/b/${bizSlug}/p/${slug}`);
+  const sizes = big.data.product.option_groups.find((g) => g.id === 'size');
+  assert.ok(sizes.choices.some((c) => c.label === '12x12 Square'), 'the new size is offered');
+  const priced = await req('POST', `/api/public/b/${bizSlug}/p/${slug}/quote`, { selection: { options: { size: sizes.choices.find((c) => c.label === '12x12 Square').id, cover: big.data.product.option_groups.find((g) => g.id === 'cover').choices.find((c) => c.label === 'Crystal (leather)').id } } });
+  assert.equal(priced.data.total_cents, 129800, '$1,298 survived the comma');
+});
+
+test('an unpaid order cannot book the design call', async () => {
+  const p = await req('GET', '/api/admin/products', null, { cookie: ownerCookie });
+  const album = p.data.products.find((x) => x.id === albumId);
+  // Create a pending order the way checkout would, without paying for it.
+  const lead = await req('POST', `/api/public/b/${bizSlug}/leads`, { source: 'booking' });
+  db.run(`INSERT INTO orders (business_id, token, lead_id, product_id, order_kind, product_name, amount_cents, currency, status, provider, customer_name, customer_email)
+    VALUES ((SELECT id FROM businesses WHERE slug = ?), 'tok-unpaid', (SELECT id FROM leads WHERE token = ?), ?, 'product', 'Wedding Album', 19000, 'USD', 'pending', 'stripe', 'Nobody', 'nobody@test.dev')`,
+  bizSlug, lead.data.token, album.id);
+
+  const tryBook = await req('POST', '/api/public/orders/tok-unpaid/schedule', { start: new Date(Date.now() + 5 * 86400000).toISOString(), timezone: 'America/Chicago' });
+  assert.equal(tryBook.status, 409);
+  assert.match(tryBook.data.error, /not been paid/i);
+
+  // And the public view of it never leaks a scheduling token while it is unpaid.
+  const view = await req('GET', '/api/public/orders/tok-unpaid');
+  assert.equal(view.data.order.paid, false);
+  assert.equal(view.data.order.schedule_token, null);
+});
+
+test('a product switched off is not for sale', async () => {
+  const p = await req('GET', '/api/admin/products', null, { cookie: ownerCookie });
+  const album = p.data.products.find((x) => x.id === albumId);
+  await req('PATCH', `/api/admin/products/${albumId}`, { name: album.name, active: false }, { cookie: ownerCookie });
+  const gone = await req('GET', `/api/public/b/${bizSlug}/p/${album.slug}`);
+  assert.equal(gone.status, 404);
+  const page = await req('GET', `/b/${bizSlug}/p/${album.slug}`);
+  assert.equal(page.status, 404);
+  await req('PATCH', `/api/admin/products/${albumId}`, { name: album.name, active: true }, { cookie: ownerCookie });
+});

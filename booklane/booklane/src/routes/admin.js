@@ -15,6 +15,7 @@ const calendars = require('../services/calendars');
 const { pushToBoothBook, sendWebhook, buildBoothBookPayload } = require('../services/integrations');
 const Importer = require('../services/catalog-import');
 const SESS = require('../services/sessions');
+const PROD = require('../services/products');
 const MSG = require('../services/messaging');
 const stripe = require('../lib/stripe');
 const sms = require('../lib/sms');
@@ -595,6 +596,267 @@ module.exports = function adminRoutes(app) {
     if (Array.isArray(body.calendar_ids)) SESS.setProductCalendars(b, et, body.calendar_ids);
     return sessionOut(db.get('SELECT * FROM event_types WHERE id = ?', et.id));
   }
+
+  // ---------- Products sold outright (albums, prints) ----------
+  // Options and add-ons are edited here so the priced list is Alex's to change without a release.
+  // Ids are slugs of the labels, kept stable once written: an order's lines already recorded their
+  // own labels and prices, so renaming a choice later never rewrites history.
+  const idFor = (label, used, fallback) => {
+    let base = slugify(String(label || '')) || fallback;
+    let out = base; let i = 2;
+    while (used.has(out)) out = `${base}-${i++}`;
+    used.add(out);
+    return out;
+  };
+
+  function cleanGroups(raw) {
+    const used = new Set();
+    return (Array.isArray(raw) ? raw : []).slice(0, 12).map((g, gi) => {
+      const id = g && g.id ? clampStr(String(g.id), 60) : idFor(g && g.label, used, `group-${gi + 1}`);
+      used.add(id);
+      const cUsed = new Set();
+      return {
+        id,
+        label: clampStr(g?.label || '', 120),
+        hint: clampStr(g?.hint || '', 200),
+        required: g?.required === undefined ? true : bool(g.required),
+        layout: ['cards', 'swatches', 'list'].includes(g?.layout) ? g.layout : 'list',
+        applies_to: (Array.isArray(g?.applies_to) ? g.applies_to : []).slice(0, 24).map((x) => clampStr(String(x), 60)).filter(Boolean),
+        choices: (Array.isArray(g?.choices) ? g.choices : []).slice(0, 60).map((c, ci) => ({
+          id: c && c.id ? clampStr(String(c.id), 60) : idFor(c && c.label, cUsed, `choice-${ci + 1}`),
+          label: clampStr(c?.label || '', 200),
+          hint: clampStr(c?.hint || '', 200),
+          image_url: clampStr(c?.image_url || '', 500),
+          price_cents: c?.price_cents !== undefined ? int(c.price_cents, 0, 0, 100000000) : Math.round(num(c?.price, 0) * 100),
+        })).filter((c) => c.label),
+      };
+    }).filter((g) => g.choices.length);
+  }
+
+  // A rule is { when: { groupId: choiceId }, price_cents }. Unknown keys are kept as given: the
+  // group may be renamed later, and a rule that stops matching shows up as "no price for that
+  // combination" rather than quietly charging the wrong amount.
+  function cleanRules(raw) {
+    return (Array.isArray(raw) ? raw : []).slice(0, 2000).map((r) => {
+      const when = {};
+      const src = (r && r.when && typeof r.when === 'object') ? r.when : {};
+      for (const k of Object.keys(src).slice(0, 8)) when[clampStr(String(k), 60)] = clampStr(String(src[k]), 60);
+      return { when, price_cents: r?.price_cents !== undefined ? int(r.price_cents, 0, 0, 100000000) : Math.round(num(r?.price, 0) * 100) };
+    }).filter((r) => Object.keys(r.when).length);
+  }
+
+  function cleanAddons(raw) {
+    const used = new Set();
+    return (Array.isArray(raw) ? raw : []).slice(0, 40).map((a, i) => ({
+      id: a && a.id ? clampStr(String(a.id), 60) : idFor(a && a.label, used, `extra-${i + 1}`),
+      label: clampStr(a?.label || '', 200),
+      hint: clampStr(a?.hint || '', 200),
+      price_cents: a?.price_cents !== undefined ? int(a.price_cents, 0, 0, 100000000) : Math.round(num(a?.price, 0) * 100),
+      price_rules: cleanRules(a?.price_rules),
+      unit_label: clampStr(a?.unit_label || '', 60),
+      per_unit: bool(a?.per_unit),
+      ui: a?.ui === 'stepper' ? 'stepper' : 'check',
+      max_qty: int(a?.max_qty, 1, 1, 200),
+    })).filter((a) => a.label);
+  }
+
+  const productOut = (p) => {
+    const x = PROD.hydrate({ ...p });
+    const sold = db.get("SELECT COUNT(*) c, COALESCE(SUM(amount_cents),0) cents FROM orders WHERE product_id = ? AND status = 'paid'", x.id);
+    return {
+      id: x.id, slug: x.slug, name: x.name, description: x.description || '', image_url: x.image_url || '',
+      base_cents: x.base_cents, base_dollars: (x.base_cents / 100).toFixed(2), currency: x.currency,
+      option_groups: x.option_groups, addons: x.addons, price_rules: x.price_rules,
+      min_qty: x.min_qty, max_qty: x.max_qty, default_qty: x.default_qty,
+      followup_event_type_id: x.followup_event_type_id, settings: x.settings, copy: x.copy,
+      active: !!x.active, sort: x.sort,
+      sold_count: sold.c, sold_cents: sold.cents,
+      url: `${baseUrl()}/b/${B.byId(x.business_id).slug}/p/${x.slug}`,
+    };
+  };
+
+  app.get('/api/admin/products', (req) => {
+    requireRole('host')(req);
+    const b = B.byId(bid(req));
+    return {
+      products: PROD.listAll(b).map(productOut),
+      event_types: db.all("SELECT id, name, slug, kind FROM event_types WHERE business_id = ? AND active = 1 ORDER BY sort, id", b.id),
+      defaults: PROD.PRODUCT_SETTINGS,
+    };
+  });
+
+  function saveProduct(req, existing) {
+    const b = B.byId(bid(req));
+    const body = req.body || {};
+    const name = clampStr(String(body.name || '').trim(), 120);
+    if (!name) throw new HttpError(422, 'Give the product a name', { name: 'Required' });
+
+    const groups = body.option_groups !== undefined ? cleanGroups(body.option_groups) : (existing ? db.json(existing.option_groups, []) : []);
+    const addons = body.addons !== undefined ? cleanAddons(body.addons) : (existing ? db.json(existing.addons, []) : []);
+    const baseCents = body.base_cents !== undefined ? int(body.base_cents, 0, 0, 100000000) : (body.base_price !== undefined ? Math.round(num(body.base_price, 0) * 100) : (existing ? existing.base_cents : 0));
+
+    // Something has to carry a price, or the page would ask for money it cannot name.
+    const rules = body.price_rules !== undefined ? cleanRules(body.price_rules) : (existing ? db.json(existing.price_rules, []) : []);
+    const anyPrice = baseCents > 0
+      || rules.some((r) => r.price_cents > 0)
+      || groups.some((g) => g.choices.some((c) => c.price_cents > 0))
+      || addons.some((a) => a.price_cents > 0 || a.price_rules.some((r) => r.price_cents > 0));
+    if (!anyPrice) throw new HttpError(422, 'Give this a price, either on the product or on one of its choices', { base_price: 'Needs a price' });
+
+    let followup = body.followup_event_type_id !== undefined
+      ? (body.followup_event_type_id ? int(body.followup_event_type_id) : null)
+      : (existing ? existing.followup_event_type_id : null);
+    if (followup && !db.get('SELECT 1 FROM event_types WHERE id = ? AND business_id = ?', followup, b.id)) followup = null;
+
+    const minQty = int(body.min_qty, existing?.min_qty ?? 1, 1, 100);
+    const maxQty = Math.max(minQty, int(body.max_qty, existing?.max_qty ?? 10, 1, 100));
+    const settings = deepMerge(existing ? db.json(existing.settings, {}) : {}, (body.settings && typeof body.settings === 'object') ? body.settings : {});
+
+    const f = {
+      name,
+      description: clampStr(body.description || (existing ? existing.description : '') || '', 1000),
+      image_url: clampStr(body.image_url || (existing ? existing.image_url : '') || '', 500),
+      base_cents: baseCents,
+      currency: clampStr(String(body.currency || existing?.currency || 'USD').toUpperCase(), 3),
+      option_groups: JSON.stringify(groups),
+      addons: JSON.stringify(addons),
+      price_rules: JSON.stringify(rules),
+      min_qty: minQty,
+      max_qty: maxQty,
+      default_qty: Math.min(maxQty, Math.max(minQty, int(body.default_qty, existing?.default_qty ?? 1, 1, 100))),
+      followup_event_type_id: followup,
+      settings: JSON.stringify(settings),
+      active: body.active !== undefined ? (bool(body.active) ? 1 : 0) : (existing ? existing.active : 1),
+    };
+
+    if (existing) {
+      db.run(`UPDATE products SET name=?, description=?, image_url=?, base_cents=?, currency=?, option_groups=?, addons=?, price_rules=?,
+          min_qty=?, max_qty=?, default_qty=?, followup_event_type_id=?, settings=?, active=? WHERE id = ? AND business_id = ?`,
+      f.name, f.description, f.image_url, f.base_cents, f.currency, f.option_groups, f.addons, f.price_rules,
+      f.min_qty, f.max_qty, f.default_qty, f.followup_event_type_id, f.settings, f.active, existing.id, b.id);
+      return productOut(db.get('SELECT * FROM products WHERE id = ?', existing.id));
+    }
+    let slug = slugify(body.slug || name) || 'product';
+    let sl = slug; let i = 2;
+    while (db.get('SELECT 1 FROM products WHERE business_id = ? AND slug = ?', b.id, sl)) sl = `${slug}-${i++}`;
+    const sort = (db.get('SELECT MAX(sort) m FROM products WHERE business_id = ?', b.id) || {}).m || 0;
+    const { lastId } = db.run(`INSERT INTO products (business_id, slug, name, description, image_url, base_cents, currency,
+        option_groups, addons, price_rules, min_qty, max_qty, default_qty, followup_event_type_id, settings, active, sort)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    b.id, sl, f.name, f.description, f.image_url, f.base_cents, f.currency, f.option_groups, f.addons, f.price_rules,
+    f.min_qty, f.max_qty, f.default_qty, f.followup_event_type_id, f.settings, f.active, sort + 1);
+    return productOut(db.get('SELECT * FROM products WHERE id = ?', lastId));
+  }
+
+  app.post('/api/admin/products', (req) => { requireRole('admin')(req); return saveProduct(req, null); });
+  app.patch('/api/admin/products/:id', (req) => {
+    requireRole('admin')(req);
+    const existing = db.get('SELECT * FROM products WHERE id = ? AND business_id = ?', int(req.params.id), bid(req));
+    if (!existing) throw new HttpError(404, 'Not found');
+    return saveProduct(req, existing);
+  });
+  app.delete('/api/admin/products/:id', (req) => {
+    requireRole('admin')(req);
+    const p = db.get('SELECT * FROM products WHERE id = ? AND business_id = ?', int(req.params.id), bid(req));
+    if (!p) throw new HttpError(404, 'Not found');
+    const sold = db.get("SELECT COUNT(*) c FROM orders WHERE product_id = ? AND status = 'paid'", p.id).c;
+    // Something people have paid for is switched off, never deleted: the orders still point at it.
+    if (sold) { db.run('UPDATE products SET active = 0 WHERE id = ?', p.id); return { ok: true, deactivated: true, sold }; }
+    db.run('DELETE FROM products WHERE id = ?', p.id);
+    return { ok: true };
+  });
+  /**
+   * Paste a price matrix instead of typing it.
+   *
+   * Each line is the choices then the price: "8x8 Square, Velvet, 190". Columns map onto the first
+   * option groups in order, and a label that is not a choice yet is added, so pasting a supplier's
+   * whole sheet builds the options and prices them in one go. Tabs, commas and pipes all work, so a
+   * copy straight out of a spreadsheet lands correctly.
+   */
+  app.post('/api/admin/products/:id/price-matrix', (req) => {
+    requireRole('admin')(req);
+    const b = B.byId(bid(req));
+    const p = db.get('SELECT * FROM products WHERE id = ? AND business_id = ?', int(req.params.id), b.id);
+    if (!p) throw new HttpError(404, 'Not found');
+    const body = req.body || {};
+    const target = clampStr(body.target || 'product', 60);
+
+    const lines = String(body.text || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) throw new HttpError(422, 'Paste some rows first', { text: 'Required' });
+
+    // Strip the comma out of "1,298.00" before splitting, or a four-figure album would be read as
+    // two cells and priced at $298.
+    const split = (line) => line
+      .replace(/(\d),(?=\d{3}(?:\D|$))/g, '$1')
+      .split(/\t|\s*\|\s*|,(?![^(]*\))/)
+      .map((c) => c.trim()).filter((c) => c !== '');
+    // Strict on purpose: a label like "8x8 Square" must not read as the number 88, or every row
+    // would be mistaken for a header and silently dropped.
+    const priceOf = (cell) => {
+      const m = String(cell).trim().match(/^\$?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s*$/);
+      if (!m) return null;
+      const n = Number(m[1].replace(/,/g, ''));
+      return Number.isFinite(n) ? Math.round(n * 100) : null;
+    };
+
+    const rows = [];
+    for (const line of lines) {
+      const cells = split(line);
+      if (cells.length < 2) continue;
+      const cents = priceOf(cells[cells.length - 1]);
+      if (cents === null) continue;             // header rows and notes fall out here
+      const labels = cells.slice(0, -1);
+      if (labels.every((l) => priceOf(l) !== null)) continue;   // a row of pure numbers is not a variation
+      rows.push({ labels, cents });
+    }
+    if (!rows.length) throw new HttpError(422, 'Could not read any priced rows out of that. Each line needs its choices then a price, like "8x8 Square, Velvet, 190".', { text: 'Nothing readable' });
+
+    const cols = Math.max(...rows.map((r) => r.labels.length));
+    const groups = db.json(p.option_groups, []);
+    if (groups.length < cols) throw new HttpError(422, `Those rows have ${cols} choice column${cols === 1 ? '' : 's'}, but this product only has ${groups.length} option group${groups.length === 1 ? '' : 's'}. Add the missing group first.`, { text: 'Too many columns' });
+
+    const norm = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    let added = 0;
+    const rules = [];
+    for (const row of rows) {
+      const when = {};
+      let ok = true;
+      row.labels.forEach((label, i) => {
+        const g = groups[i];
+        if (!g) { ok = false; return; }
+        g.choices = g.choices || [];
+        let choice = g.choices.find((c) => norm(c.label) === norm(label));
+        if (!choice) {
+          const used = new Set(g.choices.map((c) => c.id));
+          choice = { id: idFor(label, used, `choice-${g.choices.length + 1}`), label: clampStr(label, 200), hint: '', image_url: '', price_cents: 0 };
+          g.choices.push(choice);
+          added++;
+        }
+        when[g.id] = choice.id;
+      });
+      if (ok && Object.keys(when).length) rules.push({ when, price_cents: row.cents });
+    }
+
+    const cleanedGroups = cleanGroups(groups);
+    const cleanedRules = cleanRules(rules);
+    if (target === 'product') {
+      db.run('UPDATE products SET option_groups = ?, price_rules = ? WHERE id = ?', JSON.stringify(cleanedGroups), JSON.stringify(cleanedRules), p.id);
+    } else {
+      const addons = db.json(p.addons, []);
+      const hit = addons.find((a) => a.id === target);
+      if (!hit) throw new HttpError(404, 'No such extra on this product');
+      hit.price_rules = cleanedRules;
+      db.run('UPDATE products SET option_groups = ?, addons = ? WHERE id = ?', JSON.stringify(cleanedGroups), JSON.stringify(cleanAddons(addons)), p.id);
+    }
+    B.logActivity(b.id, null, 'import', `Priced ${cleanedRules.length} combination${cleanedRules.length === 1 ? '' : 's'} on ${p.name}`);
+    return { ok: true, rules: cleanedRules.length, choices_added: added, product: productOut(db.get('SELECT * FROM products WHERE id = ?', p.id)) };
+  });
+
+  app.post('/api/admin/products/reorder', (req) => {
+    requireRole('admin')(req);
+    (req.body?.ids || []).forEach((id, i) => db.run('UPDATE products SET sort = ? WHERE id = ? AND business_id = ?', i, int(id), bid(req)));
+    return { ok: true };
+  });
 
   app.post('/api/admin/sessions', (req) => { requireRole('admin')(req); return saveSession(req, null); });
   app.patch('/api/admin/sessions/:id', (req) => {

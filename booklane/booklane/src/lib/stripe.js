@@ -75,12 +75,40 @@ function request(method, path, params, { idempotencyKey, timeoutMs = 20000 } = {
  * Create a hosted Checkout page. Returns { id, url }.
  * expiresAt is a unix timestamp; Stripe requires it between 30 minutes and 24 hours out.
  */
+/**
+ * One Checkout session. Pass `amountCents`/`productName` for a single line (how sessions buy), or
+ * `items` for a cart: [{ label, detail, unit_cents, qty }]. A cart is sent to Stripe line by line so
+ * the customer sees the album and each extra itemised on the payment page and the receipt, rather
+ * than one lump sum they have to take on trust.
+ */
 async function createCheckoutSession({
-  amountCents, currency = 'usd', productName, description, quantity = 1,
+  amountCents, currency = 'usd', productName, description, quantity = 1, items,
   successUrl, cancelUrl, customerEmail, clientReferenceId, metadata = {}, expiresAt, idempotencyKey,
 }) {
-  const cents = Math.round(Number(amountCents) || 0);
-  if (!(cents > 0)) throw new StripeError('That session has no price set yet.', { code: 'no_amount' });
+  const cur = String(currency || 'usd').toLowerCase();
+  const list = Array.isArray(items) && items.length
+    ? items.map((it) => {
+      const unit = Math.round(Number(it.unit_cents) || 0);
+      if (!(unit > 0)) throw new StripeError('A line on that order has no price.', { code: 'no_amount' });
+      return {
+        quantity: Math.max(1, Math.round(Number(it.qty) || 1)),
+        price_data: {
+          currency: cur,
+          unit_amount: unit,
+          product_data: {
+            name: String(it.label || 'Item').slice(0, 250),
+            description: it.detail ? String(it.detail).slice(0, 500) : undefined,
+          },
+        },
+      };
+    })
+    : null;
+  if (list && list.length > 100) throw new StripeError("Too many lines for one payment.", { code: "too_many_items" });
+
+  if (!list) {
+    const cents = Math.round(Number(amountCents) || 0);
+    if (!(cents > 0)) throw new StripeError('That session has no price set yet.', { code: 'no_amount' });
+  }
   const params = {
     mode: 'payment',
     success_url: successUrl,
@@ -92,11 +120,11 @@ async function createCheckoutSession({
     billing_address_collection: 'auto',
     metadata,
     payment_intent_data: { description: description || productName, metadata },
-    line_items: [{
+    line_items: list || [{
       quantity: Math.max(1, Math.round(Number(quantity) || 1)),
       price_data: {
-        currency: String(currency || 'usd').toLowerCase(),
-        unit_amount: cents,
+        currency: cur,
+        unit_amount: Math.round(Number(amountCents) || 0),
         product_data: { name: String(productName || 'Session').slice(0, 250), description: description ? String(description).slice(0, 500) : undefined },
       },
     }],
