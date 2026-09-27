@@ -189,6 +189,24 @@ CREATE TABLE IF NOT EXISTS order_items (
   sort INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items (order_id);
+-- Custom forms: an ordered list of steps the customer walks through.
+--
+-- A form composes what already exists rather than keeping its own copy: a schedule step points at a
+-- booking page for its hours and hosts, a product step points at a product for its options and
+-- prices. One source of truth for a calendar, one for a price.
+--
+-- Where the payment step sits decides how the money works. Payment after a calendar step means the
+-- slot is held while they pay, the way a session does it. Payment before means they buy first and
+-- book afterwards, the way an album does. There is no separate setting; the order is the setting.
+CREATE TABLE IF NOT EXISTS forms (
+  id INTEGER PRIMARY KEY, business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  slug TEXT NOT NULL, name TEXT NOT NULL, description TEXT,
+  steps TEXT NOT NULL DEFAULT '[]', settings TEXT NOT NULL DEFAULT '{}',
+  active INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0,
+  submissions INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (business_id, slug)
+);
 CREATE TABLE IF NOT EXISTS provider_events (
   provider TEXT NOT NULL, event_id TEXT NOT NULL, kind TEXT,
   received_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (provider, event_id)
@@ -259,6 +277,9 @@ for (const sql of [
   "ALTER TABLE event_types ADD COLUMN kind TEXT NOT NULL DEFAULT 'call'",
   // A login-less user row that exists only to own a calendar (a market, or the album designer).
   'ALTER TABLE users ADD COLUMN is_resource INTEGER NOT NULL DEFAULT 0',
+  // Which custom form a lead or order came through, so a form can report its own results.
+  'ALTER TABLE leads ADD COLUMN form_id INTEGER',
+  'ALTER TABLE orders ADD COLUMN form_id INTEGER',
   // Orders grew from one session to a cart of lines; 'product' orders are scheduled after payment,
   // not before, so the slot columns stay empty for them.
   'ALTER TABLE orders ADD COLUMN product_id INTEGER',

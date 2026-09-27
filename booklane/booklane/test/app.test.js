@@ -1456,3 +1456,124 @@ test('a product switched off is not for sale', async () => {
   assert.equal(page.status, 404);
   await req('PATCH', `/api/admin/products/${albumId}`, { name: album.name, active: true }, { cookie: ownerCookie });
 });
+
+// ---------------------------------------------------------------------------
+// Custom forms. The interesting part is that a form's behaviour comes from the
+// order of its steps, so these check the order decides the money, and that a
+// form cannot be built into a shape that would take money without reserving time.
+// ---------------------------------------------------------------------------
+let ctaFormSlug;
+
+test('a short form just records a lead', async () => {
+  const made = await req('POST', '/api/admin/forms', {
+    name: 'Quick enquiry',
+    steps: [
+      { type: 'questions', title: 'What can we help with?', questions: [{ id: 'interest', label: 'Interested in', type: 'choice', required: true, options: ['Photography', 'DJ'] }] },
+      { type: 'contact', title: 'You', fields: { first_name: 'required', last_name: 'hidden', email: 'required', phone: 'optional', sms_consent: 'hidden' } },
+    ],
+    settings: { done_heading: 'Got it' },
+  }, { cookie: ownerCookie });
+  assert.equal(made.status, 200, JSON.stringify(made.data));
+  assert.equal(made.data.shape.lead_only, true, 'no calendar and no payment means it is a lead form');
+  ctaFormSlug = made.data.slug;
+
+  const sent = await req('POST', `/api/public/b/${bizSlug}/f/${ctaFormSlug}/submit`, {
+    answers: { interest: 'Photography' },
+    contact: { first_name: 'Dana', email: 'dana@example.com' },
+  });
+  assert.equal(sent.status, 200, JSON.stringify(sent.data));
+  assert.equal(sent.data.kind, 'done');
+  assert.equal(sent.data.copy.done_heading, 'Got it');
+
+  const lead = db.get("SELECT * FROM leads WHERE email = 'dana@example.com' ORDER BY id DESC LIMIT 1");
+  assert.ok(lead, 'the submission became a lead');
+  assert.equal(lead.first_name, 'Dana');
+  assert.match(JSON.parse(lead.answers).interest, /Photography/);
+  assert.ok(lead.form_id, 'and the lead remembers which form it came from');
+});
+
+test('a required field cannot be skipped, and a hidden one is not demanded', async () => {
+  const missing = await req('POST', `/api/public/b/${bizSlug}/f/${ctaFormSlug}/submit`, {
+    answers: {},
+    contact: { first_name: 'Dana', email: 'dana@example.com' },
+  });
+  assert.equal(missing.status, 422);
+  assert.ok(missing.data.details['answers.interest'], 'the required question is named');
+
+  // last_name is hidden on this form, so leaving it out must be fine.
+  const fine = await req('POST', `/api/public/b/${bizSlug}/f/${ctaFormSlug}/submit`, {
+    answers: { interest: 'DJ' },
+    contact: { first_name: 'Ray', email: 'ray@example.com' },
+  });
+  assert.equal(fine.status, 200);
+});
+
+test('the order of the steps decides how the money works', async () => {
+  const shapeOf = async (steps) => {
+    const r = await req('POST', '/api/admin/forms', { name: `Shape ${Math.random()}`, steps }, { cookie: ownerCookie });
+    return r.status === 200 ? r.data.shape : r;
+  };
+  const et = db.get('SELECT id FROM event_types WHERE business_id = (SELECT id FROM businesses WHERE slug = ?) LIMIT 1', bizSlug);
+
+  const payThenBook = await shapeOf([
+    { type: 'contact', title: 'You' },
+    { type: 'payment', title: 'Pay', source: 'fixed', amount_cents: 49500 },
+    { type: 'schedule', title: 'Time', event_type_id: et.id },
+  ]);
+  assert.equal(payThenBook.charges, true);
+  assert.equal(payThenBook.schedules_after_payment, true, 'payment before the calendar means buy first, book after');
+
+  // The reverse would need the slot held during checkout. Rather than build a second, weaker
+  // implementation of slot holding, the form refuses and points at the sessions.
+  const bookThenPay = await req('POST', '/api/admin/forms', {
+    name: 'Hold then pay',
+    steps: [
+      { type: 'contact', title: 'You' },
+      { type: 'schedule', title: 'Time', event_type_id: et.id },
+      { type: 'payment', title: 'Pay', source: 'fixed', amount_cents: 49500 },
+    ],
+  }, { cookie: ownerCookie });
+  assert.equal(bookThenPay.status, 422);
+  assert.match(bookThenPay.data.error, /Session already does/i);
+});
+
+test('a form cannot be built into a shape that would fail later', async () => {
+  const bad = async (steps) => (await req('POST', '/api/admin/forms', { name: `Bad ${Math.random()}`, steps }, { cookie: ownerCookie }));
+
+  const noProduct = await bad([{ type: 'contact', title: 'You' }, { type: 'payment', title: 'Pay', source: 'product' }]);
+  assert.equal(noProduct.status, 422);
+  assert.match(noProduct.data.error, /needs a product step/i);
+
+  const noAmount = await bad([{ type: 'contact', title: 'You' }, { type: 'payment', title: 'Pay', source: 'fixed', amount_cents: 0 }]);
+  assert.equal(noAmount.status, 422);
+
+  const noContact = await bad([{ type: 'payment', title: 'Pay', source: 'fixed', amount_cents: 1000 }]);
+  assert.equal(noContact.status, 422);
+  assert.match(noContact.data.error, /contact step/i);
+
+  const twoCalendars = await bad([{ type: 'contact', title: 'You' }, { type: 'schedule', title: 'A' }, { type: 'schedule', title: 'B' }]);
+  assert.equal(twoCalendars.status, 422);
+});
+
+test('every template builds into a valid form', async () => {
+  const list = await req('GET', '/api/admin/forms', null, { cookie: ownerCookie });
+  assert.ok(list.data.templates.length >= 4, 'the named flows are all offered');
+  for (const t of list.data.templates) {
+    const made = await req('POST', '/api/admin/forms/from-template', { template: t.id }, { cookie: ownerCookie });
+    assert.equal(made.status, 200, `${t.id}: ${JSON.stringify(made.data)}`);
+    assert.ok(made.data.form.steps.length >= 2, `${t.id} has steps`);
+    // Whatever it built must survive being saved again, or editing it would break it.
+    const resaved = await req('PATCH', `/api/admin/forms/${made.data.form.id}`, { name: made.data.form.name, steps: made.data.form.steps }, { cookie: ownerCookie });
+    assert.equal(resaved.status, 200, `${t.id} does not survive a re-save: ${JSON.stringify(resaved.data)}`);
+  }
+});
+
+test('a form switched off is not reachable', async () => {
+  const list = await req('GET', '/api/admin/forms', null, { cookie: ownerCookie });
+  const f = list.data.forms.find((x) => x.slug === ctaFormSlug);
+  await req('PATCH', `/api/admin/forms/${f.id}`, { name: f.name, active: false }, { cookie: ownerCookie });
+  assert.equal((await req('GET', `/api/public/b/${bizSlug}/f/${ctaFormSlug}`)).status, 404);
+  assert.equal((await req('GET', `/b/${bizSlug}/f/${ctaFormSlug}`)).status, 404);
+  const blocked = await req('POST', `/api/public/b/${bizSlug}/f/${ctaFormSlug}/submit`, { answers: { interest: 'DJ' }, contact: { first_name: 'X', email: 'x@example.com' } });
+  assert.equal(blocked.status, 404, 'and it stops accepting submissions too');
+});

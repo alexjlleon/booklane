@@ -13,6 +13,7 @@ const Q = require('../services/quotes');
 const BK = require('../services/bookings');
 const SESS = require('../services/sessions');
 const PROD = require('../services/products');
+const FORMS = require('../services/forms');
 const MSG = require('../services/messaging');
 const stripe = require('../lib/stripe');
 const sms = require('../lib/sms');
@@ -87,6 +88,73 @@ module.exports = function publicRoutes(app) {
     res.set('X-Robots-Tag', 'noindex');
     res.html(page({ title: `Finishing up · ${b.name}`, business: b, scripts: ['common.js', 'session-return.js'],
       data: { business: publicBusiness(b), order: SESS.publicOrder(order) } }));
+  });
+
+  // ---------- Custom forms ----------
+  app.get('/b/:slug/f/:form', (req, res) => {
+    const b = getBusiness(req.params.slug);
+    const f = FORMS.bySlug(b, req.params.form);
+    res.html(page({ title: `${f.name} · ${b.name}`, description: f.description || b.settings.tagline, business: b, embed: bool(req.query.embed),
+      scripts: ['common.js', 'scheduler.js', 'form.js'],
+      data: { business: publicBusiness(b), form: FORMS.publicForm(b, f), cancelled: req.query.cancelled ? true : false } }));
+  });
+
+  // Where a form that charges sends people back to.
+  app.get('/b/:slug/f/:form/done', (req, res) => {
+    const b = getBusiness(req.params.slug);
+    const f = FORMS.bySlug(b, req.params.form);
+    const order = PROD.orderByToken(req.query.order);
+    if (!order || order.business_id !== b.id) throw new HttpError(404, 'Not found');
+    res.set('X-Robots-Tag', 'noindex');
+    res.html(page({ title: `Thank you · ${b.name}`, business: b, scripts: ['common.js', 'scheduler.js', 'product-return.js'],
+      data: { business: publicBusiness(b), order: PROD.publicOrder(b, order), orderToken: order.token, form: { slug: f.slug, name: f.name } } }));
+  });
+
+  app.get('/api/public/b/:slug/f/:form', (req) => {
+    const b = getBusiness(req.params.slug);
+    return { form: FORMS.publicForm(b, FORMS.bySlug(b, req.params.form)) };
+  });
+
+  // Slots for a form's calendar step. The booking page it names owns the hours and the hosts.
+  app.get('/api/public/b/:slug/f/:form/slots', async (req) => {
+    const b = getBusiness(req.params.slug);
+    const f = FORMS.bySlug(b, req.params.form);
+    const step = f.steps.find((x) => x.type === 'schedule');
+    if (!step || !step.event_type_id) throw new HttpError(409, 'This form has no calendar on it.');
+    const row = db.get('SELECT * FROM event_types WHERE id = ? AND business_id = ? AND active = 1', step.event_type_id, b.id);
+    if (!row) throw new HttpError(404, 'That calendar is not available.');
+    const et = BK.hydrateEt(row);
+    const tz = T.isValidTz(req.query.tz) ? req.query.tz : b.timezone;
+    const from = T.isDateStr(req.query.from) ? req.query.from : T.utcToZoned(Date.now(), tz).date;
+    let to = T.isDateStr(req.query.to) ? req.query.to : T.addDays(from, 30);
+    if (to < from) to = from;
+    if (Date.parse(to) - Date.parse(from) > 62 * 86400000) to = T.addDays(from, 62);
+    const slots = await S.computeSlots(et, from, to, tz);
+    const days = {};
+    for (const [d, list] of Object.entries(slots)) days[d] = list.map((x) => x.start);
+    return { timezone: tz, from, to, days };
+  });
+
+  // Price a product step's selection, so the running total on the page is the server's figure.
+  app.post('/api/public/b/:slug/f/:form/quote', (req) => {
+    const b = getBusiness(req.params.slug);
+    const f = FORMS.bySlug(b, req.params.form);
+    const step = f.steps.find((x) => x.type === 'product');
+    if (!step || !step.product_id) throw new HttpError(409, 'This form has nothing to price.');
+    const product = db.get('SELECT * FROM products WHERE id = ? AND business_id = ? AND active = 1', step.product_id, b.id);
+    if (!product) throw new HttpError(409, 'That product is not available.');
+    const priced = PROD.priceSelection(product, (req.body || {}).selection || {});
+    return {
+      total_cents: priced.total_cents,
+      lines: priced.lines.map((l) => ({ label: l.label, detail: l.detail || '', qty: l.qty, unit_cents: l.unit_cents, line_cents: l.unit_cents * l.qty })),
+    };
+  });
+
+  app.post('/api/public/b/:slug/f/:form/submit', async (req) => {
+    writeLimit(req);
+    const b = getBusiness(req.params.slug);
+    const f = FORMS.bySlug(b, req.params.form);
+    return FORMS.submit(b, f, req.body || {});
   });
 
   // ---------- Products you can buy outright ----------

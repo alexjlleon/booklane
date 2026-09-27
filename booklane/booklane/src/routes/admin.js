@@ -16,6 +16,7 @@ const { pushToBoothBook, sendWebhook, buildBoothBookPayload } = require('../serv
 const Importer = require('../services/catalog-import');
 const SESS = require('../services/sessions');
 const PROD = require('../services/products');
+const FORMS = require('../services/forms');
 const MSG = require('../services/messaging');
 const stripe = require('../lib/stripe');
 const sms = require('../lib/sms');
@@ -596,6 +597,95 @@ module.exports = function adminRoutes(app) {
     if (Array.isArray(body.calendar_ids)) SESS.setProductCalendars(b, et, body.calendar_ids);
     return sessionOut(db.get('SELECT * FROM event_types WHERE id = ?', et.id));
   }
+
+  // ---------- Custom forms ----------
+  const formOut = (f) => {
+    const x = FORMS.hydrate({ ...f });
+    return {
+      id: x.id, slug: x.slug, name: x.name, description: x.description || '',
+      steps: x.steps, settings: x.settings, copy: x.copy, shape: FORMS.shapeOf(x.steps),
+      active: !!x.active, sort: x.sort, submissions: x.submissions,
+      url: `${baseUrl()}/b/${B.byId(x.business_id).slug}/f/${x.slug}`,
+      leads: db.get('SELECT COUNT(*) c FROM leads WHERE form_id = ?', x.id).c,
+    };
+  };
+
+  app.get('/api/admin/forms', (req) => {
+    requireRole('host')(req);
+    const b = B.byId(bid(req));
+    return {
+      forms: FORMS.listAll(b).map(formOut),
+      event_types: db.all('SELECT id, name, slug, kind FROM event_types WHERE business_id = ? AND active = 1 ORDER BY sort, id', b.id),
+      products: db.all('SELECT id, name, slug FROM products WHERE business_id = ? AND active = 1 ORDER BY sort, id', b.id),
+      step_types: FORMS.STEP_TYPES,
+      question_types: FORMS.Q_TYPES,
+      templates: FORMS.templateList(),
+      defaults: FORMS.FORM_SETTINGS,
+    };
+  });
+
+  function saveForm(req, existing) {
+    const b = B.byId(bid(req));
+    const body = req.body || {};
+    const name = clampStr(String(body.name || '').trim(), 120);
+    if (!name) throw new HttpError(422, 'Give the form a name', { name: 'Required' });
+    const steps = body.steps !== undefined ? FORMS.sanitizeSteps(body.steps, b) : (existing ? db.json(existing.steps, []) : []);
+    const settings = deepMerge(existing ? db.json(existing.settings, {}) : {}, (body.settings && typeof body.settings === 'object') ? body.settings : {});
+    const active = body.active !== undefined ? (bool(body.active) ? 1 : 0) : (existing ? existing.active : 1);
+    const description = clampStr(body.description !== undefined ? body.description : (existing ? existing.description : '') || '', 1000);
+
+    if (existing) {
+      db.run('UPDATE forms SET name=?, description=?, steps=?, settings=?, active=? WHERE id = ? AND business_id = ?',
+        name, description, JSON.stringify(steps), JSON.stringify(settings), active, existing.id, b.id);
+      return formOut(db.get('SELECT * FROM forms WHERE id = ?', existing.id));
+    }
+    let base = slugify(body.slug || name) || 'form';
+    let sl = base; let i = 2;
+    while (db.get('SELECT 1 FROM forms WHERE business_id = ? AND slug = ?', b.id, sl)) sl = `${base}-${i++}`;
+    const sort = (db.get('SELECT MAX(sort) m FROM forms WHERE business_id = ?', b.id) || {}).m || 0;
+    const { lastId } = db.run('INSERT INTO forms (business_id, slug, name, description, steps, settings, active, sort) VALUES (?,?,?,?,?,?,?,?)',
+      b.id, sl, name, description, JSON.stringify(steps), JSON.stringify(settings), active, sort + 1);
+    return formOut(db.get('SELECT * FROM forms WHERE id = ?', lastId));
+  }
+
+  app.post('/api/admin/forms', (req) => { requireRole('admin')(req); return saveForm(req, null); });
+  app.patch('/api/admin/forms/:id', (req) => {
+    requireRole('admin')(req);
+    const existing = db.get('SELECT * FROM forms WHERE id = ? AND business_id = ?', int(req.params.id), bid(req));
+    if (!existing) throw new HttpError(404, 'Not found');
+    return saveForm(req, existing);
+  });
+  app.delete('/api/admin/forms/:id', (req) => {
+    requireRole('admin')(req);
+    const f = db.get('SELECT * FROM forms WHERE id = ? AND business_id = ?', int(req.params.id), bid(req));
+    if (!f) throw new HttpError(404, 'Not found');
+    // A form people have already filled in is switched off, not deleted: its leads point back here.
+    const used = db.get('SELECT COUNT(*) c FROM leads WHERE form_id = ?', f.id).c;
+    if (used) { db.run('UPDATE forms SET active = 0 WHERE id = ?', f.id); return { ok: true, deactivated: true, leads: used }; }
+    db.run('DELETE FROM forms WHERE id = ?', f.id);
+    return { ok: true };
+  });
+
+  /** Start a form from one of the ready-made shapes, wired to this business's own pages. */
+  app.post('/api/admin/forms/from-template', (req) => {
+    requireRole('admin')(req);
+    const b = B.byId(bid(req));
+    const built = FORMS.buildTemplate(b, String((req.body || {}).template || ''));
+    const steps = FORMS.sanitizeSteps(built.steps, b);
+    let base = slugify(built.slug || built.name) || 'form';
+    let sl = base; let i = 2;
+    while (db.get('SELECT 1 FROM forms WHERE business_id = ? AND slug = ?', b.id, sl)) sl = `${base}-${i++}`;
+    const sort = (db.get('SELECT MAX(sort) m FROM forms WHERE business_id = ?', b.id) || {}).m || 0;
+    const { lastId } = db.run('INSERT INTO forms (business_id, slug, name, description, steps, settings, active, sort) VALUES (?,?,?,?,?,?,1,?)',
+      b.id, sl, built.name, built.description || '', JSON.stringify(steps), JSON.stringify(built.settings || {}), sort + 1);
+    return Object.assign({ warnings: built.warnings || [] }, { form: formOut(db.get('SELECT * FROM forms WHERE id = ?', lastId)) });
+  });
+
+  app.post('/api/admin/forms/reorder', (req) => {
+    requireRole('admin')(req);
+    (req.body?.ids || []).forEach((id, i) => db.run('UPDATE forms SET sort = ? WHERE id = ? AND business_id = ?', i, int(id), bid(req)));
+    return { ok: true };
+  });
 
   // ---------- Products sold outright (albums, prints) ----------
   // Options and add-ons are edited here so the priced list is Alex's to change without a release.
