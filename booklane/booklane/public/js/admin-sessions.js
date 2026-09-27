@@ -13,12 +13,12 @@
     const url = `<code class="code">${esc(pay.webhook_url)}</code> <button type="button" class="btn btn-link btn-sm" data-copy="${esc(pay.webhook_url)}">Copy</button>`;
     if (!pay.configured) {
       return `<div class="panel warn-box"><h2>Card payments are off</h2>
-        <p class="desc">Sessions with a price cannot be bought until <b>STRIPE_SECRET_KEY</b> and <b>STRIPE_WEBHOOK_SECRET</b> are set in Railway. People who already paid can still book with their booking number in the meantime.</p>
+        <p class="desc">Sessions with a price cannot be bought until <b>STRIPE_SECRET_KEY</b> and <b>STRIPE_WEBHOOK_SECRET</b> are set. Add them under <a href="#/settings/integrations">Settings &rarr; Integrations</a>. People who already paid can still book with their booking number in the meantime.</p>
         <div class="small">In Stripe, add a webhook pointing at ${url} and subscribe it to <b>checkout.session.completed</b>, <b>checkout.session.expired</b> and <b>charge.refunded</b>.</div></div>`;
     }
     return `<div class="panel warn-box"><h2>One step left</h2>
       <p class="desc">Stripe can take payments, but <b>STRIPE_WEBHOOK_SECRET</b> is not set, so we never hear back that someone paid and the booking would not be created.</p>
-      <div class="small">Add a webhook in Stripe pointing at ${url}, then paste its signing secret into Railway.</div></div>`;
+      <div class="small">Add a webhook in Stripe pointing at ${url}, then paste its signing secret under <a href="#/settings/integrations">Settings &rarr; Integrations</a>.</div></div>`;
   }
 
   // ---------------- Sessions & markets ----------------
