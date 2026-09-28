@@ -104,7 +104,7 @@
             out.innerHTML = previewHtml(r);
             go.textContent = 'Import';
           } else {
-            A.toast(`Imported ${r.added} new and ${r.updated} updated service${r.added + r.updated === 1 ? '' : 's'}${r.bundles ? `, ${r.bundles} bundle${r.bundles === 1 ? '' : 's'}` : ''}`);
+            A.toast(`Imported ${r.added} new and ${r.updated} updated service${r.added + r.updated === 1 ? '' : 's'}${r.bundles ? `, ${r.bundles} bundle${r.bundles === 1 ? '' : 's'}` : ''}${r.packages_hidden ? `. ${r.packages_hidden} ready-made package${r.packages_hidden === 1 ? ' was' : 's were'} hidden, because the bundle prices now cover them` : ''}`);
             A.closeDrawer(); A.render();
             return;
           }

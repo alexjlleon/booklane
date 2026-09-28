@@ -10,6 +10,7 @@ const L = require('./services/leads');
 const BK = require('./services/bookings');
 const MSG = require('./services/messaging');
 const SESS = require('./services/sessions');
+const CATALOG_REPAIR = require('./services/catalog-repair');
 const db = require('./db');
 
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -89,6 +90,10 @@ if (require.main === module) {
   if (process.env.SEED_DEMO === 'true' && !db.get('SELECT 1 FROM businesses LIMIT 1')) {
     try { require('../scripts/seed').seed(); } catch (e) { console.error('[seed]', e); }
   }
+  // Catalogs imported before combination pricing existed are quoting the plain sum of two services
+  // where the price sheet gives the pair a price. Fix them here rather than waiting for someone to
+  // notice and re-upload; it marks itself done, so it runs once per catalog and never again.
+  CATALOG_REPAIR.repairAll();
   const port = Number(process.env.PORT) || 3000;
   http.createServer(app.handler).listen(port, () => {
     console.log(`${APP_NAME} running on ${baseUrl()} (port ${port})`);

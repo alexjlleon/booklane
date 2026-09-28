@@ -176,7 +176,7 @@ function analyze(buf, filename) {
 
 // Write it in. 'replace' clears the existing catalog first; 'merge' updates by name and adds the rest.
 function apply(businessId, parsed, { mode = 'merge' } = {}) {
-  const result = { added: 0, updated: 0, deactivated: 0, bundles: 0, unmatched: [] };
+  const result = { added: 0, updated: 0, deactivated: 0, bundles: 0, packages_hidden: 0, unmatched: [] };
   db.tx(() => {
     if (mode === 'replace') {
       const keep = new Set(parsed.services.map((s) => norm(s.name)));
@@ -217,6 +217,17 @@ function apply(businessId, parsed, { mode = 'merge' } = {}) {
       settings.quote = Object.assign({}, settings.quote, { bundles });
       db.run("UPDATE businesses SET settings = ? WHERE id = ?", JSON.stringify(settings), businessId);
       result.bundles = bundles.length;
+      // With a combination table in place, a ready-made package card can only double-charge: tick it
+      // and the services it contains and both are billed, while the engine already names and prices
+      // that same combination on its own. Hidden rather than deleted - the row stays in the catalog
+      // screen and one click brings it back.
+      if (bundles.some((b) => b.exact)) {
+        for (const row of db.all('SELECT id, category FROM services WHERE business_id = ? AND active = 1', businessId)) {
+          if (!/featured|package|bundle/i.test(row.category || '')) continue;
+          db.run('UPDATE services SET active = 0 WHERE id = ?', row.id);
+          result.packages_hidden++;
+        }
+      }
     }
   });
   return result;

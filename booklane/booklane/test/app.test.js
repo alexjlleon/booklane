@@ -1749,6 +1749,7 @@ test('both providers report a payment in the same shape', async () => {
 // sum of its parts must never be charged.
 // ---------------------------------------------------------------------------
 const PricingLib = require('../public/js/pricing.js');
+const Repair = require('../src/services/catalog-repair');
 
 function comboFixture() {
   const svc = (id, name, price, eligible) => ({
@@ -1830,4 +1831,88 @@ test('the exact flag survives being saved and read back', async () => {
   const back = saved.data.settings.quote.bundles[0];
   assert.equal(back.exact, true, 'an exact combination must not come back as an ordinary discount');
   assert.equal(back.value, 2575);
+});
+
+// --- Repairing a catalog imported before combination pricing existed -------------------------
+
+// Builds the shape the old importer left behind: every row of the price sheet a tickable service,
+// bundle_eligible defaulted to on, and not one bundle rule anywhere.
+function legacyCatalog(rows) {
+  const { lastId: bizId } = db.run("INSERT INTO businesses (slug, name, settings) VALUES (?,?,'{}')", 'legacy-' + Math.random().toString(36).slice(2, 8), 'Legacy');
+  let sort = 0;
+  for (const r of rows) {
+    db.run(`INSERT INTO services (business_id, category, name, description, base_price, pricing_type,
+      min_qty, max_qty, default_qty, active, bundle_eligible, sort) VALUES (?,?,?,?,?,'flat',1,1,1,1,1,?)`,
+    bizId, r.category, r.name, r.description || '', r.price, ++sort);
+  }
+  return bizId;
+}
+const activeNames = (bizId) => db.all('SELECT name FROM services WHERE business_id = ? AND active = 1 ORDER BY sort', bizId).map((r) => r.name);
+const quoteFor = (bizId, names) => {
+  const cat = db.all('SELECT * FROM services WHERE business_id = ? AND active = 1 ORDER BY sort', bizId)
+    .map((s) => ({ ...s, option_groups: [], addons: [], bundle_eligible: !!s.bundle_eligible }));
+  const settings = JSON.parse(db.get('SELECT settings FROM businesses WHERE id = ?', bizId).settings).quote;
+  const sel = names.map((n) => ({ service_id: (cat.find((s) => s.name === n) || {}).id })).filter((s) => s.service_id);
+  return PricingLib.calculate(cat, sel, { tax_rate: 0, deposit_type: 'percent', deposit_value: 0, ...settings });
+};
+const LEGACY_ROWS = [
+  { category: 'Individual Service', name: 'Photography', price: 1950 },
+  { category: 'Individual Service', name: 'DJ / MC', price: 1485 },
+  { category: 'Individual Service', name: 'Videography', price: 1950 },
+  { category: 'Pair', name: 'Photography + DJ / MC', price: 2575, description: 'Calculator label: Pair. Booked separately $3,435' },
+  { category: 'Bundle (3 services)', name: 'Photography + DJ / MC + Videography', price: 3875, description: 'Calculator label: Grand Celebration Bundle.' },
+  { category: 'Featured Bundle', name: 'Grand Celebration Bundle', price: 3875 },
+  { category: 'Add-On', name: 'Photo Guest Book', price: 125 },
+];
+
+test('a catalog imported before combination pricing is repaired in place', () => {
+  const bizId = legacyCatalog(LEGACY_ROWS);
+  // Before: the pair is two prices added together, which is the bug customers were quoted.
+  assert.equal(quoteFor(bizId, ['Photography', 'DJ / MC']).total, 3435);
+
+  const r = db.tx(() => Repair.repairBusiness(bizId));
+  assert.equal(r.combinations, 2, 'both combination rows become combination prices');
+
+  assert.equal(quoteFor(bizId, ['Photography', 'DJ / MC']).total, 2575);
+  assert.equal(quoteFor(bizId, ['Photography', 'DJ / MC', 'Videography']).total, 3875);
+  assert.equal(quoteFor(bizId, ['Photography', 'DJ / MC', 'Videography']).discount_label, 'Grand Celebration Bundle');
+  // One service on its own is still just its own price.
+  assert.equal(quoteFor(bizId, ['Photography']).total, 1950);
+});
+
+test('after repair the picker holds services and add-ons, nothing else', () => {
+  const bizId = legacyCatalog(LEGACY_ROWS);
+  db.tx(() => Repair.repairBusiness(bizId));
+  assert.deepEqual(activeNames(bizId), ['Photography', 'DJ / MC', 'Videography', 'Photo Guest Book']);
+  // Hidden, not deleted: the rows are still there to switch back on.
+  assert.equal(db.get('SELECT COUNT(*) n FROM services WHERE business_id = ?', bizId).n, LEGACY_ROWS.length);
+});
+
+test('an add-on left over from the old import does not break a combination', () => {
+  // bundle_eligible arrived after these rows did, so every one of them defaulted to eligible. An
+  // add-on left eligible means the mix matches no row of the table and the customer pays the sum.
+  const bizId = legacyCatalog(LEGACY_ROWS);
+  db.tx(() => Repair.repairBusiness(bizId));
+  const c = quoteFor(bizId, ['Photography', 'DJ / MC', 'Photo Guest Book']);
+  assert.equal(c.total, 2700, 'the pair price plus the add-on');
+  assert.equal(c.discount_label, 'Pair price');
+});
+
+test('repairing a catalog twice changes nothing the second time', () => {
+  const bizId = legacyCatalog(LEGACY_ROWS);
+  db.tx(() => Repair.repairBusiness(bizId));
+  const after = JSON.stringify({ names: activeNames(bizId), settings: db.get('SELECT settings FROM businesses WHERE id = ?', bizId).settings });
+  const second = db.tx(() => Repair.repairBusiness(bizId));
+  assert.equal(second.skipped, true, 'a repaired catalog is left alone, so later hand edits stand');
+  assert.equal(JSON.stringify({ names: activeNames(bizId), settings: db.get('SELECT settings FROM businesses WHERE id = ?', bizId).settings }), after);
+});
+
+test('a product whose name merely contains a plus sign keeps its card', () => {
+  const bizId = legacyCatalog([
+    { category: 'Individual Service', name: 'Photography', price: 1950 },
+    { category: 'Individual Service', name: 'Photo Booth + Attendant', price: 1200 },
+  ]);
+  const r = db.tx(() => Repair.repairBusiness(bizId));
+  assert.equal(r.combinations, 0, 'neither part is a service of its own, so it is a real product');
+  assert.deepEqual(activeNames(bizId), ['Photography', 'Photo Booth + Attendant']);
 });
