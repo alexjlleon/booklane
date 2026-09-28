@@ -1916,3 +1916,46 @@ test('a product whose name merely contains a plus sign keeps its card', () => {
   assert.equal(r.combinations, 0, 'neither part is a service of its own, so it is a real product');
   assert.deepEqual(activeNames(bizId), ['Photography', 'Photo Booth + Attendant']);
 });
+
+// --- A quote whose lead was deleted ----------------------------------------------------------
+
+test('deleting a lead takes its quotes with it, instead of leaving a link that cannot be finished', async () => {
+  const created = await req('POST', `/api/public/b/${bizSlug}/quotes`, {});
+  const qt = created.data.token;
+  await req('PATCH', `/api/public/quotes/${qt}`, { contact: { first_name: 'Dana', last_name: 'Reyes', email: 'dana@example.com', phone: '2815550111' } });
+  const leadId = db.get('SELECT lead_id FROM quotes WHERE token = ?', qt).lead_id;
+  assert.ok(leadId);
+
+  const del = await req('DELETE', `/api/admin/leads/${leadId}`, null, { cookie: ownerCookie });
+  assert.equal(del.status, 200, JSON.stringify(del.data));
+  assert.equal(del.data.quotes_deleted, 1);
+  // Gone, not detached: the page sees a plain 404 and starts the customer somewhere that works.
+  assert.equal((await req('GET', `/api/public/quotes/${qt}`)).status, 404);
+});
+
+test('a quote orphaned by an earlier delete asks for contact details rather than refusing outright', async () => {
+  const created = await req('POST', `/api/public/b/${bizSlug}/quotes`, {});
+  const qt = created.data.token;
+  await req('PATCH', `/api/public/quotes/${qt}`, {
+    details: { event_type: 'Wedding', event_date: '2027-08-08' },
+    contact: { first_name: 'Sam', last_name: 'Ortiz', email: 'sam@example.com', phone: '2815550122' },
+  });
+  // Reproduce what the old delete left behind: the quote still there, its person gone.
+  db.run('UPDATE quotes SET lead_id = NULL WHERE token = ?', qt);
+
+  const stranded = await req('POST', `/api/public/quotes/${qt}/contract`, { legal_name: 'Sam Ortiz', agreed_terms: true });
+  assert.equal(stranded.status, 422, 'not a flat 400 the customer can do nothing about');
+  assert.ok(stranded.data.details && stranded.data.details.email, 'and it names the field to fix, so the page can go back to it');
+
+  // Filling the contact step in again is the fix, and it has to actually take hold.
+  const healed = await req('PATCH', `/api/public/quotes/${qt}`, { contact: { first_name: 'Sam', last_name: 'Ortiz', email: 'sam@example.com', phone: '2815550122' } });
+  assert.equal(healed.status, 200, JSON.stringify(healed.data));
+  const lead = db.get('SELECT * FROM leads WHERE id = (SELECT lead_id FROM quotes WHERE token = ?)', qt);
+  assert.equal(lead.email, 'sam@example.com', 'the quote has a person on it again');
+
+  const anyService = db.get('SELECT id FROM services WHERE active = 1 ORDER BY id LIMIT 1').id;
+  await req('PATCH', `/api/public/quotes/${qt}`, { selections: [{ service_id: anyService }] });
+  const contract = await req('POST', `/api/public/quotes/${qt}/contract`, { legal_name: 'Sam Ortiz', agreed_terms: true });
+  assert.equal(contract.status, 200, JSON.stringify(contract.data));
+  assert.equal(contract.data.quote.status, 'contract_requested');
+});

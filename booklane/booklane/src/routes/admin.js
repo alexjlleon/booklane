@@ -285,7 +285,19 @@ module.exports = function adminRoutes(app) {
     if (b.contact) L.updateLead(l, { contact: b.contact });
     return { ok: true };
   });
-  app.delete('/api/admin/leads/:id', (req) => { requireRole('admin')(req); const l = getLead(req); db.run('DELETE FROM leads WHERE id = ?', l.id); return { ok: true }; });
+  // A quote belongs to the person who built it, so it goes with them. Left behind, it becomes a
+  // link the customer can still open but can never finish: the schema detaches it rather than
+  // removing it, and every later step is refused for having nobody on it.
+  app.delete('/api/admin/leads/:id', (req) => {
+    requireRole('admin')(req);
+    const l = getLead(req);
+    const quotes = db.tx(() => {
+      const n = db.run('DELETE FROM quotes WHERE lead_id = ?', l.id).changes;
+      db.run('DELETE FROM leads WHERE id = ?', l.id);
+      return n;
+    });
+    return { ok: true, quotes_deleted: quotes };
+  });
   app.post('/api/admin/leads/:id/recovery', async (req) => {
     requireRole('host')(req);
     const l = getLead(req);

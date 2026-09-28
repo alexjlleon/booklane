@@ -244,7 +244,7 @@
         if (e.target.closest('[data-save-notes]')) await A.guard(() => api('PATCH', `/leads/${p.id}`, { notes: $('#notes', root).value }), 'Notes saved');
         if (e.target.closest('[data-recovery]')) { await A.guard(() => api('POST', `/leads/${p.id}/recovery`, {}), 'Email sent'); A.render(); }
         if (e.target.closest('[data-boothbook]')) { const r = await A.guard(() => api('POST', `/leads/${p.id}/boothbook`, {})); A.toast(r.ok ? `BoothBook accepted it (HTTP ${r.status})` : `BoothBook error: ${r.error || 'HTTP ' + r.status}`, !r.ok); A.render(); }
-        if (e.target.closest('[data-delete]') && confirm('Delete this lead and its history?')) { await A.guard(() => api('DELETE', `/leads/${p.id}`), 'Deleted'); A.go('#/leads'); }
+        if (e.target.closest('[data-delete]') && confirm('Delete this lead and its history?\n\nAny quote they built goes too, and a link they still have to one stops working.')) { await A.guard(() => api('DELETE', `/leads/${p.id}`), 'Deleted'); A.go('#/leads'); }
       });
     },
   });

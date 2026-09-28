@@ -360,7 +360,15 @@
       if (st.modal === 'contract') await api('POST', `/api/public/quotes/${st.quoteToken}/contract`, Object.assign(fd, { agreed_terms: !!fd.agreed_terms }));
       else await api('POST', `/api/public/quotes/${st.quoteToken}/callback`, fd);
       st.done = st.modal; st.modal = null; BL.store.del(storeKey);
-    } catch (err) { st.error = err.message; st.busy = false; render(); if (err.details) BL.fieldErrors($('.modal'), err.details); return; }
+    } catch (err) {
+      st.error = err.message; st.busy = false;
+      // The modal asks about the paperwork, not about who they are, so a complaint about their name
+      // or email has no field here to attach to. Close it and put them back on the contact step,
+      // where the answer actually is.
+      const wantsContact = err.details && (err.details.first_name || err.details.email);
+      if (wantsContact && order.indexOf('contact') > -1) { st.modal = null; st.i = order.indexOf('contact'); render(); return; }
+      render(); if (err.details) BL.fieldErrors($('.modal'), err.details); return;
+    }
     st.busy = false; render();
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }

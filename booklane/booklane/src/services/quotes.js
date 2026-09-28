@@ -87,7 +87,12 @@ function quoteSummaryHtml(q, business) {
     rows([...lineRows, q.discount ? ['Discount', '−' + money(q.discount, cur)] : null, q.tax ? ['Tax', money(q.tax, cur)] : null, ['Total', money(q.total, cur)], q.deposit ? ['Deposit to book', money(q.deposit, cur)] : null].filter(Boolean));
 }
 
+// A quote can outlive the person attached to it - deleting a lead in the admin leaves the quote
+// behind with nobody on it, and the customer may still have the link open. That is the same
+// situation as never having given us a name: ask again, with the field errors the page uses to walk
+// them back to the contact step, rather than a dead end they can do nothing about.
 function requireContact(lead) {
+  lead = lead || {};
   const errors = {};
   if (!lead.first_name) errors.first_name = 'Required';
   if (!isEmail(lead.email || '')) errors.email = 'Enter a valid email';
@@ -157,6 +162,7 @@ async function requestContract(business, q, lead, body) {
 }
 
 async function requestCallback(business, q, lead, body) {
+  lead = lead || {};
   const errors = {};
   if (!lead.first_name) errors.first_name = 'Required';
   if (String(lead.phone || '').replace(/\D/g, '').length < 7) errors.phone = 'We need a phone number to call you';

@@ -513,7 +513,15 @@ module.exports = function publicRoutes(app) {
     if (locked && (body.details || body.selections)) throw new HttpError(409, 'This quote is locked because a contract was requested. Contact us to make changes.');
     if (body.details) db.run("UPDATE quotes SET details = ?, updated_at = datetime('now') WHERE id = ?", JSON.stringify({ ...db.json(q.details, {}), ...Q.sanitizeDetails({ ...db.json(q.details, {}), ...body.details }, b) }), q.id);
     if (body.selections) Q.recalc(b, q, Q.sanitizeSelections(body.selections));
-    const lead = q.lead_id ? db.get('SELECT * FROM leads WHERE id = ?', q.lead_id) : null;
+    let lead = q.lead_id ? db.get('SELECT * FROM leads WHERE id = ?', q.lead_id) : null;
+    // The lead this quote belonged to can be gone - deleted in the admin while the customer still
+    // had the page open. Without this, they retype their details, every save quietly lands nowhere,
+    // and nothing they do will ever let them request a contract. Give the quote a lead again.
+    if (!lead && body.contact && typeof body.contact === 'object') {
+      lead = L.createLead(b, { source: 'quote', meta: { user_agent: req.headers['user-agent'] } });
+      db.run('UPDATE quotes SET lead_id = ? WHERE id = ?', lead.id, q.id);
+      B.logActivity(b.id, lead.id, 'started', 'Came back to a quote whose contact record was gone');
+    }
     if (lead) {
       const details = db.json(Q.byToken(q.token).details, {});
       const quoteAnswers = { event_type: details.event_type, event_date: details.event_date, venue: details.venue, city: details.city, guests: details.guests };
@@ -530,8 +538,9 @@ module.exports = function publicRoutes(app) {
     const q = Q.byToken(req.params.token);
     if (!q) throw new HttpError(404, 'Not found');
     const b = B.byId(q.business_id);
-    const lead = db.get('SELECT * FROM leads WHERE id = ?', q.lead_id);
-    if (!lead) throw new HttpError(400, 'Missing contact info');
+    // A missing lead is handled downstream as missing contact details, which the page answers by
+    // walking the customer back to the contact step. A flat error here would strand them instead.
+    const lead = q.lead_id ? db.get('SELECT * FROM leads WHERE id = ?', q.lead_id) : null;
     return fn(b, q, lead);
   }
   app.post('/api/public/quotes/:token/submit', (req) => quoteAction(req, async (b, q, lead) => ({ quote: Q.publicQuote(await Q.submitQuote(b, q, lead), b) })));
