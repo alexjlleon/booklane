@@ -43,6 +43,7 @@
     return {
       service_id: service.id, name: service.name, category: service.category || '', pricing_type: pt,
       qty, unit_label: service.unit_label || '', unit_price: r2(unit), options, addons,
+      bundle_eligible: service.bundle_eligible !== false && service.bundle_eligible !== 0,
       base_amount: base, amount: r2(base + addonTotal),
     };
   }
@@ -57,6 +58,10 @@
       value: Number(b.value) || 0,
       service_ids: (b.service_ids || []).map(Number).filter((n) => n > 0),
       min_services: Math.max(0, Number(b.min_services) || 0),
+      // An exact bundle is one row of a price table: it applies to that combination and no other.
+      // Without this a five-service row would win on a six-service order, because it happens to
+      // save more, and the customer would be quoted less than the table says.
+      exact: !!b.exact,
       label: String(b.label || ''),
     }));
     for (const t of settings.bundle_discounts || []) {
@@ -66,11 +71,25 @@
     return list;
   }
 
-  // A bundle applies either when every named service is selected, or when enough services are selected.
-  function matchOf(b, lines) {
+  // Which of the chosen lines take part in combination pricing. Add-ons and ready-made packages are
+  // marked ineligible, so a guest book in the basket never stops a combination being recognised -
+  // and a service that simply is not in the table still counts, so its absence is noticed.
+  const eligibleIds = (lines) => new Set(lines.filter((l) => l.bundle_eligible !== false).map((l) => Number(l.service_id)));
+
+  /**
+   * A bundle applies when every named service is selected; an exact bundle additionally requires
+   * that nothing else priced is selected, because it is one row of a combination table rather than
+   * a discount that stacks.
+   */
+  function matchOf(b, lines, eligible) {
     if (b.service_ids.length) {
       const have = idsOf(lines);
       if (!b.service_ids.every((id) => have.has(id))) return null;
+      if (b.exact) {
+        // Exactly these and nothing else that counts.
+        if (eligible.size !== b.service_ids.length) return null;
+        if (!b.service_ids.every((id) => eligible.has(id))) return null;
+      }
       const matched = lines.filter((l) => b.service_ids.includes(Number(l.service_id)));
       return { matched, sum: sumOf(matched) };
     }
@@ -92,16 +111,29 @@
     return `Bundle discount (${b.value}% off ${b.service_ids.length ? 'selected services' : b.min_services + '+ services'})`;
   }
 
-  // Only one bundle ever applies: whichever saves the customer the most. Keeps totals predictable.
+  /**
+   * Only one bundle ever applies. An exact match wins outright, because it is the price for that
+   * combination; otherwise it is whichever ordinary discount saves the customer the most.
+   *
+   * Savings can never go below zero (see savingsOf), so a table row priced above the sum of its
+   * parts simply does not apply, and the customer pays the lower figure rather than the higher one.
+   */
   function bestBundle(lines, cap, settings) {
-    let best = null;
-    for (const b of allBundles(settings)) {
-      const m = matchOf(b, lines);
+    const bundles = allBundles(settings);
+    const eligible = eligibleIds(lines);
+    let best = null; let bestExact = null;
+    for (const b of bundles) {
+      const m = matchOf(b, lines, eligible);
       if (!m) continue;
       const savings = Math.min(cap, savingsOf(b, m));
+      if (b.exact) {
+        if (!bestExact || savings > bestExact.savings) bestExact = { savings, label: labelOf(b), bundle: b, exact: true };
+        continue;
+      }
       if (savings <= 0) continue;
       if (!best || savings > best.savings) best = { savings, label: labelOf(b), bundle: b };
     }
+    if (bestExact) return bestExact.savings > 0 ? bestExact : null;
     return best;
   }
 
@@ -130,6 +162,18 @@
     return best;
   }
 
+  /**
+   * True when this business prices combinations explicitly and this one is not in the table.
+   * A single service is always known, and a business with no combination pricing is never unsure.
+   */
+  function unpricedCombination(lines, settings) {
+    const exacts = allBundles(settings).filter((b) => b.exact);
+    if (!exacts.length) return false;
+    const chosen = [...eligibleIds(lines)];
+    if (chosen.length < 2) return false;
+    return !exacts.some((b) => b.service_ids.length === chosen.length && b.service_ids.every((id) => chosen.includes(id)));
+  }
+
   function calculate(catalog, selections, settings) {
     settings = settings || {};
     const byId = new Map((catalog || []).map((s) => [Number(s.id), s]));
@@ -144,6 +188,10 @@
     const subtotal = sumOf(lines);
     const applied = bestBundle(lines, subtotal, settings);
     const discount = applied ? applied.savings : 0;
+    // When a business prices combinations explicitly, a combination missing from the table is a
+    // gap in the price list rather than a plain sum. Say so, so the page can offer a real quote
+    // instead of inventing a number nobody signed off.
+    const needsQuote = unpricedCombination(lines, settings);
     const discountLabel = applied ? applied.label : '';
     const taxable = Math.max(0, subtotal - discount);
     const tax = r2(taxable * (Number(settings.tax_rate) || 0) / 100);
@@ -152,7 +200,8 @@
     if (settings.deposit_type === 'flat') deposit = Math.min(total, Number(settings.deposit_value) || 0);
     else deposit = Math.min(total, Math.ceil(total * (Number(settings.deposit_value) || 0) / 100));
     return {
-      lines, subtotal, discount, discount_label: discountLabel, tax, tax_rate: Number(settings.tax_rate) || 0,
+      lines, subtotal, discount, discount_label: discountLabel, needs_quote: needsQuote,
+      tax, tax_rate: Number(settings.tax_rate) || 0,
       total, deposit: r2(deposit), next_bundle: lines.length ? nextBundle(lines, catalog, settings, discount) : null,
     };
   }

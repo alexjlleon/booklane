@@ -312,3 +312,9 @@ h1, h2, h3 { line-height: 1.2; margin: 0; letter-spacing: -0.01em; }
 .pick-shape { display: block; background: var(--surface); border: 1.5px solid var(--line-2); border-radius: 3px; box-shadow: var(--shadow); }
 .pick.is-on .pick-shape { border-color: var(--brand); }
 .pick-swatches.no-media .pick-media { aspect-ratio: auto; height: 34px; }
+
+/* ---------- Quote: the bundle you landed on, and the "we'll price it" fallback ---------- */
+.q-bundle { margin-top: 10px; padding: 9px 11px; border-radius: var(--radius-sm); background: var(--brand-soft); color: var(--brand); font-weight: 700; font-size: 13.5px; }
+.q-custom { margin-top: 12px; padding: 13px; border: 1.5px dashed var(--line-2); border-radius: var(--radius-sm); background: var(--surface-2); }
+.q-custom b { display: block; margin-bottom: 4px; }
+.q-custom p { margin: 0 0 10px; color: var(--ink-2); }

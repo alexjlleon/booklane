@@ -35,12 +35,15 @@ function conform(def, val, path = '') {
       })).filter((f) => f.label);
     }
     if (path === 'quote.bundles') {
-      return val.filter(isObj).slice(0, 60).map((b) => ({
+      return val.filter(isObj).slice(0, 400).map((b) => ({
         name: String(b.name || '').slice(0, 80),
         type: ['price', 'amount', 'percent'].includes(b.type) ? b.type : 'percent',
         value: Math.max(0, Math.min(1e7, Number(b.value) || 0)),
         service_ids: Array.isArray(b.service_ids) ? b.service_ids.map((n) => parseInt(n, 10)).filter((n) => n > 0).slice(0, 30) : [],
         min_services: Math.max(0, Math.min(50, parseInt(b.min_services, 10) || 0)),
+        // One row of a combination price table, rather than a discount that stacks. Dropping this
+        // silently turns an exact price into a best-saving guess, which quotes the wrong number.
+        exact: !!b.exact,
         label: String(b.label || '').slice(0, 80),
       }));
     }

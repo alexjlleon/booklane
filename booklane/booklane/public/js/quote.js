@@ -202,11 +202,35 @@
       <div class="biz">${BL.logo(biz)}<div class="biz-name">${esc(biz.name)}</div></div>
       <h3>Your quote</h3>
       ${c.lines.length ? `<div class="q-lines">${c.lines.map((l) => `<div class="q-line"><div><div class="n">${esc(l.name)}</div><div class="d">${esc(lineDesc(l))}</div></div><div class="a">${money(l.amount)}</div></div>`).join('')}</div>` : '<div class="muted small">Pick services to see your price build here.</div>'}
-      ${c.lines.length ? `<div class="q-totals">${c.discount ? `<div class="disc"><span>${esc(c.discount_label)}</span><span>−${money(c.discount)}</span></div>` : ''}${c.tax ? `<div><span>Tax</span><span>${money(c.tax)}</span></div>` : ''}
+      ${c.needs_quote ? customQuoteBox() : ''}
+      ${c.lines.length && !c.needs_quote ? `<div class="q-totals">${c.discount ? `<div class="disc"><span>${esc(c.discount_label)}</span><span>−${money(c.discount)}</span></div>` : ''}${c.tax ? `<div><span>Tax</span><span>${money(c.tax)}</span></div>` : ''}
         <div style="align-items:baseline"><span class="muted">Total</span><span class="q-total">${money(c.total)}</span></div>${c.deposit ? `<div class="muted small"><span>Deposit to book</span><span>${money(c.deposit)}</span></div>` : ''}</div>` : ''}
-      ${c.next_bundle && c.lines.length ? `<div class="q-hint">${esc(hintText(c.next_bundle))}</div>` : ''}
+      ${c.discount && c.discount_label && !c.needs_quote ? `<div class="q-bundle">${esc(c.discount_label)} · you save ${money(c.discount)}</div>` : ''}
+      ${c.next_bundle && c.lines.length && !c.needs_quote ? `<div class="q-hint">${esc(hintText(c.next_bundle))}</div>` : ''}
       <ul class="trust" style="margin-top:6px">${(biz.settings.trust_points || []).map((t) => `<li>${esc(t)}</li>`).join('')}</ul>
     </aside>`;
+  }
+
+  /**
+   * Shown when this combination is not in the price list.
+   *
+   * Every combination the business has priced is matched exactly, so landing here means nobody has
+   * set a price for this one. Inventing a total would be a guess the business never agreed to, so
+   * the page says so plainly and offers a person instead.
+   */
+  function customQuoteBox() {
+    const picked = calc().lines.map((l) => l.name).join(', ');
+    const subject = encodeURIComponent(`Quote request: ${picked}`);
+    const body = encodeURIComponent(`Hi,\n\nI would like a quote for: ${picked}.\n\n`);
+    const mail = biz.email ? `mailto:${biz.email}?subject=${subject}&body=${body}` : '';
+    return `<div class="q-custom">
+      <b>We'll price this one for you</b>
+      <p class="small">That mix isn't on our standard price list, which usually means we can do better than adding it up. Tell us what you're planning and we'll come back with a price.</p>
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        ${mail ? `<a class="btn btn-primary btn-sm" href="${esc(mail)}">Email for a custom quote</a>` : ''}
+        ${biz.phone ? `<a class="btn btn-ghost btn-sm" href="tel:${esc(biz.phone)}">Call ${esc(biz.phone)}</a>` : ''}
+      </div>
+    </div>`;
   }
 
   function modalHtml() {

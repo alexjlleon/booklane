@@ -78,6 +78,9 @@ function readServices(rows, warnings, sheetName) {
       name: name.slice(0, 120), category: at(row, 'category').slice(0, 60), description: at(row, 'description').slice(0, 500),
       base_price: price, pricing_type: pt, unit_label: at(row, 'unit_label').slice(0, 40) || (pt === 'per_unit' ? 'unit' : ''),
       min_qty: min, max_qty: max, default_qty: min, active: truthy(at(row, 'active')) ? 1 : 0,
+      // Add-ons and ready-made packages sit outside combination pricing: an add-on should never
+      // stop a combination being recognised, and a package already IS a combination.
+      bundle_eligible: /add.?on|extra|upgrade|featured|package|bundle/i.test(at(row, 'category')) ? 0 : 1,
     });
   }
   return out;
@@ -108,6 +111,48 @@ function readBundles(rows, warnings, sheetName) {
   return out;
 }
 
+/**
+ * Split one sheet that mixes services and combination prices.
+ *
+ * A price sheet often lists the six things you sell and then every combination of them, all in one
+ * column: "Photography + DJ / MC + Videography". Those combination rows are prices, not things to
+ * tick, so they become exact bundles and never appear as their own service.
+ *
+ * The combination has to be made entirely of rows that are services in their own right; anything
+ * else is left alone and imported as an ordinary service, because it is probably a real product
+ * whose name happens to contain a plus sign.
+ */
+function splitCombinationRows(services, warnings) {
+  const byName = new Map(services.map((s) => [norm(s.name), s]));
+  const plain = [];
+  const combos = [];
+  for (const s of services) {
+    const parts = String(s.name).split('+').map((x) => clean(x)).filter(Boolean);
+    const looksCombined = parts.length > 1 && parts.every((p) => byName.has(norm(p)) && norm(p) !== norm(s.name));
+    if (!looksCombined) { plain.push(s); continue; }
+    // "Calculator label: Grand Celebration Bundle." is what the customer should be told they got.
+    const m = /calculator label:\s*([^.]+)\./i.exec(s.description || '');
+    let label = m ? clean(m[1]) : '';
+    if (!label || /^pair$/i.test(label)) label = parts.length === 2 ? 'Pair price' : 'Bundle price';
+    combos.push({
+      name: s.name.slice(0, 80), type: 'price', value: s.base_price,
+      service_names: parts, min_services: 0, label: label.slice(0, 80), exact: true,
+    });
+  }
+  if (combos.length) {
+    warnings.push(`${combos.length} row${combos.length === 1 ? '' : 's'} named a combination of services (like "A + B"). Those were read as combination prices, not as separate things to tick.`);
+    // A combination that costs more than its parts can never be right, and the quote engine will
+    // ignore it rather than overcharge - but say so here, because it is almost always a typo.
+    for (const c of combos) {
+      const sum = c.service_names.reduce((a, n) => a + ((byName.get(norm(n)) || {}).base_price || 0), 0);
+      if (sum && c.value > sum) {
+        warnings.push(`"${c.name}" is priced at ${c.value}, more than the ${sum} those services cost separately. Customers will be quoted ${sum} until you fix it.`);
+      }
+    }
+  }
+  return { plain, combos };
+}
+
 // Parse and validate without touching the database.
 function analyze(buf, filename) {
   const sheets = parseWorkbook(buf, filename);
@@ -121,6 +166,10 @@ function analyze(buf, filename) {
     if (isBundleSheet) bundles = bundles.concat(readBundles(rows, warnings, sheet.name));
     else services = services.concat(readServices(rows, warnings, sheet.name));
   }
+  // Combination rows arrive mixed in with the services; pull them out into bundles.
+  const split = splitCombinationRows(services, warnings);
+  services = split.plain;
+  bundles = bundles.concat(split.combos);
   if (!services.length && !bundles.length) throw new Error('No services or bundles were found in that file. The first row should be column headings such as Category, Service, Price.');
   return { services, bundles, warnings, sheets: sheets.map((s) => ({ name: s.name, rows: (s.rows || []).length })) };
 }
@@ -141,13 +190,13 @@ function apply(businessId, parsed, { mode = 'merge' } = {}) {
       const id = existing.get(norm(s.name));
       if (id) {
         db.run(`UPDATE services SET category = ?, description = ?, base_price = ?, pricing_type = ?, unit_label = ?,
-          min_qty = ?, max_qty = ?, default_qty = ?, active = ? WHERE id = ? AND business_id = ?`,
-        s.category, s.description, s.base_price, s.pricing_type, s.unit_label, s.min_qty, s.max_qty, s.default_qty, s.active, id, businessId);
+          min_qty = ?, max_qty = ?, default_qty = ?, active = ?, bundle_eligible = ? WHERE id = ? AND business_id = ?`,
+        s.category, s.description, s.base_price, s.pricing_type, s.unit_label, s.min_qty, s.max_qty, s.default_qty, s.active, s.bundle_eligible ?? 1, id, businessId);
         result.updated++;
       } else {
         const { lastId } = db.run(`INSERT INTO services (business_id, category, name, description, base_price, pricing_type, unit_label,
-          min_qty, max_qty, default_qty, active, sort) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-        businessId, s.category, s.name, s.description, s.base_price, s.pricing_type, s.unit_label, s.min_qty, s.max_qty, s.default_qty, s.active, ++sort);
+          min_qty, max_qty, default_qty, active, bundle_eligible, sort) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        businessId, s.category, s.name, s.description, s.base_price, s.pricing_type, s.unit_label, s.min_qty, s.max_qty, s.default_qty, s.active, s.bundle_eligible ?? 1, ++sort);
         existing.set(norm(s.name), lastId);
         result.added++;
       }
@@ -161,7 +210,7 @@ function apply(businessId, parsed, { mode = 'merge' } = {}) {
           if (id) ids.push(id); else result.unmatched.push(`${b.name}: "${nm}"`);
         }
         if (!ids.length && !b.min_services) continue;
-        bundles.push({ name: b.name, type: b.type, value: b.value, service_ids: ids, min_services: b.min_services, label: '' });
+        bundles.push({ name: b.name, type: b.type, value: b.value, service_ids: ids, min_services: b.min_services, label: b.label || '', exact: !!b.exact });
       }
       const biz = db.get('SELECT settings FROM businesses WHERE id = ?', businessId);
       const settings = db.json(biz.settings, {});

@@ -14,6 +14,7 @@ function hydrateService(s) {
   s.option_groups = db.json(s.option_groups, []);
   s.addons = db.json(s.addons, []);
   s.active = !!s.active;
+  s.bundle_eligible = s.bundle_eligible === undefined ? true : !!s.bundle_eligible;
   return s;
 }
 const catalog = (businessId, { all = false } = {}) =>

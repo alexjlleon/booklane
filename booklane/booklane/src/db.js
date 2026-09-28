@@ -292,6 +292,9 @@ for (const sql of [
   // Which custom form a lead or order came through, so a form can report its own results.
   'ALTER TABLE leads ADD COLUMN form_id INTEGER',
   'ALTER TABLE orders ADD COLUMN form_id INTEGER',
+  // Whether this service takes part in combination pricing. Add-ons and ready-made packages do
+  // not: a guest book sitting in the basket must never stop a combination from being recognised.
+  'ALTER TABLE services ADD COLUMN bundle_eligible INTEGER NOT NULL DEFAULT 1',
   // Orders grew from one session to a cart of lines; 'product' orders are scheduled after payment,
   // not before, so the slot columns stay empty for them.
   'ALTER TABLE orders ADD COLUMN product_id INTEGER',

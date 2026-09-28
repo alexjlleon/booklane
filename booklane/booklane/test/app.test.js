@@ -1741,3 +1741,93 @@ test('both providers report a payment in the same shape', async () => {
   }, biz);
   assert.equal(pending.kind, 'pending');
 });
+
+// ---------------------------------------------------------------------------
+// Combination pricing: a price sheet that lists every mix of services.
+// Two things nearly went wrong here, so both are pinned down: a smaller
+// combination must never win on a larger order, and a row priced above the
+// sum of its parts must never be charged.
+// ---------------------------------------------------------------------------
+const PricingLib = require('../public/js/pricing.js');
+
+function comboFixture() {
+  const svc = (id, name, price, eligible) => ({
+    id, name, base_price: price, pricing_type: 'flat', min_qty: 1, max_qty: 1, default_qty: 1,
+    option_groups: [], addons: [], bundle_eligible: eligible !== false,
+  });
+  const catalog = [
+    svc(1, 'Photography', 1950), svc(2, 'DJ / MC', 1485), svc(3, 'Videography', 1950),
+    svc(9, 'Audio Guest Book', 395, false),
+  ];
+  const settings = {
+    tax_rate: 0, deposit_type: 'percent', deposit_value: 0,
+    bundles: [
+      { name: 'Photo + DJ', type: 'price', value: 2575, service_ids: [1, 2], exact: true, label: 'Pair price' },
+      { name: 'All three', type: 'price', value: 3875, service_ids: [1, 2, 3], exact: true, label: 'Grand Celebration Bundle' },
+      // Deliberately wrong: priced above the $3,435 those two cost separately.
+      { name: 'DJ + Video', type: 'price', value: 5950, service_ids: [2, 3], exact: true, label: 'Epic Bundle PLUS' },
+    ],
+  };
+  const price = (ids) => PricingLib.calculate(catalog, ids.map((id) => ({ service_id: id })), settings);
+  return { catalog, settings, price };
+}
+
+test('a smaller combination never wins on a bigger order', () => {
+  const { price } = comboFixture();
+  // The pair saves $860; all three saves $1,510. Picking by "biggest saving" alone would once have
+  // applied the pair to a three-service order and undercharged by hundreds.
+  const three = price([1, 2, 3]);
+  assert.equal(three.total, 3875, 'the three-service price is the one on the sheet');
+  assert.equal(three.discount_label, 'Grand Celebration Bundle');
+
+  const two = price([1, 2]);
+  assert.equal(two.total, 2575);
+  assert.equal(two.discount_label, 'Pair price');
+});
+
+test('a combination priced above its parts is never charged', () => {
+  const { price } = comboFixture();
+  // DJ $1,485 + Videography $1,950 = $3,435, but the sheet says $5,950.
+  const r = price([2, 3]);
+  assert.equal(r.total, 3435, 'the customer pays the lower figure, not the sheet');
+  assert.equal(r.discount, 0, 'and no phantom discount is shown');
+  assert.ok(!r.discount_label, 'nor a bundle name they did not get');
+});
+
+test('an add-on rides along without dissolving the combination', () => {
+  const { price } = comboFixture();
+  const r = price([1, 2, 3, 9]);
+  assert.equal(r.discount_label, 'Grand Celebration Bundle', 'the guest book is not part of the mix');
+  assert.equal(r.total, 3875 + 395, 'it is simply added on top');
+  assert.equal(r.needs_quote, false);
+});
+
+test('a combination nobody priced asks for a quote instead of guessing', () => {
+  const { price } = comboFixture();
+  // Photography + Videography is not in the table above.
+  const r = price([1, 3]);
+  assert.equal(r.needs_quote, true, 'the page should offer a real quote');
+
+  // A single service is always known, and so is a priced combination.
+  assert.equal(price([1]).needs_quote, false);
+  assert.equal(price([1, 2]).needs_quote, false);
+
+  // A business with no combination pricing at all is never unsure.
+  const plain = PricingLib.calculate(
+    [{ id: 1, name: 'A', base_price: 100, pricing_type: 'flat', min_qty: 1, max_qty: 1, default_qty: 1, option_groups: [], addons: [] }],
+    [{ service_id: 1 }], { bundles: [], tax_rate: 0, deposit_type: 'percent', deposit_value: 0 },
+  );
+  assert.equal(plain.needs_quote, false);
+});
+
+test('the exact flag survives being saved and read back', async () => {
+  // It is set by the importer and read by the pricing engine, with the business settings hydrator
+  // in between. That hydrator silently dropped it once, which quietly changed every price.
+  const saved = await req('PATCH', '/api/admin/business', {
+    settings: { quote: { bundles: [{ name: 'Pair', type: 'price', value: 2575, service_ids: [1, 2], exact: true, label: 'Pair price' }] } },
+  }, { cookie: ownerCookie });
+  assert.equal(saved.status, 200, JSON.stringify(saved.data));
+  const back = saved.data.settings.quote.bundles[0];
+  assert.equal(back.exact, true, 'an exact combination must not come back as an ordinary discount');
+  assert.equal(back.value, 2575);
+});
