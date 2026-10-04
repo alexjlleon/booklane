@@ -2,6 +2,18 @@
 const { esc } = require('./lib/util');
 const APP_NAME = process.env.APP_NAME || 'Booklane';
 
+/**
+ * The query string that lets a browser know its copy of our CSS and JS is out of date.
+ *
+ * Static files go out with an hour of cache in production, so the only thing that tells a returning
+ * browser to fetch a new one is this changing. Pinned to '1' it never did: a deploy would land, the
+ * server would be running the new code, and the admin would keep running the old scripts for up to
+ * an hour - which looks exactly like a fix that did not work.
+ *
+ * A new deploy is a new process, so the start time changes precisely when the files might have.
+ */
+const ASSET_VERSION = process.env.ASSET_VERSION || Date.now().toString(36);
+
 const safeJson = (o) => JSON.stringify(o).replace(/</g, '\\u003c').replace(/[\u2028\u2029]/g, (c) => '\\u' + c.charCodeAt(0).toString(16));
 
 function hexToRgb(hex) {
@@ -13,7 +25,7 @@ function hexToRgb(hex) {
 
 function page({ title, description = '', business, scripts = [], styles = ['app.css'], data = {}, body = '<div id="app"></div>', bodyClass = '', embed = false }) {
   const brand = business?.brand_color && /^#[0-9a-f]{6}$/i.test(business.brand_color) ? business.brand_color : '#6d4aff';
-  const v = process.env.ASSET_VERSION || '1';
+  const v = ASSET_VERSION;
   return `<!doctype html>
 <html lang="en">
 <head>

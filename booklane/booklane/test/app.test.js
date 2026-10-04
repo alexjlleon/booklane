@@ -2229,3 +2229,14 @@ test('no admin screen reaches into render() scope from mount()', () => {
   }
   assert.deepEqual(bad, [], bad.join('\n'));
 });
+
+test('a deploy tells browsers their copy of the scripts is stale', async () => {
+  // Static files carry an hour of cache in production. Pinned at v=1 the URL never changed, so a
+  // returning browser kept running the previous deploy's JS - indistinguishable, from the outside,
+  // from a fix that did not work.
+  const html = (await req('GET', '/app', null, { cookie: ownerCookie })).data;
+  const versions = [...String(html).matchAll(/\/static\/js\/[^"?]+\?v=([^"]+)/g)].map((m) => m[1]);
+  assert.ok(versions.length, 'the admin page should load scripts');
+  assert.ok(!versions.includes('1'), 'a constant version can never invalidate anything');
+  assert.equal(new Set(versions).size, 1, 'one version for the whole page, so a deploy moves them together');
+});
