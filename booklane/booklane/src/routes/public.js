@@ -8,6 +8,7 @@ const { buildIcs, googleCalendarLink } = require('../lib/ics');
 const { page, APP_NAME } = require('../views');
 const B = require('../services/business');
 const ORG = require('../services/org');
+const PLACES = require('../services/places');
 const L = require('../services/leads');
 const S = require('../services/scheduling');
 const Q = require('../services/quotes');
@@ -43,8 +44,12 @@ function publicEventType(et, teamsById) {
   const team = !et.team_id ? null
     : teamsById ? teamsById.get(Number(et.team_id))
       : db.get('SELECT id, name, color FROM teams WHERE id = ? AND active = 1', et.team_id) || null;
-  return { id: et.id, slug: et.slug, name: et.name, description: et.description, duration_min: et.duration_min, location_type: et.location_type,
-    location_label: LOCATION_TYPES[et.location_type], location_value: et.location_type === 'in_person' ? et.location_value : null,
+  const places = PLACES.placesFor(et);
+  return { id: et.id, slug: et.slug, name: et.name, description: et.description, duration_min: et.duration_min, location_type: places[0].type,
+    // What the page offers. One of these is the normal case and the chooser stays hidden; the
+    // labels still come from here, so a renamed single option reads the way the business wrote it.
+    places: places.map(PLACES.publicPlace),
+    location_label: places[0].label, location_value: places[0].type === 'in_person' ? places[0].value : null,
     max_days_ahead: et.max_days_ahead, color: et.color, steps: et.steps, hosts, settings: et.settings,
     booking_type_id: et.booking_type_id || null,
     // The team is shown on the card, so the customer can see who runs this without it deciding how
@@ -474,7 +479,7 @@ module.exports = function publicRoutes(app) {
     if (!body.answers || typeof body.answers !== 'object' || Array.isArray(body.answers)) body.answers = {};
     if (quote) body.answers.quote_total = String(quote.total);
     const contact = body.contact && typeof body.contact === 'object' ? body.contact : {};
-    const booking = await BK.createBooking({ business: b, et, startIso: body.start, tz: body.timezone, contact, answers: body.answers || {}, lead, quote });
+    const booking = await BK.createBooking({ business: b, et, startIso: body.start, tz: body.timezone, contact, answers: body.answers || {}, lead, quote, placeId: body.place_id });
     if (quote) db.run("UPDATE quotes SET next_step = 'call', status = CASE WHEN status = 'draft' THEN 'submitted' ELSE status END, updated_at = datetime('now') WHERE id = ?", quote.id);
     return { token: booking.token, redirect: `/booking/${booking.token}?new=1` };
   });

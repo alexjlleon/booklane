@@ -2093,3 +2093,56 @@ test('an all-day entry labels the day without blacking it out', () => {
   // A business that wants all-day entries to mean "do not book me" says so, and they block again.
   assert.equal(C.ignoredReason(entries[0], { busy_all_day: 1 }), null);
 });
+
+// --- Offering more than one way to meet ---------------------------------------------------------
+
+test('a page with one way to meet behaves exactly as it did', () => {
+  const P = require('../src/services/places');
+  const places = P.placesFor({ location_type: 'in_person', location_value: '12 Market St', location_options: [] });
+  assert.equal(places.length, 1, 'no list means the single location_type, not nothing');
+  assert.equal(places[0].type, 'in_person');
+  assert.equal(places[0].value, '12 Market St');
+  assert.equal(P.placeText(places[0], {}), '12 Market St');
+});
+
+test('a customer picks how to meet and that is what goes on the invite', async () => {
+  const made = await req('POST', '/api/admin/event-types', {
+    name: 'Discovery Chat', duration_min: 20,
+    location_options: [
+      { type: 'phone', label: 'Phone call', note: 'We ring you' },
+      { type: 'zoom', label: 'Zoom', value: 'https://example.com/j/1' },
+    ],
+  }, { cookie: ownerCookie });
+  assert.equal(made.status, 200, JSON.stringify(made.data));
+  assert.deepEqual(made.data.location_options.map((p) => p.id), ['phone-call', 'zoom']);
+
+  const html = (await req('GET', `/b/${bizSlug}/${made.data.slug}`)).data;
+  const payload = JSON.parse(/window\.__BL__=(\{.*?\});<\/script>/s.exec(html)[1]);
+  assert.deepEqual(payload.eventType.places.map((p) => p.label), ['Phone call', 'Zoom']);
+  // The Zoom link is not handed out before there is a booking; the in-person address would be.
+  assert.equal(payload.eventType.places[1].detail, '');
+
+  const BKs = require('../src/services/bookings');
+  const et = BKs.hydrateEt(db.get('SELECT * FROM event_types WHERE id = ?', made.data.id));
+  const P = require('../src/services/places');
+  assert.equal(P.placeFor(et, 'zoom').type, 'zoom');
+  assert.equal(P.placeText(P.placeFor(et, 'zoom'), {}), 'https://example.com/j/1');
+  assert.equal(P.placeText(P.placeFor(et, 'phone-call'), { phone: '2815550100' }), 'Phone call: we will call you at 2815550100');
+  // A choice that no longer exists falls back to the first rather than refusing: losing a
+  // preference must never cost somebody their booking.
+  assert.equal(P.placeFor(et, 'carrier-pigeon').id, 'phone-call');
+});
+
+test('a way to meet that takes no address is not given one', () => {
+  const P = require('../src/services/places');
+  const list = P.sanitize([
+    { type: 'phone', value: 'https://sneaky.example' },
+    { type: 'teams', value: 'https://sneaky.example' },
+    { type: 'in_person', value: '12 Market St' },
+    { type: 'nonsense', label: 'Carrier pigeon' },
+  ]);
+  assert.equal(list[0].value, '', 'a phone call has nowhere to put a link');
+  assert.equal(list[1].value, '', 'a Teams link is made per booking, not typed in once');
+  assert.equal(list[2].value, '12 Market St');
+  assert.equal(list[3].type, 'phone', 'an unknown way to meet falls back rather than being stored');
+});

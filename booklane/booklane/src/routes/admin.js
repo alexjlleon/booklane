@@ -15,6 +15,7 @@ const calendars = require('../services/calendars');
 const { pushToBoothBook, sendWebhook, buildBoothBookPayload } = require('../services/integrations');
 const Importer = require('../services/catalog-import');
 const ORG = require('../services/org');
+const PLACES = require('../services/places');
 const SESS = require('../services/sessions');
 const PROD = require('../services/products');
 const FORMS = require('../services/forms');
@@ -387,6 +388,9 @@ module.exports = function adminRoutes(app) {
       slot_interval_min: int(b.slot_interval_min ?? existing?.slot_interval_min, 30, 5, 720), daily_limit: int(b.daily_limit ?? existing?.daily_limit, 0, 0, 100),
       assignment: b.assignment === 'single' ? 'single' : 'round_robin', color: /^#[0-9a-f]{6}$/i.test(b.color || '') ? b.color : existing?.color || '#6d4aff',
       steps: JSON.stringify(b.steps ? sanitizeSteps(b.steps) : existing ? BK.hydrateEt({ ...existing }).steps : DEFAULT_STEPS()),
+      // The ways a customer may choose to meet. An empty list is not a gap: it means this page
+      // offers the single location_type above, which is how every page worked before.
+      location_options: JSON.stringify(b.location_options ? PLACES.sanitize(b.location_options) : existing ? BK.hydrateEt({ ...existing }).location_options : []),
       active: b.active === undefined ? (existing ? existing.active : 1) : bool(b.active) ? 1 : 0,
       // Only this business's own labels, so a stale id in a form can never file a page under
       // another company's team. Anything unrecognised clears the field rather than being stored.

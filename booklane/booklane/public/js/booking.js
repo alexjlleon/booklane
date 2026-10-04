@@ -9,6 +9,9 @@
   const st = {
     i: 0, tz: BL.guessTz(), slot: null, answers: {}, contact: { first_name: '', last_name: '', email: '', phone: '', sms_consent: false },
     leadToken: null, quoteToken: params.get('quote') || null, busy: false, error: null, saveState: '', skip: new Set(),
+    // Preselected, so somebody who scrolls straight to the calendar still books the first way this
+    // page offers rather than nothing at all.
+    placeId: ((et.places || [])[0] || {}).id || null,
   };
   const steps = et.steps;
   const app = document.getElementById('app');
@@ -134,11 +137,29 @@
   function visibleCount() { return steps.length - st.skip.size; }
   function visiblePos(i) { let n = 0; for (let j = 0; j <= i; j++) if (!st.skip.has(j)) n++; return n; }
 
+  /**
+   * How they want to meet, asked above the calendar rather than on a screen of its own.
+   *
+   * One way of meeting needs no question, so the chooser only appears when there is a real choice.
+   * It does not change which times are free, so picking one never reloads the calendar.
+   */
+  function placeChooser() {
+    const places = et.places || [];
+    if (places.length < 2) return '';
+    return `<div class="place-pick" style="margin-bottom:18px">
+      <div class="label" style="margin-bottom:8px">How should we meet?</div>
+      <div class="options list">${places.map((p) => `<label class="opt radio ${p.id === st.placeId ? 'is-on' : ''}">
+        <input type="radio" name="place" value="${esc(p.id)}" ${p.id === st.placeId ? 'checked' : ''} data-place>
+        <span class="tick"></span>
+        <span><b>${esc(p.label)}</b>${p.detail ? `<div class="small muted">${esc(p.detail)}</div>` : ''}${p.note ? `<div class="small muted">${esc(p.note)}</div>` : ''}</span>
+      </label>`).join('')}</div></div>`;
+  }
+
   function render() {
     const step = steps[st.i];
     const pos = visiblePos(st.i), total = visibleCount();
     let body = '';
-    if (step.type === 'schedule') body = '<div id="scheduler"></div>';
+    if (step.type === 'schedule') body = placeChooser() + '<div id="scheduler"></div>';
     else if (step.type === 'availability') body = renderAvailability(step);
     else if (step.type === 'contact') body = renderContact(step);
     else body = `<form class="step-form" novalidate>${(step.questions || []).map(renderQuestion).join('')}</form>`;
@@ -225,7 +246,7 @@
     try {
       await ensureLead();
       await saver.flush();
-      const r = await api('POST', `/api/public/b/${biz.slug}/e/${et.slug}/book`, { lead_token: st.leadToken, quote_token: st.quoteToken, start: st.slot, timezone: st.tz, contact: st.contact, answers: st.answers });
+      const r = await api('POST', `/api/public/b/${biz.slug}/e/${et.slug}/book`, { lead_token: st.leadToken, quote_token: st.quoteToken, start: st.slot, timezone: st.tz, contact: st.contact, answers: st.answers, place_id: st.placeId });
       BL.store.del(storeKey);
       location.href = r.redirect;
     } catch (e) {
@@ -254,6 +275,15 @@
   app.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.matches('input.input')) { e.preventDefault(); go(1); } });
   function onInput(e) {
     const t = e.target;
+    if (t.hasAttribute('data-place')) {
+      st.placeId = t.value;
+      const chosen = (et.places || []).find((p) => p.id === t.value);
+      // Recorded as an answer too, so it shows on the lead and in the team's notification without
+      // anyone having to open the booking to find out which one they picked.
+      if (chosen) { st.answers.how_we_meet = chosen.label; capture({ answers: { how_we_meet: chosen.label } }, true); }
+      $$('[data-place]', app).forEach((x) => x.closest('.opt').classList.toggle('is-on', x.checked));
+      return;
+    }
     if (t.hasAttribute('data-contact')) {
       st.contact[t.name] = t.type === 'checkbox' ? t.checked : t.value;
       const field = t.closest('.field');

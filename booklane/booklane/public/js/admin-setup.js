@@ -49,7 +49,11 @@
             <div class="grid-2">${A.field('Name', A.input('name', et.name, 'placeholder="Discovery call"'))}${A.field('Link', `<div class="copy-row"><span class="small muted" style="white-space:nowrap">/${esc(A.me.business.slug)}/</span>${A.input('slug', et.slug, 'placeholder="auto"')}</div>`)}</div>
             ${A.field('Description', A.textarea('description', et.description, 'rows="2"'))}
             <div class="grid-2">${A.field('Length (minutes)', A.input('duration_min', et.duration_min, 'type="number" min="5" data-type="number"'))}${A.field('Color', A.input('color', et.color, 'type="color" style="height:46px;padding:4px"'))}</div>
-            <div class="grid-2">${A.field('Where', A.select('location_type', et.location_type, d.location_types))}${A.field('Location details', A.input('location_value', et.location_value, 'placeholder="Address or meeting link"'), 'Used for in person, Zoom and custom. Google Meet / Teams links are created automatically when a calendar is connected.')}</div>
+            <div class="panel" id="places" style="padding:12px;margin:4px 0 14px;background:var(--bg-soft)">
+              <div class="panel-head" style="margin-bottom:8px"><div><b>Where</b><p class="desc" style="margin:0">Offer more than one and the customer picks, above the calendar. One is the usual case and nothing is asked.</p></div>
+                <button type="button" class="btn btn-ghost btn-sm" data-add-place>+ Another way</button></div>
+              <div id="place-list" class="stack" style="gap:8px"></div>
+            </div>
             ${A.toggle('active', et.active, 'Page is live')}
           </div>
           <div class="panel"><div class="panel-head"><div><h2>Form steps</h2><p class="desc" style="margin:0">Every step autosaves as a lead. Put Contact info early to capture more people who drop off.</p></div>
@@ -73,6 +77,39 @@
     },
     mount(root, p) {
       const et = A.editing;
+      // A page that never defined a list offers one way: the location_type it has always had.
+      if (!Array.isArray(et.location_options) || !et.location_options.length) {
+        et.location_options = [{ id: 'default', type: et.location_type || 'phone', label: '', note: '', value: et.location_value || '' }];
+      }
+      const placesEl = $('#place-list', root);
+      const NEEDS_VALUE = ['in_person', 'custom', 'zoom'];
+      const VALUE_HINT = { in_person: 'Address', custom: 'Link or instructions', zoom: 'Your Zoom link' };
+      function renderPlaces() {
+        placesEl.innerHTML = et.location_options.map((pl, i) => `<div class="panel" data-pi="${i}" style="padding:10px">
+          <div class="grid-2">
+            ${A.field('Way to meet', `<select class="select" data-pf="type">${Object.entries(d.location_types).map(([k, v]) => `<option value="${esc(k)}" ${pl.type === k ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select>`)}
+            ${A.field('Call it', `<input class="input" data-pf="label" value="${esc(pl.label || '')}" placeholder="${esc(d.location_types[pl.type] || '')}">`)}
+          </div>
+          ${NEEDS_VALUE.includes(pl.type) ? A.field(VALUE_HINT[pl.type], `<input class="input" data-pf="value" value="${esc(pl.value || '')}">`) : ''}
+          ${A.field('A line of detail (optional)', `<input class="input" data-pf="note" value="${esc(pl.note || '')}" placeholder="Shown under the option on the booking page">`)}
+          ${et.location_options.length > 1 ? '<button type="button" class="btn btn-link btn-sm" data-remove-place>Remove this one</button>' : '<div class="small muted">Google Meet and Teams links are created automatically when a calendar is connected.</div>'}
+        </div>`).join('');
+      }
+      renderPlaces();
+      root.addEventListener('click', (e) => {
+        if (e.target.closest('[data-add-place]')) { et.location_options.push({ id: '', type: 'zoom', label: '', note: '', value: '' }); renderPlaces(); }
+        const rm = e.target.closest('[data-remove-place]');
+        if (rm) { et.location_options.splice(Number(rm.closest('[data-pi]').dataset.pi), 1); renderPlaces(); }
+      });
+      root.addEventListener('input', (e) => {
+        const f = e.target.dataset.pf; if (!f) return;
+        const i = Number(e.target.closest('[data-pi]').dataset.pi);
+        et.location_options[i][f] = e.target.value;
+        // Changing the type changes which boxes make sense, so redraw that card.
+        if (f === 'type') renderPlaces();
+      });
+      root.addEventListener('change', (e) => { if (e.target.dataset.pf === 'type') { const i = Number(e.target.closest('[data-pi]').dataset.pi); et.location_options[i].type = e.target.value; renderPlaces(); } });
+
       const stepsEl = $('#steps', root);
       function renderSteps() {
         stepsEl.innerHTML = et.steps.map((s, i) => `<div class="step-card" data-si="${i}">
@@ -131,6 +168,9 @@
         if (e.target.closest('[data-add-step]')) { et.steps.push({ key: '', type: 'questions', title: 'A few more details', subtitle: '', questions: [{ id: '', label: 'Your question', type: 'text', options: [], required: false }] }); renderSteps(); }
         if (e.target.closest('[data-save]')) {
           const body = Object.assign({}, A.collect($('#basics', root)), A.collect($('#limits', root)), A.collect($('#hosts', root)), A.collect($('#filing', root)));
+          body.location_options = et.location_options;
+          body.location_type = (et.location_options[0] || {}).type || 'phone';
+          body.location_value = (et.location_options[0] || {}).value || '';
           body.min_notice_min = Math.round(Number($('#notice', root).value || 0) * 60);
           body.hosts = $$('[data-host]', root).filter((x) => x.checked).map((x) => Number(x.dataset.host));
           body.steps = et.steps.map((s) => Object.assign({}, s, { questions: s.questions && s.questions.map((q) => Object.assign({}, q, { id: q.id || q.label })) }));

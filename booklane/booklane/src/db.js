@@ -337,6 +337,12 @@ for (const sql of [
   // business whose calendar carries an all-day entry per job, treating those as solid busy time
   // blacks out every working day, and the booking page silently offers nothing at all.
   'ALTER TABLE calendar_connections ADD COLUMN busy_all_day INTEGER NOT NULL DEFAULT 0',
+  // The ways a customer may choose to meet on this page. Empty means the single location_type
+  // below is the only one, which is every page that existed before this column did.
+  "ALTER TABLE event_types ADD COLUMN location_options TEXT NOT NULL DEFAULT '[]'",
+  // Which of those the customer picked, so a reschedule keeps their choice rather than quietly
+  // moving a Zoom call onto the phone.
+  'ALTER TABLE bookings ADD COLUMN place_id TEXT',
 ]) { try { raw.exec(sql); } catch { /* column already exists */ } }
 
 const cache = new Map();

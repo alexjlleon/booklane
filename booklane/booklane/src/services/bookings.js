@@ -9,6 +9,7 @@ const { buildIcs, googleCalendarLink } = require('../lib/ics');
 const { LOCATION_TYPES } = require('../defaults');
 const B = require('./business');
 const L = require('./leads');
+const PLACES = require('./places');
 const S = require('./scheduling');
 const calendars = require('./calendars');
 const { sendWebhook } = require('./integrations');
@@ -18,6 +19,7 @@ function hydrateEt(et) {
   if (!et) return et;
   et.steps = db.json(et.steps, []);
   et.settings = db.json(et.settings, {});
+  et.location_options = db.json(et.location_options, []);
   return et;
 }
 
@@ -34,12 +36,10 @@ function validateContact(et, contact, business) {
   if (Object.keys(errors).length) throw new HttpError(422, 'Please fix the highlighted fields', errors);
 }
 
+// Kept as a thin wrapper so anything still handing over a whole page keeps working; the page is
+// just the list of one it always was.
 function locationText(et, contact, joinUrl) {
-  switch (et.location_type) {
-    case 'phone': return contact.phone ? `Phone call: we will call you at ${contact.phone}` : 'Phone call';
-    case 'google_meet': case 'teams': return joinUrl || `${LOCATION_TYPES[et.location_type]} (link will be sent)`;
-    default: return et.location_value || LOCATION_TYPES[et.location_type] || '';
-  }
+  return PLACES.placeText(PLACES.placesFor(et)[0], contact, joinUrl);
 }
 
 function bookingView(b) {
@@ -106,7 +106,7 @@ function assertFree(et, hostId, startMs, endMs, excludeId = 0) {
   }
 }
 
-async function createBooking({ business, et, startIso, tz, contact = {}, answers = {}, lead, quote, restrictHostIds, excludeOrderId, force = false }) {
+async function createBooking({ business, et, startIso, tz, contact = {}, answers = {}, lead, quote, restrictHostIds, excludeOrderId, placeId, force = false }) {
   const startMs = Date.parse(startIso);
   if (!Number.isFinite(startMs)) throw new HttpError(400, 'Pick a valid time');
   if (!T.isValidTz(tz)) tz = business.timezone;
@@ -124,23 +124,26 @@ async function createBooking({ business, et, startIso, tz, contact = {}, answers
   const endMs = startMs + et.duration_min * 60000;
   const name = [contact.first_name, contact.last_name].map((x) => String(x || '').trim()).filter(Boolean).join(' ');
   const cleanAnswers = L.sanitizeAnswers(answers);
+  // An unrecognised choice falls back to the first way of meeting rather than refusing. Somebody
+  // who picked Zoom on a page that has since dropped it should still end up with a booking.
+  const place = PLACES.placeFor(et, placeId);
   const t = token(18);
 
   const bookingId = db.tx(() => {
     assertFree(et, hostId, startMs, endMs);
-    return db.run(`INSERT INTO bookings (business_id, event_type_id, host_user_id, lead_id, quote_id, token, start_utc, end_utc, invitee_tz, name, email, phone, location, answers)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, business.id, et.id, hostId, lead?.id, quote?.id, t, new Date(startMs).toISOString(), new Date(endMs).toISOString(), tz,
-    clampStr(name, 160), String(contact.email).trim().toLowerCase(), clampStr(contact.phone, 40), locationText(et, contact), JSON.stringify(cleanAnswers)).lastId;
+    return db.run(`INSERT INTO bookings (business_id, event_type_id, host_user_id, lead_id, quote_id, token, start_utc, end_utc, invitee_tz, name, email, phone, location, place_id, answers)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, business.id, et.id, hostId, lead?.id, quote?.id, t, new Date(startMs).toISOString(), new Date(endMs).toISOString(), tz,
+    clampStr(name, 160), String(contact.email).trim().toLowerCase(), clampStr(contact.phone, 40), PLACES.placeText(place, contact), place.id, JSON.stringify(cleanAnswers)).lastId;
   });
 
   const host = db.get('SELECT name FROM users WHERE id = ?', hostId);
   const ext = await calendars.createEvent(hostId, {
     summary: `${et.name}: ${name || contact.email}`, start: startMs, end: endMs, attendeeEmail: contact.email, attendeeName: name, timezone: tz,
-    location: locationText(et, contact), locationType: et.location_type,
+    location: PLACES.placeText(place, contact), locationType: place.type,
     description: [`Booked via ${business.name}`, contact.phone ? `Phone: ${contact.phone}` : '', ...L.answersToPairs(cleanAnswers).map(([k, v]) => `${k}: ${v}`),
       quote ? `Quote: ${baseUrl()}/q/${quote.token}` : '', `Manage: ${baseUrl()}/app#/bookings`].filter(Boolean).join('\n'),
   });
-  if (ext) db.run('UPDATE bookings SET external_events = ?, location = ? WHERE id = ?', JSON.stringify([ext]), locationText(et, contact, ext.join_url), bookingId);
+  if (ext) db.run('UPDATE bookings SET external_events = ?, location = ? WHERE id = ?', JSON.stringify([ext]), PLACES.placeText(place, contact, ext.join_url), bookingId);
 
   if (lead) {
     L.updateLead(lead, { contact, answers: cleanAnswers });
@@ -201,7 +204,7 @@ async function rescheduleBooking(booking, startIso, tz) {
   for (const ext of oldExternal) await calendars.deleteEvent(ext);
   const b = db.get('SELECT * FROM bookings WHERE id = ?', booking.id);
   const ext = await calendars.createEvent(hostId, { summary: `${et.name}: ${b.name || b.email}`, start: startMs, end: endMs, attendeeEmail: b.email, attendeeName: b.name,
-    timezone: b.invitee_tz, location: b.location, locationType: et.location_type, description: `Rescheduled booking. Manage: ${baseUrl()}/app#/bookings` });
+    timezone: b.invitee_tz, location: b.location, locationType: PLACES.placeFor(et, b.place_id).type, description: `Rescheduled booking. Manage: ${baseUrl()}/app#/bookings` });
   if (ext) db.run('UPDATE bookings SET external_events = ?, location = CASE WHEN ? IS NOT NULL THEN ? ELSE location END WHERE id = ?', JSON.stringify([ext]), ext.join_url, ext.join_url, b.id);
   const business = B.byId(b.business_id);
   if (b.lead_id) B.logActivity(business.id, b.lead_id, 'booking', `Call rescheduled to ${T.formatDateTime(startMs, business.timezone)}`);
