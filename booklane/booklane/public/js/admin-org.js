@@ -3,7 +3,9 @@
 (function () {
   'use strict';
   const { esc, api, $, $$ } = A;
-  const isAdmin = () => ['owner', 'admin'].includes(A.me.membership.role);
+  // The role lives on A.me.business, the same place every other screen reads it from. There is no
+  // A.me.membership, so this threw before the screen could draw anything at all.
+  const isAdmin = () => ['owner', 'admin'].includes((A.me.business || {}).role);
 
   const teamCard = (t, members, editable) => `<div class="panel" data-team="${t.id}" style="padding:14px">
     <div class="panel-head" style="margin-bottom:10px"><div style="display:flex;align-items:center;gap:8px">

@@ -2146,3 +2146,21 @@ test('a way to meet that takes no address is not given one', () => {
   assert.equal(list[2].value, '12 Market St');
   assert.equal(list[3].type, 'phone', 'an unknown way to meet falls back rather than being stored');
 });
+
+test('every admin screen reads A.me the way the server sends it', async () => {
+  // A screen that reaches for a key the payload does not have throws before it can draw anything,
+  // and the whole page becomes "Could not load this page". That is invisible until someone opens
+  // that one screen, so check every reference against the real response instead.
+  const me = (await req('GET', '/api/admin/auth/me', null, { cookie: ownerCookie })).data;
+  const dir = path.join(__dirname, '..', 'public', 'js');
+  const bad = [];
+  for (const f of fs.readdirSync(dir).filter((n) => n.startsWith('admin-') && n.endsWith('.js'))) {
+    // Comments talk about these keys too, including ones deliberately named as wrong.
+    const src = fs.readFileSync(path.join(dir, f), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    for (const m of src.matchAll(/\bA\.me\.([a-zA-Z_$][\w$]*)/g)) {
+      if (!(m[1] in me)) bad.push(`${f}: A.me.${m[1]}`);
+    }
+  }
+  assert.deepEqual(bad, [], `admin scripts read keys the me payload does not have: ${bad.join(', ')}`);
+  assert.ok(me.business && typeof me.business.role === 'string', 'the role lives on business');
+});
