@@ -340,6 +340,10 @@ for (const sql of [
   // The ways a customer may choose to meet on this page. Empty means the single location_type
   // below is the only one, which is every page that existed before this column did.
   "ALTER TABLE event_types ADD COLUMN location_options TEXT NOT NULL DEFAULT '[]'",
+  // Who the connection being authorised is FOR. A market calendar has no login of its own, so an
+  // admin signs in to their own account and attaches it to the market; user_id stays the person
+  // who authorised it, which is what the callback checks.
+  'ALTER TABLE oauth_states ADD COLUMN target_user_id INTEGER',
   // Which of those the customer picked, so a reschedule keeps their choice rather than quietly
   // moving a Zoom call onto the phone.
   'ALTER TABLE bookings ADD COLUMN place_id TEXT',

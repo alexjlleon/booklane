@@ -25,11 +25,19 @@ const PROVIDERS = {
 const isConfigured = (p) => !!(PROVIDERS[p] && PROVIDERS[p].clientId() && PROVIDERS[p].clientSecret());
 const redirectUri = (p) => `${baseUrl()}/oauth/${p}/callback`;
 
-function startAuth(provider, userId) {
+/**
+ * Begin connecting a calendar.
+ *
+ * targetUserId is who the connection will belong to, which is not always who is authorising it: a
+ * market calendar is a resource with no login, so an admin signs in to their own Outlook or Google
+ * account and attaches one of its calendars to Houston. The person who started it is still recorded
+ * separately, because that is what the callback checks before trusting the code it is handed.
+ */
+function startAuth(provider, userId, targetUserId) {
   const P = PROVIDERS[provider];
   const state = token(18);
   db.run('DELETE FROM oauth_states WHERE created_at < ?', Date.now() - 15 * 60000);
-  db.run('INSERT INTO oauth_states (state, user_id, provider, created_at) VALUES (?,?,?,?)', state, userId, provider, Date.now());
+  db.run('INSERT INTO oauth_states (state, user_id, provider, target_user_id, created_at) VALUES (?,?,?,?,?)', state, userId, provider, targetUserId || null, Date.now());
   const params = new URLSearchParams({ client_id: P.clientId(), redirect_uri: redirectUri(provider), response_type: 'code', scope: P.scopes, state, ...P.extraAuth });
   return `${P.authUrl}?${params}`;
 }
@@ -62,17 +70,20 @@ async function finishAuth(provider, code, state, sessionUserId) {
       const me = await r.json(); email = me.mail || me.userPrincipalName;
     }
   } catch { /* email is cosmetic */ }
-  const existing = db.get('SELECT id FROM calendar_connections WHERE user_id = ? AND provider = ? AND account_email IS ?', row.user_id, provider, email);
+  // Everything from here attaches to whoever this was started for, which may be a market rather
+  // than the person who just signed in.
+  const owner = row.target_user_id || row.user_id;
+  const existing = db.get('SELECT id FROM calendar_connections WHERE user_id = ? AND provider = ? AND account_email IS ?', owner, provider, email);
   const expires = Date.now() + (Number(t.expires_in) || 3600) * 1000;
   if (existing) {
     db.run('UPDATE calendar_connections SET access_token=?, refresh_token=COALESCE(?, refresh_token), expires_at=?, last_error=NULL WHERE id=?',
       encrypt(t.access_token), t.refresh_token ? encrypt(t.refresh_token) : null, expires, existing.id);
   } else {
-    const hasWriter = db.get('SELECT 1 FROM calendar_connections WHERE user_id = ? AND write_events = 1', row.user_id);
+    const hasWriter = db.get('SELECT 1 FROM calendar_connections WHERE user_id = ? AND write_events = 1', owner);
     db.run('INSERT INTO calendar_connections (user_id, provider, account_email, access_token, refresh_token, expires_at, write_events) VALUES (?,?,?,?,?,?,?)',
-      row.user_id, provider, email, encrypt(t.access_token), encrypt(t.refresh_token), expires, hasWriter ? 0 : 1);
+      owner, provider, email, encrypt(t.access_token), encrypt(t.refresh_token), expires, hasWriter ? 0 : 1);
   }
-  return { userId: row.user_id, email };
+  return { userId: owner, email, forTarget: !!row.target_user_id };
 }
 
 async function accessToken(conn) {

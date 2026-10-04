@@ -2257,3 +2257,40 @@ test('a session cannot be saved through the booking page editor', async () => {
   assert.ok(list.data.event_types.some((e) => e.id === session.id));
   assert.ok(list.data.event_types.every((e) => 'kind' in e), 'each row says which it is, so the screen can choose');
 });
+
+// --- A calendar connected to a market rather than to a person ---------------------------------
+
+test('a market keeps its own hours and its own busy times', async () => {
+  const CAL = require('../src/services/calendars');
+  const cal = db.get("SELECT * FROM calendar_profiles WHERE kind = 'market' ORDER BY id LIMIT 1");
+  assert.ok(cal, 'the fixtures should include a market');
+
+  // A market has no login, so the admin authorises with their own account and it is attached here.
+  const me = db.get('SELECT id FROM users WHERE email = ?', 'owner@test.dev');
+  const url = CAL.startAuth('microsoft', me.id, cal.user_id);
+  const state = new URL(url).searchParams.get('state');
+  const row = db.get('SELECT * FROM oauth_states WHERE state = ?', state);
+  assert.equal(row.user_id, me.id, 'who authorised it');
+  assert.equal(row.target_user_id, cal.user_id, 'who it is for');
+
+  // Busy times are read per calendar, so one market can never block another.
+  db.run("INSERT INTO calendar_connections (user_id, provider, account_email, access_token, refresh_token, expires_at) VALUES (?,'microsoft','ops@example.com','x','y',?)",
+    cal.user_id, Date.now() + 3600000);
+  const other = db.get("SELECT * FROM calendar_profiles WHERE kind = 'market' AND id != ? ORDER BY id LIMIT 1", cal.id);
+  assert.ok(other);
+  assert.equal(db.get('SELECT COUNT(*) c FROM calendar_connections WHERE user_id = ?', other.user_id).c, 0,
+    'connecting one market connects only that market');
+});
+
+test('only an admin of the business can point a market at a calendar', async () => {
+  const cal = db.get("SELECT * FROM calendar_profiles WHERE kind = 'market' ORDER BY id LIMIT 1");
+  const conn = db.get('SELECT id FROM calendar_connections WHERE user_id = ? ORDER BY id LIMIT 1', cal.user_id);
+  assert.ok(conn);
+  // Another business must not be able to reach it, even knowing both ids.
+  const rival = await signup('market-rival@test.dev', 'Rival Studio');
+  const r = await req('DELETE', `/api/admin/session-calendars/${cal.id}/connection/${conn.id}`, null, { cookie: rival });
+  assert.equal(r.status, 404, 'not theirs, so not found');
+  // Its owner can.
+  const ok = await req('DELETE', `/api/admin/session-calendars/${cal.id}/connection/${conn.id}`, null, { cookie: ownerCookie });
+  assert.equal(ok.status, 200, JSON.stringify(ok.data));
+});

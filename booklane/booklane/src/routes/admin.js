@@ -585,10 +585,40 @@ module.exports = function adminRoutes(app) {
       id: c.id, user_id: c.user_id, kind: c.kind, slug: c.slug, name: c.name, blurb: c.blurb || '',
       timezone: c.timezone || c.user_timezone, active: !!c.active, sort: c.sort,
       has_hours: !!db.get('SELECT 1 FROM availability_rules WHERE user_id = ?', c.user_id),
-      connections: db.all('SELECT provider, account_email, last_error FROM calendar_connections WHERE user_id = ?', c.user_id),
+      connections: db.all('SELECT id, provider, account_email, check_busy, busy_all_day, last_error FROM calendar_connections WHERE user_id = ?', c.user_id),
       upcoming: db.get("SELECT COUNT(*) c FROM bookings WHERE host_user_id = ? AND status = 'confirmed' AND start_utc > datetime('now')", c.user_id).c,
     }));
   });
+  /**
+   * A connection belonging to a market, rather than to the person signed in.
+   *
+   * The ordinary calendar routes are scoped to the caller's own user, which is right for a person
+   * and useless for a resource: a market has no login, so nobody could ever manage its connection.
+   * These are scoped to the business instead, and only an admin of it may touch them.
+   */
+  app.patch('/api/admin/session-calendars/:id/connection/:connId', (req) => {
+    requireRole('admin')(req);
+    const cal = SESS.calendarById(bid(req), int(req.params.id));
+    if (!cal) throw new HttpError(404, 'Not found');
+    const conn = db.get('SELECT * FROM calendar_connections WHERE id = ? AND user_id = ?', int(req.params.connId), cal.user_id);
+    if (!conn) throw new HttpError(404, 'Not found');
+    const b = req.body || {};
+    if (b.check_busy !== undefined) db.run('UPDATE calendar_connections SET check_busy = ? WHERE id = ?', bool(b.check_busy) ? 1 : 0, conn.id);
+    if (b.busy_all_day !== undefined) db.run('UPDATE calendar_connections SET busy_all_day = ? WHERE id = ?', bool(b.busy_all_day) ? 1 : 0, conn.id);
+    if (b.calendar_id) db.run('UPDATE calendar_connections SET calendar_id = ? WHERE id = ?', clampStr(b.calendar_id, 300), conn.id);
+    calendars.clearBusyCache(cal.user_id);
+    return { ok: true };
+  });
+  app.delete('/api/admin/session-calendars/:id/connection/:connId', (req) => {
+    requireRole('admin')(req);
+    const cal = SESS.calendarById(bid(req), int(req.params.id));
+    if (!cal) throw new HttpError(404, 'Not found');
+    const r = db.run('DELETE FROM calendar_connections WHERE id = ? AND user_id = ?', int(req.params.connId), cal.user_id);
+    if (!r.changes) throw new HttpError(404, 'Not found');
+    calendars.clearBusyCache(cal.user_id);
+    return { ok: true };
+  });
+
   app.post('/api/admin/session-calendars', (req) => {
     requireRole('admin')(req);
     const b = B.byId(bid(req));

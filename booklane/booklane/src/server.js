@@ -53,8 +53,18 @@ app.get('/oauth/:provider/start', (req, res) => {
   requireAuth(req);
   const p = req.params.provider;
   if (!calendars.PROVIDERS[p]) throw new HttpError(404, 'Unknown provider');
-  if (!calendars.isConfigured(p)) return res.redirect(`/app#/calendars?error=${encodeURIComponent(`${calendars.PROVIDERS[p].label} is not configured on the server yet`)}`);
-  res.redirect(calendars.startAuth(p, req.user.id));
+  const back = req.query.calendar ? '/app#/sessions' : '/app#/calendars';
+  if (!calendars.isConfigured(p)) return res.redirect(`${back}?error=${encodeURIComponent(`${calendars.PROVIDERS[p].label} is not configured on the server yet`)}`);
+  // Connecting on behalf of a market calendar. It has no login, so an admin of that business
+  // authorises with their own account; anyone else must not be able to point it at a resource.
+  let target = null;
+  if (req.query.calendar) {
+    if (!['owner', 'admin'].includes(req.membership?.role)) return res.redirect(`${back}?error=${encodeURIComponent('Only an admin can connect a calendar to a market')}`);
+    const prof = db.get('SELECT user_id FROM calendar_profiles WHERE id = ? AND business_id = ?', Number(req.query.calendar) || 0, req.membership.id);
+    if (!prof) return res.redirect(`${back}?error=${encodeURIComponent('That calendar is not one of yours')}`);
+    target = prof.user_id;
+  }
+  res.redirect(calendars.startAuth(p, req.user.id, target));
 });
 app.get('/oauth/:provider/callback', async (req, res) => {
   const p = req.params.provider;
@@ -62,7 +72,8 @@ app.get('/oauth/:provider/callback', async (req, res) => {
   try {
     if (!calendars.PROVIDERS[p]) throw new HttpError(404, 'Unknown provider');
     const r = await calendars.finishAuth(p, req.query.code, req.query.state, req.user?.id);
-    res.redirect(`/app#/calendars?connected=${encodeURIComponent(r.email || p)}`);
+    // Land back where they started, so connecting a market does not dump them on their own page.
+    res.redirect(`/app#/${r.forTarget ? 'sessions' : 'calendars'}?connected=${encodeURIComponent(r.email || p)}`);
   } catch (e) {
     res.redirect(`/app#/calendars?error=${encodeURIComponent(e.message)}`);
   }
