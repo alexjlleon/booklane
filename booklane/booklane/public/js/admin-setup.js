@@ -12,9 +12,12 @@
       const d = await api('GET', '/event-types');
       A.cache.et = d;
       const slug = A.me.business.slug;
+      // A sellable session is paid for first and scheduled afterwards, so it has no "Pick a time"
+      // step and the rules on this screen can never save it. It belongs to Sessions & markets.
+      const pages = d.event_types.filter((e) => (e.kind || 'call') !== 'session');
       return `<div class="topbar"><div><h1>Booking pages</h1><div class="sub">Each call type gets its own link, steps and scheduling rules.</div></div>
         <div class="tools">${isAdmin() ? '<a class="btn btn-primary" href="#/event-types/new">+ New call type</a>' : ''}</div></div>
-        ${d.event_types.length ? `<div class="card-list">${d.event_types.map((et) => `<div class="et-card"><div class="top" style="background:${esc(et.color)}"></div><div class="body">
+        ${pages.length ? `<div class="card-list">${pages.map((et) => `<div class="et-card"><div class="top" style="background:${esc(et.color)}"></div><div class="body">
           <div class="row between"><h3>${esc(et.name)}</h3>${et.active ? '' : '<span class="pill">Off</span>'}</div>
           <div class="small muted" style="margin:4px 0 10px">${et.duration_min} min · ${esc(d.location_types[et.location_type])} · ${et.steps.length} steps</div>
           <div class="small" style="margin:-6px 0 10px">${[(d.booking_types || []).find((t) => t.id === et.booking_type_id), (d.teams || []).find((t) => t.id === et.team_id)]
@@ -38,8 +41,19 @@
       A.cache.et = d;
       const isNew = p.id === 'new';
       const src = isNew ? { name: '', slug: '', description: '', duration_min: 30, location_type: 'phone', location_value: '', buffer_before: 0, buffer_after: 0, min_notice_min: 240, max_days_ahead: 60, slot_interval_min: 30, daily_limit: 0, assignment: 'round_robin', color: '#5b3df5', active: true, hosts: [A.me.user.id], steps: d.default_steps, team_id: '', booking_type_id: '' }
-        : d.event_types.find((e) => String(e.id) === p.id);
-      if (!src) throw new Error('Call type not found');
+        : d.event_types.find((e) => String(e.id) === p.id && e.kind !== 'session');
+      if (!src) {
+        // Most often this is a sellable session someone reached by its old link. Say where it
+        // lives rather than leaving them on an editor that can never save.
+        const sess = (d.event_types || []).find((x) => String(x.id) === p.id && x.kind === 'session');
+        if (sess) {
+          return `<div class="topbar"><div><a href="#/event-types" class="small">← Booking pages</a><h1 style="margin-top:6px">${esc(sess.name)}</h1></div></div>
+            <div class="panel"><div class="warn-box"><b>${esc(sess.name)} is a session, not a booking page.</b>
+              <p style="margin:8px 0 0">A session is paid for first and scheduled afterwards, so it has no "Pick a time" step and is set up on its own screen.</p></div>
+              <a class="btn btn-primary" style="margin-top:14px" href="#/sessions">Open Sessions &amp; markets</a></div>`;
+        }
+        throw new Error('Call type not found');
+      }
       const et = (A.editing = JSON.parse(JSON.stringify(src)));
       return `<div class="topbar"><div><a href="#/event-types" class="small">← Booking pages</a><h1 style="margin-top:6px">${isNew ? 'New call type' : esc(et.name)}</h1></div>
         <div class="tools">${!isNew ? '<button class="btn btn-danger btn-sm" data-del>Delete</button>' : ''}<button class="btn btn-primary" data-save>Save</button></div></div>
@@ -76,6 +90,9 @@
         </div></div>`;
     },
     mount(root, p) {
+      // render() can bow out with an explanation instead of the form - a session reached by its
+      // old link, say - and then there is nothing here to wire up.
+      if (!$('#place-list', root)) return;
       const et = A.editing;
       // A page that never defined a list offers one way: the location_type it has always had.
       if (!Array.isArray(et.location_options) || !et.location_options.length) {

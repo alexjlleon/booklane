@@ -372,7 +372,11 @@ module.exports = function adminRoutes(app) {
 
   app.get('/api/admin/event-types', (req) => {
     requireRole('host')(req);
-    return { event_types: db.all('SELECT * FROM event_types WHERE business_id = ? ORDER BY sort, id', bid(req)).map(etOut), members: members(bid(req)), teams: ORG.listTeams(bid(req)), booking_types: ORG.listTypes(bid(req)), location_types: LOCATION_TYPES, default_steps: DEFAULT_STEPS(), quick_date_steps: QUICK_DATE_STEPS() };
+    // Everything, sessions included: automations and messaging scope themselves to any event type
+    // and need the whole list. Which of them the Booking pages screen will edit is its own call,
+    // and each row carries its kind so it can make it.
+    return { event_types: db.all('SELECT * FROM event_types WHERE business_id = ? ORDER BY sort, id', bid(req)).map(etOut),
+      members: members(bid(req)), teams: ORG.listTeams(bid(req)), booking_types: ORG.listTypes(bid(req)), location_types: LOCATION_TYPES, default_steps: DEFAULT_STEPS(), quick_date_steps: QUICK_DATE_STEPS() };
   });
   function saveEventType(req, existing) {
     const b = req.body || {};
@@ -422,6 +426,8 @@ module.exports = function adminRoutes(app) {
     requireRole('admin')(req);
     const et = db.get('SELECT * FROM event_types WHERE id = ? AND business_id = ?', int(req.params.id), bid(req));
     if (!et) throw new HttpError(404, 'Not found');
+    // Saying so beats letting the save fail on a rule that was never meant to apply to it.
+    if (et.kind === 'session') throw new HttpError(409, `"${et.name}" is a session, so it is edited under Sessions & markets rather than here.`);
     return saveEventType(req, et);
   });
   app.delete('/api/admin/event-types/:id', (req) => {

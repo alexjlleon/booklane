@@ -2240,3 +2240,20 @@ test('a deploy tells browsers their copy of the scripts is stale', async () => {
   assert.ok(!versions.includes('1'), 'a constant version can never invalidate anything');
   assert.equal(new Set(versions).size, 1, 'one version for the whole page, so a deploy moves them together');
 });
+
+test('a session cannot be saved through the booking page editor', async () => {
+  // A session is paid for first and scheduled afterwards, so it has no "Pick a time" step. Saved
+  // by the rules for booking pages it fails on a step it is not allowed to have, which reads as
+  // "enable the thing I cannot find" rather than "you are on the wrong screen".
+  const session = db.get("SELECT id, name FROM event_types WHERE kind = 'session' ORDER BY id LIMIT 1");
+  assert.ok(session, 'the fixtures should include a session');
+  const r = await req('PATCH', `/api/admin/event-types/${session.id}`, { name: session.name }, { cookie: ownerCookie });
+  assert.equal(r.status, 409);
+  assert.match(r.data.error, /Sessions & markets/, 'and it says where to go instead');
+
+  // The list still carries sessions, because automations and messaging scope themselves to any
+  // event type and need every one of them.
+  const list = await req('GET', '/api/admin/event-types', null, { cookie: ownerCookie });
+  assert.ok(list.data.event_types.some((e) => e.id === session.id));
+  assert.ok(list.data.event_types.every((e) => 'kind' in e), 'each row says which it is, so the screen can choose');
+});
