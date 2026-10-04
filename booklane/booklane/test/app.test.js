@@ -2178,3 +2178,54 @@ test('the scheduler reads its slot cache with the same key it writes', () => {
   const builders = [...src.matchAll(/st\.tz\s*\+\s*'\|'/g)];
   assert.equal(builders.length, 0, 'a key built by hand will drift from the helper again');
 });
+
+// Three screens have now gone blank because mount() reached for a variable that only exists in
+// render(). The two are separate function scopes, so it is never a syntax error and never shows
+// until somebody opens that exact screen. Catch the shape of the mistake rather than each instance.
+test('no admin screen reaches into render() scope from mount()', () => {
+  const dir = path.join(__dirname, '..', 'public', 'js');
+  const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  // Everything from an opening brace to its match, so a nested function cannot end the scan early.
+  const bodyAt = (src, open) => {
+    let depth = 0;
+    for (let i = open; i < src.length; i++) {
+      if (src[i] === '{') depth++;
+      else if (src[i] === '}' && --depth === 0) return src.slice(open + 1, i);
+    }
+    return '';
+  };
+  const declared = (body) => new Set([...body.matchAll(/\b(?:const|let|var|function)\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]));
+  // Only the declarations at the top of a scope shadow an outer name for the whole of it. A `for
+  // (const d of ...)` buried in a click handler does not, and counting it as one let the very bug
+  // this test exists for walk straight through.
+  const declaredTopLevel = (body) => {
+    const out = new Set();
+    let depth = 0;
+    for (const m of body.matchAll(/[{}]|\b(?:const|let|var|function)\s+([A-Za-z_$][\w$]*)/g)) {
+      if (m[0] === '{') depth++;
+      else if (m[0] === '}') depth--;
+      else if (depth === 0 && m[1]) out.add(m[1]);
+    }
+    return out;
+  };
+  const bad = [];
+  for (const f of fs.readdirSync(dir).filter((n) => n.startsWith('admin-') && n.endsWith('.js'))) {
+    const src = strip(fs.readFileSync(path.join(dir, f), 'utf8'));
+    const moduleScope = declared(src.slice(0, src.indexOf('A.route(') + 1 || src.length));
+    for (const m of src.matchAll(/\bmount\s*\(([^)]*)\)\s*\{/g)) {
+      const mountBody = bodyAt(src, src.indexOf('{', m.index + m[0].length - 1));
+      const params = new Set(m[1].split(',').map((x) => x.trim()).filter(Boolean));
+      // The render() that belongs to the same route object is the last one before this mount.
+      const before = src.slice(0, m.index);
+      const rIdx = before.lastIndexOf('render');
+      if (rIdx < 0) continue;
+      const renderBody = bodyAt(src, src.indexOf('{', rIdx));
+      const mine = new Set([...declaredTopLevel(mountBody), ...params]);
+      for (const name of declared(renderBody)) {
+        if (mine.has(name) || moduleScope.has(name)) continue;
+        if (new RegExp(`\\b${name}\\s*[.([]`).test(mountBody)) bad.push(`${f}: mount() uses "${name}", which only exists in render()`);
+      }
+    }
+  }
+  assert.deepEqual(bad, [], bad.join('\n'));
+});

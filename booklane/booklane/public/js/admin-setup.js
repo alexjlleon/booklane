@@ -81,14 +81,17 @@
       if (!Array.isArray(et.location_options) || !et.location_options.length) {
         et.location_options = [{ id: 'default', type: et.location_type || 'phone', label: '', note: '', value: et.location_value || '' }];
       }
+      // The fetched page data lives in render's scope, not here. Reaching for it directly threw
+      // "d is not defined" and took the whole screen down; the cache is what the two share.
+      const data = A.cache.et || { location_types: {} };
       const placesEl = $('#place-list', root);
       const NEEDS_VALUE = ['in_person', 'custom', 'zoom'];
       const VALUE_HINT = { in_person: 'Address', custom: 'Link or instructions', zoom: 'Your Zoom link' };
       function renderPlaces() {
         placesEl.innerHTML = et.location_options.map((pl, i) => `<div class="panel" data-pi="${i}" style="padding:10px">
           <div class="grid-2">
-            ${A.field('Way to meet', `<select class="select" data-pf="type">${Object.entries(d.location_types).map(([k, v]) => `<option value="${esc(k)}" ${pl.type === k ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select>`)}
-            ${A.field('Call it', `<input class="input" data-pf="label" value="${esc(pl.label || '')}" placeholder="${esc(d.location_types[pl.type] || '')}">`)}
+            ${A.field('Way to meet', `<select class="select" data-pf="type">${Object.entries(data.location_types).map(([k, v]) => `<option value="${esc(k)}" ${pl.type === k ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select>`)}
+            ${A.field('Call it', `<input class="input" data-pf="label" value="${esc(pl.label || '')}" placeholder="${esc(data.location_types[pl.type] || '')}">`)}
           </div>
           ${NEEDS_VALUE.includes(pl.type) ? A.field(VALUE_HINT[pl.type], `<input class="input" data-pf="value" value="${esc(pl.value || '')}">`) : ''}
           ${A.field('A line of detail (optional)', `<input class="input" data-pf="note" value="${esc(pl.note || '')}" placeholder="Shown under the option on the booking page">`)}
@@ -155,7 +158,7 @@
         if (e.target.closest('[data-add-q]')) { et.steps[i].questions.push({ id: '', label: 'New question', type: 'text', options: [], required: false }); renderSteps(); }
         if (e.target.closest('[data-remove-q]')) { et.steps[i].questions.splice(Number(e.target.closest('[data-qi]').dataset.qi), 1); renderSteps(); }
         if (e.target.closest('[data-template]')) {
-          et.steps = JSON.parse(JSON.stringify(d.quick_date_steps));
+          et.steps = JSON.parse(JSON.stringify(data.quick_date_steps || []));
           $('[data-bind="name"]', root).value = $('[data-bind="name"]', root).value || 'Check my date';
           renderSteps();
         }
