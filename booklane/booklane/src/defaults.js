@@ -44,7 +44,10 @@ const BUSINESS_SETTINGS = {
     call_event_type_id: null,
     next_steps: { contract: true, book_call: true, callback: true },
     terms: 'This quote is an estimate based on the selections above. Final pricing is confirmed in your contract. A deposit secures your date.',
-    contract_fields: { billing_address: true, event_start_time: true, event_end_time: true, venue_address: true, planner_name: false },
+    // The contract step asks for what the paperwork cannot be written without, and nothing else.
+    // Times, a billing address and a planner are real things some businesses need, so they stay
+    // available - but off, because every extra box on the last screen costs completed requests.
+    contract_fields: { billing_address: false, event_start_time: false, event_end_time: false, venue_address: false, planner_name: false },
   },
   integrations: {
     boothbook: {

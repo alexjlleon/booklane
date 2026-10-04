@@ -2039,3 +2039,34 @@ test('a page cannot be filed under another business team', async () => {
   assert.equal(et.status, 200, JSON.stringify(et.data));
   assert.equal(et.data.team_id, null, 'an id from another business is dropped, not stored');
 });
+
+test('the contract step only asks for what we do not already know', async () => {
+  const created = await req('POST', `/api/public/b/${bizSlug}/quotes`, {});
+  const qt = created.data.token;
+  await req('PATCH', `/api/public/quotes/${qt}`, {
+    details: { event_type: 'Wedding', event_date: '2027-09-09', venue: 'Grand Oaks' },
+    contact: { first_name: 'Robin', last_name: 'Vale', email: 'robin@example.com', phone: '2815550133' },
+    selections: [{ service_id: db.get('SELECT id FROM services WHERE active = 1 ORDER BY id LIMIT 1').id }],
+  });
+  // Nothing extra is demanded: no start or end time, no billing address.
+  const sent = await req('POST', `/api/public/quotes/${qt}/contract`, { legal_name: 'Robin Vale', agreed_terms: true });
+  assert.equal(sent.status, 200, JSON.stringify(sent.data));
+  const cr = JSON.parse(db.get('SELECT contract_request FROM quotes WHERE token = ?', qt).contract_request);
+  assert.equal(cr.event_start_time, undefined, 'times are off by default');
+  assert.equal(cr.billing_address, undefined, 'billing address is off by default');
+  assert.equal(cr.legal_name, 'Robin Vale');
+});
+
+test('a venue and date given in the contract step land on the quote, not just the paperwork', async () => {
+  const created = await req('POST', `/api/public/b/${bizSlug}/quotes`, {});
+  const qt = created.data.token;
+  await req('PATCH', `/api/public/quotes/${qt}`, { contact: { first_name: 'Kit', last_name: 'Nolan', email: 'kit@example.com' } });
+  // What the modal sends when the earlier steps did not collect these.
+  await req('PATCH', `/api/public/quotes/${qt}`, { details: { event_date: '2027-11-11', venue: 'The Winery' }, contact: { phone: '2815550144' } });
+  const d = JSON.parse(db.get('SELECT details FROM quotes WHERE token = ?', qt).details);
+  assert.equal(d.event_date, '2027-11-11');
+  assert.equal(d.venue, 'The Winery');
+  const lead = db.get('SELECT * FROM leads WHERE id = (SELECT lead_id FROM quotes WHERE token = ?)', qt);
+  assert.equal(lead.phone, '2815550144', 'the phone reaches the lead, so nobody is asked twice');
+  assert.equal(JSON.parse(lead.answers).venue, 'The Winery');
+});

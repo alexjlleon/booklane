@@ -239,12 +239,20 @@
     const inp = (name, label, type = 'text', val = '', req = false, ph = '') => field(name, label, `<input class="input" id="f-${name}" name="${name}" type="${type}" value="${esc(val)}" placeholder="${esc(ph)}">`, req);
     let inner = '';
     if (st.modal === 'contract') {
+      // Only what we still do not know. Asking someone for their date a second time, two screens
+      // after they gave it, reads as not having been listened to - and every extra box on the last
+      // screen before a request is sent is somewhere to stall.
+      const asks = [
+        inp('legal_name', 'Name for the contract', 'text', [c.first_name, c.last_name].filter(Boolean).join(' '), true),
+        !c.email ? inp('email', 'Email', 'email', '', true) : '',
+        !c.phone ? inp('phone', 'Phone', 'tel', '', true) : '',
+        !st.details.event_date ? inp('event_date', 'Wedding date', 'date', '', !!qs.require_event_date) : '',
+        !st.details.venue ? inp('venue', 'Venue name', 'text', '', false, 'Where is it?') : '',
+      ].filter(Boolean);
       inner = `<h3>Request your contract</h3><p class="muted" style="margin-top:0">Just a few details for the paperwork. Total: <b>${money(calc().total)}</b></p>
         ${st.error ? `<div class="form-error">${esc(st.error)}</div>` : ''}
         <form id="modal-form" novalidate>
-        ${inp('legal_name', 'Name for the contract', 'text', [c.first_name, c.last_name].filter(Boolean).join(' '), true)}
-        ${!st.details.event_date ? inp('event_date', 'Event date', 'date', '', !!qs.require_event_date) : ''}
-        ${!c.phone ? inp('phone', 'Phone', 'tel', '', false) : ''}
+        ${asks.join('')}
         ${cf.event_start_time || cf.event_end_time ? `<div class="grid-2">${cf.event_start_time ? inp('event_start_time', 'Start time', 'time') : ''}${cf.event_end_time ? inp('event_end_time', 'End time', 'time') : ''}</div>` : ''}
         ${cf.venue_address ? inp('venue_address', 'Venue address', 'text', '', false, st.details.venue || '') : ''}
         ${cf.billing_address ? inp('billing_address', 'Billing address') : ''}
@@ -354,8 +362,14 @@
     try {
       await ensureQuote();
       const patch = {};
-      if (fd.phone) { st.contact.phone = fd.phone; patch.contact = { phone: fd.phone }; }
-      if (fd.event_date) { st.details.event_date = fd.event_date; patch.details = { event_date: fd.event_date }; }
+      const contact = {};
+      if (fd.phone) { st.contact.phone = fd.phone; contact.phone = fd.phone; }
+      if (fd.email) { st.contact.email = fd.email; contact.email = fd.email; }
+      if (Object.keys(contact).length) patch.contact = contact;
+      const details = {};
+      if (fd.event_date) { st.details.event_date = fd.event_date; details.event_date = fd.event_date; }
+      if (fd.venue) { st.details.venue = fd.venue; details.venue = fd.venue; }
+      if (Object.keys(details).length) patch.details = details;
       if (Object.keys(patch).length) { saver.queue(patch, true); await saver.flush(); await saver.wait(); }
       if (st.modal === 'contract') await api('POST', `/api/public/quotes/${st.quoteToken}/contract`, Object.assign(fd, { agreed_terms: !!fd.agreed_terms }));
       else await api('POST', `/api/public/quotes/${st.quoteToken}/callback`, fd);
@@ -365,7 +379,11 @@
       // The modal asks about the paperwork, not about who they are, so a complaint about their name
       // or email has no field here to attach to. Close it and put them back on the contact step,
       // where the answer actually is.
-      const wantsContact = err.details && (err.details.first_name || err.details.email);
+      // Only leave if the thing being complained about is not on this screen. Now that the modal
+      // asks for an email when we do not have one, a blank email belongs in red under that box,
+      // not two steps back.
+      const here = (k) => !!$(`#f-${k}`);
+      const wantsContact = err.details && Object.keys(err.details).some((k) => ['first_name', 'last_name', 'email'].includes(k) && !here(k));
       if (wantsContact && order.indexOf('contact') > -1) { st.modal = null; st.i = order.indexOf('contact'); render(); return; }
       render(); if (err.details) BL.fieldErrors($('.modal'), err.details); return;
     }
