@@ -1959,3 +1959,83 @@ test('a quote orphaned by an earlier delete asks for contact details rather than
   assert.equal(contract.status, 200, JSON.stringify(contract.data));
   assert.equal(contract.data.quote.status, 'contract_requested');
 });
+
+// --- Teams and booking types ------------------------------------------------------------------
+
+test('a booking page is filed under a type and a team, and the public page groups by type', async () => {
+  const imaging = await req('POST', '/api/admin/teams', { name: 'Imaging Team', description: 'Photo and video', color: '#ff22cc' }, { cookie: ownerCookie });
+  assert.equal(imaging.status, 200, JSON.stringify(imaging.data));
+  const sales = await req('POST', '/api/admin/teams', { name: 'Sales Team' }, { cookie: ownerCookie });
+  const sessions = await req('POST', '/api/admin/booking-types', { name: 'Imaging Sessions' }, { cookie: ownerCookie });
+  const calls = await req('POST', '/api/admin/booking-types', { name: 'Sales Calls' }, { cookie: ownerCookie });
+
+  const shoot = await req('POST', '/api/admin/event-types', { name: 'Imaging Engagement Shoot', duration_min: 60, booking_type_id: sessions.data.id, team_id: imaging.data.id }, { cookie: ownerCookie });
+  assert.equal(shoot.status, 200, JSON.stringify(shoot.data));
+  assert.equal(shoot.data.team_id, imaging.data.id);
+  const call = await req('POST', '/api/admin/event-types', { name: 'Filed Pricing Call', duration_min: 20, booking_type_id: calls.data.id, team_id: sales.data.id }, { cookie: ownerCookie });
+  const loose = await req('POST', '/api/admin/event-types', { name: 'Unfiled Catch All', duration_min: 15 }, { cookie: ownerCookie });
+
+  // The public page is server-rendered with its data inlined, so read what the browser would get.
+  const html = (await req('GET', `/b/${bizSlug}`)).data;
+  const payload = JSON.parse(/window\.__BL__=(\{.*?\});<\/script>/s.exec(html)[1]);
+  const groups = payload.bookingGroups;
+  // Headings in the order the admin created them, and the unfiled page in a last group of its own
+  // rather than missing: a page that takes bookings must never drop off the list for want of a label.
+  assert.deepEqual(groups.map((g) => g.name), ['Imaging Sessions', 'Sales Calls', '']);
+  assert.deepEqual(groups[0].pages.map((p) => p.name), ['Imaging Engagement Shoot']);
+  assert.ok(groups[2].pages.some((p) => p.name === 'Unfiled Catch All'), 'an unfiled page still appears, in the last group');
+  assert.equal(groups[0].pages[0].team.name, 'Imaging Team', 'the team rides on the card');
+  assert.equal(groups[0].pages[0].team.color, '#ff22cc');
+  assert.equal(groups[2].pages.find((p) => p.name === 'Unfiled Catch All').team, null);
+  // The flat list stays, so nothing that already reads eventTypes breaks.
+  assert.ok(payload.eventTypes.find((e) => e.id === call.data.id));
+});
+
+test('somebody can be on more than one team', async () => {
+  const me = (await req('GET', '/api/admin/auth/me', null, { cookie: ownerCookie })).data.user;
+  const a = await req('POST', '/api/admin/teams', { name: 'Shooters', members: [me.id] }, { cookie: ownerCookie });
+  const b = await req('POST', '/api/admin/teams', { name: 'Closers', members: [me.id] }, { cookie: ownerCookie });
+  assert.deepEqual(a.data.members, [me.id]);
+  assert.deepEqual(b.data.members, [me.id]);
+  const people = await req('GET', '/api/admin/team', null, { cookie: ownerCookie });
+  const row = people.data.find((p) => p.id === me.id);
+  const names = row.teams.map((t) => t.name);
+  assert.ok(names.includes('Shooters') && names.includes('Closers'), 'both teams show on their row');
+});
+
+test('renaming a team does not empty it', async () => {
+  const me = (await req('GET', '/api/admin/auth/me', null, { cookie: ownerCookie })).data.user;
+  const t = await req('POST', '/api/admin/teams', { name: 'Editors', members: [me.id] }, { cookie: ownerCookie });
+  // A form that only changes the name sends no roster at all; that must not be read as "nobody".
+  const renamed = await req('PATCH', `/api/admin/teams/${t.data.id}`, { name: 'Post Production' }, { cookie: ownerCookie });
+  assert.equal(renamed.status, 200, JSON.stringify(renamed.data));
+  assert.deepEqual(renamed.data.members, [me.id]);
+});
+
+test('two teams cannot share a name', async () => {
+  await req('POST', '/api/admin/teams', { name: 'Lighting' }, { cookie: ownerCookie });
+  const dup = await req('POST', '/api/admin/teams', { name: 'lighting' }, { cookie: ownerCookie });
+  assert.equal(dup.status, 409, 'a duplicate name makes the dropdown unusable');
+  const nameless = await req('POST', '/api/admin/booking-types', { name: '  ' }, { cookie: ownerCookie });
+  assert.equal(nameless.status, 422);
+});
+
+test('deleting a type unfiles its pages instead of refusing', async () => {
+  const type = await req('POST', '/api/admin/booking-types', { name: 'Temporary' }, { cookie: ownerCookie });
+  const et = await req('POST', '/api/admin/event-types', { name: 'Filed Under Temporary', duration_min: 30, booking_type_id: type.data.id }, { cookie: ownerCookie });
+  const del = await req('DELETE', `/api/admin/booking-types/${type.data.id}`, null, { cookie: ownerCookie });
+  assert.equal(del.status, 200, JSON.stringify(del.data));
+  assert.equal(del.data.pages_unassigned, 1);
+  // The page still takes bookings; it just lost a label.
+  const still = db.get('SELECT active, booking_type_id FROM event_types WHERE id = ?', et.data.id);
+  assert.equal(still.active, 1);
+  assert.equal(still.booking_type_id, null);
+});
+
+test('a page cannot be filed under another business team', async () => {
+  const otherCookie = await signup('filing-rival@test.dev', 'Filing Rival Weddings');
+  const theirs = await req('POST', '/api/admin/teams', { name: 'Their Crew' }, { cookie: otherCookie });
+  const et = await req('POST', '/api/admin/event-types', { name: 'Borrowed Filing', duration_min: 30, team_id: theirs.data.id }, { cookie: ownerCookie });
+  assert.equal(et.status, 200, JSON.stringify(et.data));
+  assert.equal(et.data.team_id, null, 'an id from another business is dropped, not stored');
+});

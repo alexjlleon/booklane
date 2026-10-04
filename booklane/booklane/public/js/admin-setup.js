@@ -17,6 +17,8 @@
         ${d.event_types.length ? `<div class="card-list">${d.event_types.map((et) => `<div class="et-card"><div class="top" style="background:${esc(et.color)}"></div><div class="body">
           <div class="row between"><h3>${esc(et.name)}</h3>${et.active ? '' : '<span class="pill">Off</span>'}</div>
           <div class="small muted" style="margin:4px 0 10px">${et.duration_min} min · ${esc(d.location_types[et.location_type])} · ${et.steps.length} steps</div>
+          <div class="small" style="margin:-6px 0 10px">${[(d.booking_types || []).find((t) => t.id === et.booking_type_id), (d.teams || []).find((t) => t.id === et.team_id)]
+    .filter(Boolean).map((t) => `<span class="pill">${esc(t.name)}</span>`).join(' ') || '<span class="pill partial">Not filed</span>'}</div>
           <div class="small">${esc(et.hosts.map((h) => (d.members.find((m) => m.id === h) || {}).name).filter(Boolean).join(', '))}${et.hosts.length > 1 ? ` · ${et.assignment === 'round_robin' ? 'round robin' : 'first available'}` : ''}</div>
           <div class="small muted" style="margin-top:6px">${et.bookings_30d} booked in 30 days</div></div>
           <div class="foot"><button class="btn btn-link btn-sm" data-copy="${esc(base())}/b/${esc(slug)}/${esc(et.slug)}">Copy link</button>
@@ -35,7 +37,7 @@
       const d = A.cache.et && A.cache.et.members ? A.cache.et : await api('GET', '/event-types');
       A.cache.et = d;
       const isNew = p.id === 'new';
-      const src = isNew ? { name: '', slug: '', description: '', duration_min: 30, location_type: 'phone', location_value: '', buffer_before: 0, buffer_after: 0, min_notice_min: 240, max_days_ahead: 60, slot_interval_min: 30, daily_limit: 0, assignment: 'round_robin', color: '#5b3df5', active: true, hosts: [A.me.user.id], steps: d.default_steps }
+      const src = isNew ? { name: '', slug: '', description: '', duration_min: 30, location_type: 'phone', location_value: '', buffer_before: 0, buffer_after: 0, min_notice_min: 240, max_days_ahead: 60, slot_interval_min: 30, daily_limit: 0, assignment: 'round_robin', color: '#5b3df5', active: true, hosts: [A.me.user.id], steps: d.default_steps, team_id: '', booking_type_id: '' }
         : d.event_types.find((e) => String(e.id) === p.id);
       if (!src) throw new Error('Call type not found');
       const et = (A.editing = JSON.parse(JSON.stringify(src)));
@@ -61,6 +63,11 @@
           <div class="panel" id="hosts"><h2>Who takes these calls</h2><p class="desc">Times show when any selected person is free.</p>
             <div class="stack" style="gap:8px">${d.members.map((m) => `<label class="check" style="font-size:14px"><input type="checkbox" data-host="${m.id}" ${et.hosts.includes(m.id) ? 'checked' : ''}><span><b>${esc(m.name)}</b> <span class="muted">${esc(m.email)}</span></span></label>`).join('')}</div>
             <div style="margin-top:14px">${A.field('When more than one person is free', A.select('assignment', et.assignment, { round_robin: 'Round robin (spread calls evenly)', single: 'Always first person listed' }))}</div>
+          </div>
+          <div class="panel" id="filing"><h2>Filing</h2><p class="desc">The type is the heading this page sits under on your booking page. The team is shown on its card.</p>
+            ${A.field('Booking type', A.select('booking_type_id', et.booking_type_id || '', Object.assign({ '': 'No type (shown at the bottom)' }, Object.fromEntries((d.booking_types || []).map((t) => [t.id, t.name])))))}
+            ${A.field('Team', A.select('team_id', et.team_id || '', Object.assign({ '': 'No team' }, Object.fromEntries((d.teams || []).map((t) => [t.id, t.name])))))}
+            <p class="small muted" style="margin:6px 0 0">Add or rename these on <a href="#/org">Teams &amp; types</a>.</p>
           </div>
         </div></div>`;
     },
@@ -123,7 +130,7 @@
         }
         if (e.target.closest('[data-add-step]')) { et.steps.push({ key: '', type: 'questions', title: 'A few more details', subtitle: '', questions: [{ id: '', label: 'Your question', type: 'text', options: [], required: false }] }); renderSteps(); }
         if (e.target.closest('[data-save]')) {
-          const body = Object.assign({}, A.collect($('#basics', root)), A.collect($('#limits', root)), A.collect($('#hosts', root)));
+          const body = Object.assign({}, A.collect($('#basics', root)), A.collect($('#limits', root)), A.collect($('#hosts', root)), A.collect($('#filing', root)));
           body.min_notice_min = Math.round(Number($('#notice', root).value || 0) * 60);
           body.hosts = $$('[data-host]', root).filter((x) => x.checked).map((x) => Number(x.dataset.host));
           body.steps = et.steps.map((s) => Object.assign({}, s, { questions: s.questions && s.questions.map((q) => Object.assign({}, q, { id: q.id || q.label })) }));

@@ -14,6 +14,7 @@ const BK = require('../services/bookings');
 const calendars = require('../services/calendars');
 const { pushToBoothBook, sendWebhook, buildBoothBookPayload } = require('../services/integrations');
 const Importer = require('../services/catalog-import');
+const ORG = require('../services/org');
 const SESS = require('../services/sessions');
 const PROD = require('../services/products');
 const FORMS = require('../services/forms');
@@ -343,9 +344,34 @@ module.exports = function adminRoutes(app) {
     return { ...BK.hydrateEt(et), active: !!et.active, hosts: db.all('SELECT user_id FROM event_type_hosts WHERE event_type_id = ?', et.id).map((r) => r.user_id),
       bookings_30d: db.get("SELECT COUNT(*) c FROM bookings WHERE event_type_id = ? AND created_at >= datetime('now','-30 days')", et.id).c };
   }
+  // ---------- Teams and booking types ----------
+  // Who does the work, and what kind of work it is. Anyone who can see the booking pages can read
+  // these, because the page editor needs them to fill its two dropdowns; only an admin edits them.
+  app.get('/api/admin/org', (req) => {
+    requireRole('host')(req);
+    return { teams: ORG.listTeams(bid(req), { all: true }), booking_types: ORG.listTypes(bid(req), { all: true }), members: members(bid(req)) };
+  });
+  const teamOr404 = (req) => {
+    const t = db.get('SELECT * FROM teams WHERE id = ? AND business_id = ?', int(req.params.id), bid(req));
+    if (!t) throw new HttpError(404, 'Not found');
+    return t;
+  };
+  const typeOr404 = (req) => {
+    const t = db.get('SELECT * FROM booking_types WHERE id = ? AND business_id = ?', int(req.params.id), bid(req));
+    if (!t) throw new HttpError(404, 'Not found');
+    return t;
+  };
+  const validMembers = (req) => members(bid(req)).map((m) => m.id);
+  app.post('/api/admin/teams', (req) => { requireRole('admin')(req); return ORG.saveTeam(bid(req), req.body || {}, null, validMembers(req)); });
+  app.patch('/api/admin/teams/:id', (req) => { requireRole('admin')(req); return ORG.saveTeam(bid(req), req.body || {}, teamOr404(req), validMembers(req)); });
+  app.delete('/api/admin/teams/:id', (req) => { requireRole('admin')(req); return ORG.removeTeam(bid(req), teamOr404(req).id); });
+  app.post('/api/admin/booking-types', (req) => { requireRole('admin')(req); return ORG.saveType(bid(req), req.body || {}, null); });
+  app.patch('/api/admin/booking-types/:id', (req) => { requireRole('admin')(req); return ORG.saveType(bid(req), req.body || {}, typeOr404(req)); });
+  app.delete('/api/admin/booking-types/:id', (req) => { requireRole('admin')(req); return ORG.removeType(bid(req), typeOr404(req).id); });
+
   app.get('/api/admin/event-types', (req) => {
     requireRole('host')(req);
-    return { event_types: db.all('SELECT * FROM event_types WHERE business_id = ? ORDER BY sort, id', bid(req)).map(etOut), members: members(bid(req)), location_types: LOCATION_TYPES, default_steps: DEFAULT_STEPS(), quick_date_steps: QUICK_DATE_STEPS() };
+    return { event_types: db.all('SELECT * FROM event_types WHERE business_id = ? ORDER BY sort, id', bid(req)).map(etOut), members: members(bid(req)), teams: ORG.listTeams(bid(req)), booking_types: ORG.listTypes(bid(req)), location_types: LOCATION_TYPES, default_steps: DEFAULT_STEPS(), quick_date_steps: QUICK_DATE_STEPS() };
   });
   function saveEventType(req, existing) {
     const b = req.body || {};
@@ -362,6 +388,10 @@ module.exports = function adminRoutes(app) {
       assignment: b.assignment === 'single' ? 'single' : 'round_robin', color: /^#[0-9a-f]{6}$/i.test(b.color || '') ? b.color : existing?.color || '#6d4aff',
       steps: JSON.stringify(b.steps ? sanitizeSteps(b.steps) : existing ? BK.hydrateEt({ ...existing }).steps : DEFAULT_STEPS()),
       active: b.active === undefined ? (existing ? existing.active : 1) : bool(b.active) ? 1 : 0,
+      // Only this business's own labels, so a stale id in a form can never file a page under
+      // another company's team. Anything unrecognised clears the field rather than being stored.
+      team_id: b.team_id === undefined ? (existing ? existing.team_id : null) : ORG.teamIdFor(businessId, b.team_id),
+      booking_type_id: b.booking_type_id === undefined ? (existing ? existing.booking_type_id : null) : ORG.typeIdFor(businessId, b.booking_type_id),
     };
     let id = existing?.id;
     db.tx(() => {
@@ -1298,7 +1328,7 @@ module.exports = function adminRoutes(app) {
   // ---------- Team ----------
   app.get('/api/admin/team', (req) => {
     requireRole('host')(req);
-    return db.all('SELECT u.id, u.name, u.email, u.timezone, m.role, m.status FROM users u JOIN memberships m ON m.user_id = u.id WHERE m.business_id = ? AND COALESCE(u.is_resource,0) = 0 ORDER BY m.status, u.name', bid(req)).map((m) => ({ ...m, has_hours: !!db.get('SELECT 1 FROM availability_rules WHERE user_id = ?', m.id), calendars: db.all('SELECT provider, account_email FROM calendar_connections WHERE user_id = ?', m.id) }));
+    return db.all('SELECT u.id, u.name, u.email, u.timezone, m.role, m.status FROM users u JOIN memberships m ON m.user_id = u.id WHERE m.business_id = ? AND COALESCE(u.is_resource,0) = 0 ORDER BY m.status, u.name', bid(req)).map((m) => ({ ...m, has_hours: !!db.get('SELECT 1 FROM availability_rules WHERE user_id = ?', m.id), calendars: db.all('SELECT provider, account_email FROM calendar_connections WHERE user_id = ?', m.id), teams: ORG.teamsOf(bid(req), m.id) }));
   });
   app.post('/api/admin/team', async (req) => {
     requireRole('admin')(req);

@@ -47,7 +47,7 @@ app.get('/', (req, res) => {
     ${first ? `<p class="muted small">See a live example: <a href="/b/${first.slug}">/b/${first.slug}</a></p>` : ''}</div></main>` }));
 });
 
-app.get('/app', (req, res) => res.html(page({ title: `${APP_NAME} dashboard`, scripts: ['pricing.js', 'admin-core.js', 'admin-main.js', 'admin-setup.js', 'admin-business.js', 'admin-sessions.js', 'admin-products.js', 'admin-forms.js', 'admin-messaging.js', 'admin-integrations.js'], styles: ['app.css', 'admin.css'], bodyClass: 'admin' })));
+app.get('/app', (req, res) => res.html(page({ title: `${APP_NAME} dashboard`, scripts: ['pricing.js', 'admin-core.js', 'admin-main.js', 'admin-setup.js', 'admin-business.js', 'admin-org.js', 'admin-sessions.js', 'admin-products.js', 'admin-forms.js', 'admin-messaging.js', 'admin-integrations.js'], styles: ['app.css', 'admin.css'], bodyClass: 'admin' })));
 
 app.get('/oauth/:provider/start', (req, res) => {
   requireAuth(req);

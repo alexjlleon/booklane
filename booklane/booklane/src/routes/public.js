@@ -7,6 +7,7 @@ const { baseUrl, bool } = require('../lib/util');
 const { buildIcs, googleCalendarLink } = require('../lib/ics');
 const { page, APP_NAME } = require('../views');
 const B = require('../services/business');
+const ORG = require('../services/org');
 const L = require('../services/leads');
 const S = require('../services/scheduling');
 const Q = require('../services/quotes');
@@ -36,13 +37,34 @@ function getEventType(business, slug) {
   return et;
 }
 const publicBusiness = (b) => ({ id: b.id, slug: b.slug, name: b.name, logo_url: b.logo_url, brand_color: b.brand_color, timezone: b.timezone, phone: b.phone, email: b.email, website: b.website, settings: B.publicSettings(b) });
-function publicEventType(et) {
+function publicEventType(et, teamsById) {
   const hosts = S.hostsFor(et.id).map((h) => ({ name: h.name }));
+  // The list passes a lookup it built once; a single page has no list to share, so it reads its own.
+  const team = !et.team_id ? null
+    : teamsById ? teamsById.get(Number(et.team_id))
+      : db.get('SELECT id, name, color FROM teams WHERE id = ? AND active = 1', et.team_id) || null;
   return { id: et.id, slug: et.slug, name: et.name, description: et.description, duration_min: et.duration_min, location_type: et.location_type,
     location_label: LOCATION_TYPES[et.location_type], location_value: et.location_type === 'in_person' ? et.location_value : null,
-    max_days_ahead: et.max_days_ahead, color: et.color, steps: et.steps, hosts, settings: et.settings };
+    max_days_ahead: et.max_days_ahead, color: et.color, steps: et.steps, hosts, settings: et.settings,
+    booking_type_id: et.booking_type_id || null,
+    // The team is shown on the card, so the customer can see who runs this without it deciding how
+    // the page is laid out. An inactive team is simply not named, rather than named and misleading.
+    team: team ? { id: team.id, name: team.name, color: team.color } : null };
 }
 const activeEventTypes = (b) => db.all('SELECT * FROM event_types WHERE business_id = ? AND active = 1 ORDER BY sort, id', b.id).map(BK.hydrateEt);
+/**
+ * What the public page needs: the pages themselves, and the same pages gathered under their type
+ * headings in the order the admin put them in.
+ *
+ * Both, not one: eventTypes stays a flat list so anything already reading it keeps working, and a
+ * page with no type still appears there and in a final group of its own. A booking page that takes
+ * bookings must never vanish from the list for want of a label.
+ */
+function publicBookingPages(b) {
+  const teamsById = new Map(ORG.listTeams(b.id).map((t) => [t.id, t]));
+  const pages = activeEventTypes(b).map((et) => publicEventType(et, teamsById));
+  return { eventTypes: pages, bookingGroups: ORG.groupByType(b.id, pages) };
+}
 
 module.exports = function publicRoutes(app) {
   // ---------- Pages ----------
@@ -50,7 +72,7 @@ module.exports = function publicRoutes(app) {
     const b = getBusiness(req.params.slug);
     const embed = bool(req.query.embed);
     res.html(page({ title: `${b.name} · Book a call`, description: b.settings.tagline, business: b, embed, scripts: ['common.js', 'profile.js'],
-      data: { business: publicBusiness(b), eventTypes: activeEventTypes(b).map(publicEventType) } }));
+      data: { business: publicBusiness(b), ...publicBookingPages(b) } }));
   });
 
   app.get('/b/:slug/quote', (req, res) => {

@@ -47,6 +47,31 @@ CREATE TABLE IF NOT EXISTS event_type_hosts (
   event_type_id INTEGER NOT NULL REFERENCES event_types(id) ON DELETE CASCADE,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, PRIMARY KEY (event_type_id, user_id)
 );
+-- Who does the work, and what kind of work it is. Two separate questions: the imaging team runs
+-- engagement sessions, but it also runs headshots, and a sales call is a sales call whoever takes
+-- it. Keeping them apart means a booking page can be filed under both without either one being a
+-- rename of the other.
+CREATE TABLE IF NOT EXISTS teams (
+  id INTEGER PRIMARY KEY, business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, description TEXT, color TEXT NOT NULL DEFAULT '#6d4aff',
+  active INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_teams_business ON teams (business_id, active);
+-- A person can be on more than one team: the photographer who also takes sales calls is on both,
+-- and making them pick one would mean duplicating them.
+CREATE TABLE IF NOT EXISTS team_members (
+  team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  PRIMARY KEY (team_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS booking_types (
+  id INTEGER PRIMARY KEY, business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, description TEXT,
+  active INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_booking_types_business ON booking_types (business_id, active);
 CREATE TABLE IF NOT EXISTS availability_rules (
   id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   weekday INTEGER NOT NULL, start_min INTEGER NOT NULL, end_min INTEGER NOT NULL
@@ -303,6 +328,11 @@ for (const sql of [
   // An album's price is a combination (size x cover), not a single choice, so the price lives in a
   // rule table rather than on one option. Extra spreads are priced the same way, by size and paper.
   "ALTER TABLE products ADD COLUMN price_rules TEXT NOT NULL DEFAULT '[]'",
+  // Which team runs this booking page, and what kind of booking it is. Set on the page rather than
+  // worked out from whoever is hosting: a page can draw hosts from more than one team, and moving a
+  // person between teams should not silently re-file the pages they happen to cover.
+  'ALTER TABLE event_types ADD COLUMN team_id INTEGER',
+  'ALTER TABLE event_types ADD COLUMN booking_type_id INTEGER',
 ]) { try { raw.exec(sql); } catch { /* column already exists */ } }
 
 const cache = new Map();
