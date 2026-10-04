@@ -2164,3 +2164,17 @@ test('every admin screen reads A.me the way the server sends it', async () => {
   assert.deepEqual(bad, [], `admin scripts read keys the me payload does not have: ${bad.join(', ')}`);
   assert.ok(me.business && typeof me.business.role === 'string', 'the role lives on business');
 });
+
+test('the scheduler reads its slot cache with the same key it writes', () => {
+  // These were built independently once. The writer gained the endpoint URL, the reader did not,
+  // so every lookup missed and every booking page showed a month with no dates on it, for months,
+  // while the API underneath was returning slots the whole time.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'scheduler.js'), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  const reads = [...src.matchAll(/st\.cache\[([^\]]+)\]/g)].map((m) => m[1].trim());
+  const viaHelper = reads.filter((r) => r === 'key' || r.startsWith('cacheKey('));
+  assert.deepEqual(reads, viaHelper, `every st.cache access must go through the shared key, got: ${reads.join(' | ')}`);
+  // And the helper has to be the only thing that knows how a key is spelled.
+  const builders = [...src.matchAll(/st\.tz\s*\+\s*'\|'/g)];
+  assert.equal(builders.length, 0, 'a key built by hand will drift from the helper again');
+});

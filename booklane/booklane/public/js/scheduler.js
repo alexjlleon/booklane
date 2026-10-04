@@ -14,10 +14,13 @@
 
     // Sessions pass their own URL so the calendar only shows one market's openings.
     const slotsUrl = () => opts.slotsUrl || `/api/public/b/${encodeURIComponent(opts.slug)}/e/${encodeURIComponent(opts.eventSlug)}/slots`;
+    // One place, used by whatever writes the cache and whatever reads it. Built in two places
+    // these drifted apart, every read missed, and every calendar showed a month of dead dates.
+    const cacheKey = (month) => `${st.tz}|${month}|${slotsUrl()}`;
 
     async function load(month) {
       const url = slotsUrl();
-      const key = st.tz + '|' + month + '|' + url;
+      const key = cacheKey(month);
       if (st.cache[key]) return st.cache[key];
       const from = month === monthOf(today()) ? today() : month + '-01';
       const q = new URLSearchParams({ from, to: lastDay(month), tz: st.tz });
@@ -46,7 +49,7 @@
 
     function render() {
       const month = st.month;
-      const days = st.cache[st.tz + '|' + month] || {};
+      const days = st.cache[cacheKey(month)] || {};
       const [y, mo] = month.split('-').map(Number);
       const first = new Date(Date.UTC(y, mo - 1, 1));
       const lead = first.getUTCDay();
