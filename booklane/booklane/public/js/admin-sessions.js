@@ -81,11 +81,8 @@
           <td class="small muted">${esc(c.timezone || '')}</td>
           <td>${c.has_hours ? '<span class="pill booked">Set</span>' : '<span class="pill partial">Not set</span>'}</td>
           <td class="small">${c.connections.length
-    ? c.connections.map((x) => `<div><b>${esc(x.account_email || x.provider)}</b>${x.last_error ? ` <span style="color:var(--err)">${esc(x.last_error)}</span>` : ''}
-        <button type="button" class="icon-x" data-drop-conn="${c.id}:${x.id}" title="Disconnect">&times;</button></div>`).join('')
-    : `<span class="muted">—</span>`}
-    ${A.me.app && A.me.app.calendars ? Object.entries(A.me.app.calendars).filter(([, pr]) => pr.configured)
-    .map(([k, pr]) => `<a class="btn btn-link btn-sm" href="/oauth/${k}/start?calendar=${c.id}">+ ${esc(pr.label)}</a>`).join(' ') : ''}</td>
+    ? c.connections.map((x) => `<div>${esc(x.account_email || x.provider)}${x.last_error ? ` <span style="color:var(--err)">${esc(x.last_error)}</span>` : ''}</div>`).join('')
+    : '<button type="button" class="btn btn-link btn-sm" data-edit-cal="' + c.id + '">Connect one</button>'}</td>
           <td class="num">${c.upcoming || ''}</td>
           <td class="num"><a class="btn btn-ghost btn-sm" href="#/availability?user_id=${c.user_id}">Hours</a>
             <button type="button" class="btn btn-ghost btn-sm" data-edit-cal="${c.id}">Edit</button></td>
@@ -211,15 +208,37 @@
         ${A.field('Time zone', A.tzSelect('timezone', (c && c.timezone) || A.tz()))}
         ${c ? A.toggle('active', c.active, 'Offer this calendar') : ''}
         ${c
-    ? `<div class="ok-box">Set this calendar's weekly hours and blackout dates on its <a href="#/availability?user_id=${c.user_id}">availability page</a>. Connect a Google or Outlook calendar there as well, so anything already in that diary blocks the time automatically.</div>`
+    ? `<div class="ok-box">Set this calendar's weekly hours and blackout dates on its <a href="#/availability?user_id=${c.user_id}">availability page</a>.</div>`
     : '<div class="ok-box">New calendars start with Friday evenings and weekends open. You will land on its hours page next to set them properly.</div>'}
       </div>
+      ${c ? `<div class="panel stack" style="margin-top:14px">
+        <div><b>Calendar it checks for conflicts</b>
+          <p class="desc" style="margin:4px 0 0">Anything already in this diary blocks these times, so ${esc(c.name)} is never offered when it is busy.
+            A market has no login of its own, so you sign in with your own Google or Outlook account and attach it to ${esc(c.name)} here.</p></div>
+        ${(c.connections || []).length
+    ? `<div class="stack" style="gap:6px">${c.connections.map((x) => `<div class="row between" style="gap:8px">
+        <div><b>${esc(x.account_email || x.provider)}</b>${x.last_error ? `<div class="small" style="color:var(--err)">${esc(x.last_error)}</div>` : ''}</div>
+        <button type="button" class="btn btn-ghost btn-sm" data-drop-conn="${c.id}:${x.id}">Disconnect</button></div>`).join('')}</div>`
+    : '<p class="muted small" style="margin:0">Nothing connected, so only its weekly hours and bookings made here decide what is free.</p>'}
+        <div class="row" style="gap:8px">${Object.entries((A.me.app && A.me.app.calendars) || {}).map(([k, pr]) => pr.configured
+    ? `<a class="btn btn-ghost btn-sm" href="/oauth/${k}/start?calendar=${c.id}">Connect ${esc(pr.label)}</a>`
+    : `<span class="small muted">${esc(pr.label)} is not set up on this server</span>`).join('')}</div>
+        ${(c.connections || []).length ? '<p class="small muted" style="margin:0">Connecting a second account adds to this one rather than replacing it.</p>' : ''}
+      </div>` : ''}
       <div class="row between" style="margin-top:16px">
         ${c ? '<button type="button" class="btn btn-danger" data-del>Delete</button>' : '<span></span>'}
         <div class="row"><button type="button" class="btn btn-ghost" data-close-drawer>Cancel</button>
         <button type="submit" class="btn btn-primary">${c ? 'Save' : 'Create and set hours'}</button></div>
       </div>
     </form>`, (el) => {
+      el.addEventListener('click', async (ev) => {
+        const drop = ev.target.closest('[data-drop-conn]');
+        if (!drop) return;
+        if (!confirm('Disconnect this calendar?\n\nIts weekly hours stay as they are; only the conflict checking stops.')) return;
+        const [calId, connId] = drop.dataset.dropConn.split(':');
+        await A.guard(() => api('DELETE', `/session-calendars/${calId}/connection/${connId}`), 'Disconnected');
+        A.closeDrawer(); A.render();
+      });
       $('#cal-form', el).addEventListener('submit', async (ev) => {
         ev.preventDefault();
         const body = A.collect(el);

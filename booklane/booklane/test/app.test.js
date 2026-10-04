@@ -2294,3 +2294,20 @@ test('only an admin of the business can point a market at a calendar', async () 
   const ok = await req('DELETE', `/api/admin/session-calendars/${cal.id}/connection/${conn.id}`, null, { cookie: ownerCookie });
   assert.equal(ok.status, 200, JSON.stringify(ok.data));
 });
+
+test('the markets screen carries what it needs to connect a calendar', async () => {
+  // The connect action is built from the calendar's own row: its id, and whether each provider is
+  // set up on this server. Without either the button cannot be drawn, and the only symptom is that
+  // nobody can find where to connect anything.
+  const cals = await req('GET', '/api/admin/session-calendars', null, { cookie: ownerCookie });
+  assert.equal(cals.status, 200, JSON.stringify(cals.data));
+  const market = cals.data.find((c) => c.kind === 'market');
+  assert.ok(market, 'the fixtures should include a market');
+  assert.ok(Number.isFinite(market.id) && Number.isFinite(market.user_id));
+  assert.ok(Array.isArray(market.connections), 'and what it already has connected');
+
+  const me = await req('GET', '/api/admin/auth/me', null, { cookie: ownerCookie });
+  const provs = me.data.app.calendars;
+  assert.ok(provs && provs.google && provs.microsoft, 'both providers are offered to the screen');
+  for (const p of Object.values(provs)) assert.equal(typeof p.configured, 'boolean');
+});
