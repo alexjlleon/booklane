@@ -235,17 +235,48 @@
         <div class="cols-even">${Object.entries(d.providers).map(([k, pr]) => `<div class="panel"><h2>${esc(pr.label)}</h2>
           ${pr.configured ? `<p class="desc">Checks your busy times and adds new bookings${k === 'google' ? ' with a Google Meet link' : ' with a Teams link'} when the call type uses it.</p><a class="btn btn-primary" href="/oauth/${k}/start">Connect ${esc(pr.label)}</a>`
             : `<div class="warn-box">Not set up on the server yet. Your admin needs to add ${envNames[k]} as environment variables.<div class="small" style="margin-top:8px">Redirect URI to register: <code>${esc(pr.redirect_uri)}</code></div></div>`}</div>`).join('')}</div>
-        <div class="panel"><h2>Your connections</h2>${d.connections.length ? `<div class="table-wrap"><table class="t"><thead><tr><th>Account</th><th>Check for conflicts</th><th>Add new bookings here</th><th></th></tr></thead><tbody>
+        <div class="panel"><h2>Your connections</h2>${d.connections.length ? `<div class="table-wrap"><table class="t"><thead><tr><th>Account</th><th>Check for conflicts</th><th>All-day entries block</th><th>Add new bookings here</th><th></th></tr></thead><tbody>
           ${d.connections.map((c) => `<tr><td><b>${esc(c.account_email || c.provider)}</b><div class="small muted">${esc(d.providers[c.provider].label)}</div>${c.last_error ? `<div class="small" style="color:var(--err)">${esc(c.last_error)}</div>` : ''}</td>
-            <td>${A.toggle('_', c.check_busy, '').replace('data-bind="_"', `data-conn="${c.id}" data-k="check_busy"`)}</td><td>${A.toggle('_', c.write_events, '').replace('data-bind="_"', `data-conn="${c.id}" data-k="write_events"`)}</td>
-            <td class="num"><button class="btn btn-danger btn-sm" data-disconnect="${c.id}">Disconnect</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">No calendars connected. Until you connect one, only your weekly hours and existing bookings are used.</p>'}</div>`;
+            <td>${A.toggle('_', c.check_busy, '').replace('data-bind="_"', `data-conn="${c.id}" data-k="check_busy"`)}</td>
+            <td>${A.toggle('_', c.busy_all_day, '').replace('data-bind="_"', `data-conn="${c.id}" data-k="busy_all_day"`)}<div class="small muted" style="max-width:220px">Off: an all-day entry labels the day but still allows calls.</div></td>
+            <td>${A.toggle('_', c.write_events, '').replace('data-bind="_"', `data-conn="${c.id}" data-k="write_events"`)}</td>
+            <td class="num"><button class="btn btn-ghost btn-sm" data-busy="${c.id}">What is it blocking?</button> <button class="btn btn-danger btn-sm" data-disconnect="${c.id}">Disconnect</button></td></tr>`).join('')}</tbody></table></div>
+          <div id="busy-out" style="margin-top:14px"></div>` : '<p class="muted">No calendars connected. Until you connect one, only your weekly hours and existing bookings are used.</p>'}</div>`;
     },
     mount(root) {
       if (location.hash.includes('?')) history.replaceState(null, '', '#/calendars');
       root.addEventListener('change', async (e) => { const c = e.target.dataset.conn; if (c) { await A.guard(() => api('PATCH', `/calendars/${c}`, { [e.target.dataset.k]: e.target.checked }), 'Updated'); A.render(); } });
-      root.addEventListener('click', async (e) => { const c = e.target.closest('[data-disconnect]'); if (c && confirm('Disconnect this calendar?')) { await A.guard(() => api('DELETE', `/calendars/${c.dataset.disconnect}`), 'Disconnected'); A.render(); } });
+      root.addEventListener('click', async (e) => {
+        const c = e.target.closest('[data-disconnect]');
+        if (c && confirm('Disconnect this calendar?')) { await A.guard(() => api('DELETE', `/calendars/${c.dataset.disconnect}`), 'Disconnected'); A.render(); return; }
+        const b = e.target.closest('[data-busy]');
+        if (!b) return;
+        const out = $('#busy-out', root);
+        out.innerHTML = '<p class="muted">Reading your calendar…</p>';
+        try {
+          const r = await api('GET', `/calendars/${b.dataset.busy}/busy?days=14`);
+          out.innerHTML = busyReport(r);
+        } catch (err) { out.innerHTML = `<div class="warn-box">${esc(err.message)}</div>`; }
+      });
     },
   });
+
+  /**
+   * What the calendar is handing us, and what we are doing with each entry. The point is that an
+   * empty booking page stops being a mystery: the line that is swallowing every slot is right here,
+   * by name, with the reason beside it.
+   */
+  function busyReport(r) {
+    const fmt = (ms) => new Date(ms).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    if (!r.checking) return '<div class="warn-box">Conflict checking is off for this calendar, so nothing on it is blocking anything.</div>';
+    if (!r.entries.length) return `<div class="ok-box">Nothing on this calendar in the next ${r.days} days, so it is not blocking any times.</div>`;
+    const rows = r.entries.map((e) => `<tr><td>${esc(fmt(e.start))}<div class="small muted">to ${esc(fmt(e.end))}</div></td>
+      <td>${esc(e.subject || '(no title)')}${e.all_day ? ` <span class="pill">All day${e.inferred ? '?' : ''}</span>` : ''}${e.show_as ? ` <span class="small muted">${esc(e.show_as)}</span>` : ''}</td>
+      <td>${e.ignored ? `<span class="pill">Allowed through · ${esc(e.ignored)}</span>` : '<span class="pill partial">Blocking</span>'}</td></tr>`).join('');
+    return `<p class="desc"><b>${r.blocking}</b> ${r.blocking === 1 ? 'entry is' : 'entries are'} blocking times in the next ${r.days} days; ${r.ignored} ${r.ignored === 1 ? 'is' : 'are'} being let through.
+      ${r.busy_all_day ? 'All-day entries count as busy, which blacks out the whole of any day that has one.' : ''}</p>
+      <div class="table-wrap"><table class="t"><thead><tr><th>When</th><th>Entry</th><th>Effect</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
 
   // ---------- Share & embed ----------
   A.route('/share', {

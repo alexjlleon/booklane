@@ -469,7 +469,7 @@ module.exports = function adminRoutes(app) {
   app.get('/api/admin/calendars', (req) => {
     requireAuth(req);
     return { providers: Object.fromEntries(Object.entries(calendars.PROVIDERS).map(([k, p]) => [k, { label: p.label, configured: calendars.isConfigured(k), redirect_uri: `${baseUrl()}/oauth/${k}/callback` }])),
-      connections: db.all('SELECT id, provider, account_email, calendar_id, check_busy, write_events, last_error, created_at FROM calendar_connections WHERE user_id = ? ORDER BY id', req.user.id) };
+      connections: db.all('SELECT id, provider, account_email, calendar_id, check_busy, write_events, busy_all_day, last_error, created_at FROM calendar_connections WHERE user_id = ? ORDER BY id', req.user.id) };
   });
   app.patch('/api/admin/calendars/:id', (req) => {
     requireAuth(req);
@@ -481,9 +481,33 @@ module.exports = function adminRoutes(app) {
       if (bool(b.write_events)) db.run('UPDATE calendar_connections SET write_events = 0 WHERE user_id = ?', req.user.id);
       db.run('UPDATE calendar_connections SET write_events = ? WHERE id = ?', bool(b.write_events) ? 1 : 0, c.id);
     }
+    if (b.busy_all_day !== undefined) db.run('UPDATE calendar_connections SET busy_all_day = ? WHERE id = ?', bool(b.busy_all_day) ? 1 : 0, c.id);
     if (b.calendar_id) db.run('UPDATE calendar_connections SET calendar_id = ? WHERE id = ?', clampStr(b.calendar_id, 300), c.id);
     calendars.clearBusyCache(req.user.id);
     return { ok: true };
+  });
+  /**
+   * What this calendar is actually blocking, and what is being let through.
+   *
+   * Someone whose booking page offers no times has no way to find out why: the answer lives in an
+   * API response they cannot see. This is their own calendar, read with their own connection, and
+   * shown only back to them.
+   */
+  app.get('/api/admin/calendars/:id/busy', async (req) => {
+    requireAuth(req);
+    const c = db.get('SELECT * FROM calendar_connections WHERE id = ? AND user_id = ?', int(req.params.id), req.user.id);
+    if (!c) throw new HttpError(404, 'Not found');
+    if (!calendars.isConfigured(c.provider)) throw new HttpError(422, 'That calendar provider is not set up on this server');
+    const days = Math.max(1, Math.min(60, int(req.query.days, 14)));
+    const from = Date.now(), to = from + days * 86400000;
+    try {
+      const entries = await calendars.explainBusy(c, from, to);
+      return {
+        days, timezone: req.user.timezone || 'UTC', checking: !!c.check_busy, busy_all_day: !!c.busy_all_day,
+        blocking: entries.filter((e) => !e.ignored).length, ignored: entries.filter((e) => e.ignored).length,
+        entries: entries.slice(0, 200),
+      };
+    } catch (e) { throw new HttpError(502, `Could not read that calendar: ${e.message}`); }
   });
   app.delete('/api/admin/calendars/:id', (req) => {
     requireAuth(req);

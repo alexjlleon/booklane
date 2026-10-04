@@ -333,6 +333,10 @@ for (const sql of [
   // person between teams should not silently re-file the pages they happen to cover.
   'ALTER TABLE event_types ADD COLUMN team_id INTEGER',
   'ALTER TABLE event_types ADD COLUMN booking_type_id INTEGER',
+  // Whether an all-day entry on a connected calendar blocks bookings. Off by default: in a
+  // business whose calendar carries an all-day entry per job, treating those as solid busy time
+  // blacks out every working day, and the booking page silently offers nothing at all.
+  'ALTER TABLE calendar_connections ADD COLUMN busy_all_day INTEGER NOT NULL DEFAULT 0',
 ]) { try { raw.exec(sql); } catch { /* column already exists */ } }
 
 const cache = new Map();

@@ -90,6 +90,61 @@ async function accessToken(conn) {
 function markError(conn, e) { db.run('UPDATE calendar_connections SET last_error = ? WHERE id = ?', String(e.message || e).slice(0, 300), conn.id); }
 
 const busyCache = new Map();
+/**
+ * Everything one connected calendar says is taken, with enough about each entry to decide whether
+ * it should really stop someone booking.
+ *
+ * Kept separate from the filtering below so the admin can be shown exactly what the app sees. An
+ * empty booking calendar is impossible to explain otherwise: the page just offers nothing, and the
+ * reason is sitting in an API response nobody can look at.
+ */
+async function fetchBusyEntries(conn, fromMs, toMs) {
+  const at = await accessToken(conn);
+  const out = [];
+  if (conn.provider === 'google') {
+    const r = await fetch('https://www.googleapis.com/calendar/v3/freeBusy', {
+      method: 'POST', headers: { Authorization: `Bearer ${at}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ timeMin: new Date(fromMs).toISOString(), timeMax: new Date(toMs).toISOString(), items: [{ id: conn.calendar_id || 'primary' }] }),
+      signal: AbortSignal.timeout(10000),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error?.message || `Google freeBusy ${r.status}`);
+    for (const cal of Object.values(data.calendars || {})) {
+      for (const b of cal.busy || []) {
+        const start = Date.parse(b.start), end = Date.parse(b.end);
+        // Google's free/busy hands back anonymous blocks, so whether this was an all-day entry has
+        // to be guessed from its length. Marked as a guess, because it is one.
+        out.push({ start, end, all_day: end - start >= 23.5 * 3600000, show_as: '', subject: '', inferred: true });
+      }
+    }
+    return out;
+  }
+  let url = `https://graph.microsoft.com/v1.0/me/calendarView?startDateTime=${new Date(fromMs).toISOString()}&endDateTime=${new Date(toMs).toISOString()}&$select=subject,start,end,showAs,isCancelled,isAllDay&$top=500`;
+  while (url) {
+    const r = await fetch(url, { headers: { Authorization: `Bearer ${at}`, Prefer: 'outlook.timezone="UTC"' }, signal: AbortSignal.timeout(10000) });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error?.message || `Graph calendarView ${r.status}`);
+    for (const ev of data.value || []) {
+      if (ev.isCancelled) continue;
+      out.push({
+        start: Date.parse(ev.start.dateTime + 'Z'), end: Date.parse(ev.end.dateTime + 'Z'),
+        // Outlook says so outright, so there is nothing to guess at here.
+        all_day: !!ev.isAllDay, show_as: String(ev.showAs || ''), subject: String(ev.subject || ''), inferred: false,
+      });
+    }
+    url = data['@odata.nextLink'] || null;
+  }
+  return out;
+}
+
+// An entry that does not really mean "cannot take a call". Marked free, working elsewhere, or - by
+// default - an all-day entry, which is usually a label on the day rather than a solid commitment.
+function ignoredReason(entry, conn) {
+  if (entry.show_as === 'free' || entry.show_as === 'workingElsewhere') return entry.show_as === 'free' ? 'Marked free' : 'Working elsewhere';
+  if (entry.all_day && !conn.busy_all_day) return 'All-day entry';
+  return null;
+}
+
 async function getBusy(userId, fromMs, toMs) {
   const conns = db.all('SELECT * FROM calendar_connections WHERE user_id = ? AND check_busy = 1', userId);
   if (!conns.length) return [];
@@ -100,34 +155,23 @@ async function getBusy(userId, fromMs, toMs) {
   await Promise.all(conns.map(async (c) => {
     if (!isConfigured(c.provider)) return;
     try {
-      const at = await accessToken(c);
-      if (c.provider === 'google') {
-        const r = await fetch('https://www.googleapis.com/calendar/v3/freeBusy', {
-          method: 'POST', headers: { Authorization: `Bearer ${at}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ timeMin: new Date(fromMs).toISOString(), timeMax: new Date(toMs).toISOString(), items: [{ id: c.calendar_id || 'primary' }] }),
-          signal: AbortSignal.timeout(10000),
-        });
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.error?.message || `Google freeBusy ${r.status}`);
-        for (const cal of Object.values(data.calendars || {})) for (const b of cal.busy || []) busy.push([Date.parse(b.start), Date.parse(b.end)]);
-      } else {
-        let url = `https://graph.microsoft.com/v1.0/me/calendarView?startDateTime=${new Date(fromMs).toISOString()}&endDateTime=${new Date(toMs).toISOString()}&$select=start,end,showAs,isCancelled&$top=500`;
-        while (url) {
-          const r = await fetch(url, { headers: { Authorization: `Bearer ${at}`, Prefer: 'outlook.timezone="UTC"' }, signal: AbortSignal.timeout(10000) });
-          const data = await r.json();
-          if (!r.ok) throw new Error(data.error?.message || `Graph calendarView ${r.status}`);
-          for (const ev of data.value || []) {
-            if (ev.isCancelled || ev.showAs === 'free' || ev.showAs === 'workingElsewhere') continue;
-            busy.push([Date.parse(ev.start.dateTime + 'Z'), Date.parse(ev.end.dateTime + 'Z')]);
-          }
-          url = data['@odata.nextLink'] || null;
-        }
+      for (const e of await fetchBusyEntries(c, fromMs, toMs)) {
+        if (!ignoredReason(e, c)) busy.push([e.start, e.end]);
       }
     } catch (e) { markError(c, e); console.warn(`[calendar] busy lookup failed for connection ${c.id}:`, e.message); }
   }));
   busyCache.set(key, { at: Date.now(), busy });
   return busy;
 }
+
+/** What one connection is contributing, and what is being ignored, for the admin to look at. */
+async function explainBusy(conn, fromMs, toMs) {
+  const entries = await fetchBusyEntries(conn, fromMs, toMs);
+  return entries
+    .map((e) => ({ ...e, ignored: ignoredReason(e, conn) }))
+    .sort((a, b) => a.start - b.start);
+}
+
 const clearBusyCache = (userId) => { for (const k of busyCache.keys()) if (k.startsWith(userId + ':')) busyCache.delete(k); };
 
 async function createEvent(hostUserId, { summary, description, start, end, attendeeEmail, attendeeName, location, locationType, timezone }) {
@@ -179,4 +223,4 @@ async function deleteEvent(ext) {
   } catch (e) { markError(conn, e); }
 }
 
-module.exports = { PROVIDERS, isConfigured, startAuth, finishAuth, getBusy, createEvent, deleteEvent, clearBusyCache };
+module.exports = { explainBusy, ignoredReason, PROVIDERS, isConfigured, startAuth, finishAuth, getBusy, createEvent, deleteEvent, clearBusyCache };

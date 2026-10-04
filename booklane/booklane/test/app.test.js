@@ -2070,3 +2070,26 @@ test('a venue and date given in the contract step land on the quote, not just th
   assert.equal(lead.phone, '2815550144', 'the phone reaches the lead, so nobody is asked twice');
   assert.equal(JSON.parse(lead.answers).venue, 'The Winery');
 });
+
+// --- What a connected calendar actually blocks ------------------------------------------------
+
+test('an all-day entry labels the day without blacking it out', () => {
+  const C = require('../src/services/calendars');
+  const day = (d) => Date.parse(`2027-03-${d}T00:00:00Z`);
+  const entries = [
+    { start: day('01'), end: day('02'), all_day: true, show_as: 'busy', subject: 'Smith Wedding' },
+    { start: day('01') + 10 * 3600000, end: day('01') + 11 * 3600000, all_day: false, show_as: 'busy', subject: 'Vendor call' },
+    { start: day('02'), end: day('03'), all_day: true, show_as: 'free', subject: 'Conference' },
+    { start: day('03') + 9 * 3600000, end: day('03') + 10 * 3600000, all_day: false, show_as: 'workingElsewhere', subject: 'From the studio' },
+  ];
+  const reasons = entries.map((e) => C.ignoredReason(e, { busy_all_day: 0 }));
+  // The entry that was blacking out a whole working day is the all-day one, and it is the one let
+  // through. The real hour-long meeting still blocks.
+  assert.equal(reasons[0], 'All-day entry');
+  assert.equal(reasons[1], null, 'a timed meeting still blocks');
+  assert.equal(reasons[2], 'Marked free');
+  assert.equal(reasons[3], 'Working elsewhere');
+
+  // A business that wants all-day entries to mean "do not book me" says so, and they block again.
+  assert.equal(C.ignoredReason(entries[0], { busy_all_day: 1 }), null);
+});
