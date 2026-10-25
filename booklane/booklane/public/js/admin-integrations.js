@@ -27,7 +27,10 @@
     }
     A.cache.providers = s;
     host.innerHTML = ['twilio', 'resend'].map((p) => card(s[p], s.mask)).join('');
-    wire(host);
+    // The cards are redrawn after every save, but the host element stays the same. Attaching the
+    // handlers again on each redraw made one click fire once per earlier save (four test emails
+    // for one press), so they are attached once per host.
+    if (!host.dataset.wired) { host.dataset.wired = '1'; wire(host); }
   };
 
   function stateBadge(p) {
