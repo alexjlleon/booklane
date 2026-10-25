@@ -1,5 +1,5 @@
-/* Buy-and-book flow for a session: pick a location, say whether it's already paid for,
-   otherwise buy it, then pick a time. Partial answers are saved as you go, same as the call form. */
+/* Booking flow for a session: pick a location, give your details, then pick a time.
+   Partial answers are saved as you go, same as the call form. Nothing here takes payment. */
 (function () {
   'use strict';
   const { esc, api, icons, $, $$ } = BL;
@@ -12,7 +12,6 @@
     i: 0,
     tz: BL.guessTz(),
     calendar: sess.calendars.length === 1 ? sess.calendars[0].slug : null,
-    booked: null,              // true = already paid for, false = buying now
     bookingNumber: '',
     slot: null,
     answers: {},
@@ -26,13 +25,11 @@
 
   // ---------- which steps exist ----------
   // The location step only appears when there is a real choice to make, which is what lets the
-  // album flow (one designer) skip straight to the purchase.
+  // album design session (one designer) skip straight to the details.
   function stepList() {
     const out = [];
     if (sess.calendars.length > 1) out.push('choose');
-    out.push('booked');
-    if (st.booked === true && sess.ask_booking_number) out.push('number');
-    if (st.booked === false) out.push('price');
+    if (sess.ask_booking_number) out.push('number');
     out.push('contact', 'schedule');
     return out;
   }
@@ -40,7 +37,6 @@
   const cur = () => steps()[st.i];
   const isLast = () => st.i >= steps().length - 1;
   const calName = () => (sess.calendars.find((c) => c.slug === st.calendar) || {}).name || '';
-  const payable = () => st.booked === false && sess.price_cents > 0;
 
   // ---------- lead capture ----------
   const saver = BL.createSaver({
@@ -66,10 +62,9 @@
   function side() {
     return `<aside class="booker-side">
       <div class="biz">${BL.logo(biz)}<div class="biz-name">${esc(biz.name)}</div></div>
-      <div><h1 class="event-title">${esc(sess.name)}</h1>${sess.description ? `<p class="muted desc" style="margin:8px 0 0">${esc(sess.description)}</p>` : ''}</div>
+      <div><h1 class="event-title">${esc(L.intro_heading || sess.name)}</h1>${sess.description ? `<p class="muted desc" style="margin:8px 0 0">${esc(sess.description)}</p>` : ''}${L.intro_blurb ? `<p class="muted desc" style="margin:8px 0 0">${esc(L.intro_blurb)}</p>` : ''}</div>
       <div class="meta-list">
         <div>${icons.clock}${sess.duration_min} min</div>
-        ${sess.price_cents > 0 ? `<div>${icons.tag}${esc(sess.price_display)}</div>` : ''}
         ${st.calendar ? `<div>${icons.pin}${esc(calName())}</div>` : ''}
       </div>
       ${st.slot ? `<div class="selected-time">${icons.cal.replace('<svg', '<svg width="16" height="16" style="vertical-align:-3px;margin-right:6px"')}${esc(BL.fmtDate(st.slot, st.tz, { weekday: 'short', month: 'short' }))}, ${esc(BL.fmtTime(st.slot, st.tz))}</div>` : ''}
@@ -92,13 +87,6 @@
     return `<div class="options">${sess.calendars.map((c) => optCard('choose', c.slug, st.calendar === c.slug, c.name, c.blurb)).join('')}</div>`;
   }
 
-  function renderBooked() {
-    return `<div class="options list">
-      ${optCard('booked', 'yes', st.booked === true, L.booked_yes_label, '')}
-      ${optCard('booked', 'no', st.booked === false, L.booked_no_label, sess.price_cents > 0 ? `${sess.price_display}` : '')}
-    </div>`;
-  }
-
   function renderNumber() {
     return `<form class="step-form" novalidate>
       ${field('booking_number', L.booking_number_label,
@@ -106,21 +94,6 @@
     sess.booking_number_required)}
       ${L.booking_number_hint ? `<p class="muted" style="margin:-4px 0 0;font-size:14px">${esc(L.booking_number_hint)}</p>` : ''}
     </form>`;
-  }
-
-  function renderPrice() {
-    const includes = (L.includes || []).filter(Boolean);
-    return `<div class="price-panel">
-      <div class="price-figure">
-        <div class="price-amount">${esc(sess.price_display)}</div>
-        <div class="muted">${esc(sess.duration_min)} minutes${st.calendar ? ` · ${esc(calName())}` : ''}</div>
-      </div>
-      ${L.price_blurb ? `<p>${esc(L.price_blurb)}</p>` : ''}
-      ${includes.length ? `<ul class="trust">${includes.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
-      ${sess.price_cents > 0 && !sess.payments_ready
-    ? `<div class="form-error" role="alert">Card payments are not switched on yet. Please call us and we will book this for you.</div>`
-    : `<p class="muted" style="font-size:14px">You will pick your time next, then pay securely on Stripe. We never see your card details.</p>`}
-    </div>`;
   }
 
   function renderContact() {
@@ -140,16 +113,15 @@
 
   const HEADS = {
     choose: () => ({ title: L.choose_label, sub: L.choose_hint }),
-    booked: () => ({ title: L.booked_question, sub: '' }),
-    number: () => ({ title: `What's your ${String(L.booking_number_label || 'booking number').toLowerCase()}?`, sub: L.booked_note }),
-    price: () => ({ title: L.price_heading || sess.name, sub: '' }),
+    number: () => ({ title: `What's your ${String(L.booking_number_label || 'booking number').toLowerCase()}?`, sub: sess.booking_number_required ? '' : 'Optional, but it helps us match this to your file.' }),
     contact: () => ({ title: 'Who is this session for?', sub: 'So we can send your confirmation.' }),
     schedule: () => ({ title: 'Pick your time', sub: st.calendar ? `Openings for ${calName()}.` : '' }),
   };
 
   function ctaLabel() {
-    if (!isLast()) return cur() === 'price' ? 'Continue' : 'Continue';
-    return payable() ? (L.pay_cta || 'Pay and pick a time') : (L.free_cta || 'Confirm my session');
+    if (isLast()) return 'Confirm my session';
+    // The step before the calendar leads into it, so it carries the business's own wording.
+    return st.i === steps().length - 2 ? (L.book_cta || 'Pick a time') : 'Continue';
   }
 
   function render() {
@@ -158,9 +130,7 @@
     const head = HEADS[step]();
     let body = '';
     if (step === 'choose') body = renderChoose();
-    else if (step === 'booked') body = renderBooked();
     else if (step === 'number') body = renderNumber();
-    else if (step === 'price') body = renderPrice();
     else if (step === 'contact') body = renderContact();
     else body = '<div id="scheduler"></div>';
 
@@ -200,9 +170,7 @@
   function validate() {
     const step = cur();
     if (step === 'choose' && !st.calendar) return 'Pick a location to see its calendar.';
-    if (step === 'booked' && st.booked === null) return 'Let us know so we can point you the right way.';
     if (step === 'number' && sess.booking_number_required && !st.bookingNumber.trim()) return `Please enter your ${String(L.booking_number_label || 'booking number').toLowerCase()}.`;
-    if (step === 'price' && sess.price_cents > 0 && !sess.payments_ready) return 'Card payments are not switched on yet. Please call us and we will book this for you.';
     if (step === 'contact') {
       const f = sess.contact_fields || {};
       const errs = {};
@@ -239,22 +207,13 @@
       contact: st.contact,
       answers: st.answers,
       lead_token: st.leadToken,
+      booking_number: st.bookingNumber,
     };
     try {
       await saver.flush();
-      // No card needed when they already paid, or when the session costs nothing.
-      if (st.booked === true || sess.price_cents === 0) {
-        payload.already_booked = st.booked === true;
-        if (st.booked === true) payload.booking_number = st.bookingNumber;
-        const r = await api('POST', `/api/public/b/${biz.slug}/s/${sess.slug}/claim`, payload);
-        BL.store.del(storeKey);
-        location.href = r.redirect;
-        return;
-      }
-      const r = await api('POST', `/api/public/b/${biz.slug}/s/${sess.slug}/checkout`, payload);
+      const r = await api('POST', `/api/public/b/${biz.slug}/s/${sess.slug}/book`, payload);
       BL.store.del(storeKey);
-      // Off to Stripe's hosted page. We come back to /session/:token.
-      location.href = r.checkout_url;
+      location.href = r.redirect;
     } catch (e) {
       st.busy = false;
       st.error = e.message;
@@ -281,11 +240,6 @@
       capture({ answers: { location: calName() } }, true);
       $$('[data-choose]', app).forEach((x) => x.closest('.opt').classList.toggle('is-on', x.checked));
       setTimeout(() => go(1), 180);
-    } else if (t.hasAttribute('data-booked')) {
-      st.booked = t.value === 'yes';
-      capture({ answers: { already_booked: st.booked ? 'Yes' : 'No' } }, true);
-      $$('[data-booked]', app).forEach((x) => x.closest('.opt').classList.toggle('is-on', x.checked));
-      setTimeout(() => go(1), 180);
     } else if (t.hasAttribute('data-number')) {
       st.bookingNumber = t.value;
       capture({ answers: { booking_number: t.value } }, e.type === 'change');
@@ -300,15 +254,15 @@
   app.addEventListener('change', (e) => { if (e.target.type === 'checkbox' || e.target.type === 'radio' || e.target.tagName === 'SELECT') onInput(e); });
 
   // ---------- boot ----------
-  // Accepts ?city=houston&booked=no from a short CTA on the website.
+  // Accepts ?city=houston from a short CTA on the website.
   function prefill() {
     const city = params.get('city') || params.get('calendar');
     if (city) {
       const hit = sess.calendars.find((c) => c.slug === city || c.name.toLowerCase() === city.toLowerCase());
       if (hit) st.calendar = hit.slug;
     }
-    const booked = params.get('booked');
-    if (booked === 'no' || booked === 'yes') st.booked = booked === 'yes';
+    const number = params.get('booking_number');
+    if (number) st.bookingNumber = String(number).slice(0, 60);
     for (const k of ['first_name', 'last_name', 'email', 'phone']) {
       const v = params.get(k);
       if (v) st.contact[k] = String(v).slice(0, 200);
@@ -319,13 +273,11 @@
     while (i < list.length - 1) {
       const s = list[i];
       if (s === 'choose' && st.calendar) { i++; continue; }
-      if (s === 'booked' && st.booked !== null) { i++; continue; }
       break;
     }
     st.i = i;
   }
 
-  if (D.cancelled) st.error = 'Your payment was cancelled, so nothing was charged. Your time is free again — pick one when you are ready.';
   prefill();
   render();
 })();

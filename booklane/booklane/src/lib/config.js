@@ -12,21 +12,12 @@ const { encrypt, decrypt } = require('./security');
 
 // Every credential the app knows about. `secret: true` means encrypt it and never show it again.
 const KEYS = {
-  STRIPE_SECRET_KEY: { secret: true, provider: 'stripe', label: 'Secret key' },
-  STRIPE_WEBHOOK_SECRET: { secret: true, provider: 'stripe', label: 'Webhook signing secret' },
   TWILIO_ACCOUNT_SID: { secret: false, provider: 'twilio', label: 'Account SID' },
   TWILIO_AUTH_TOKEN: { secret: true, provider: 'twilio', label: 'Auth token' },
   TWILIO_FROM_NUMBER: { secret: false, provider: 'twilio', label: 'From number' },
   TWILIO_MESSAGING_SERVICE_SID: { secret: false, provider: 'twilio', label: 'Messaging Service SID' },
   RESEND_API_KEY: { secret: true, provider: 'resend', label: 'API key' },
   EMAIL_FROM: { secret: false, provider: 'resend', label: 'Send from' },
-  // Square is the other way to take a card. A business uses one or the other, never both at once.
-  SQUARE_ACCESS_TOKEN: { secret: true, provider: 'square', label: 'Access token' },
-  SQUARE_LOCATION_ID: { secret: false, provider: 'square', label: 'Location ID' },
-  SQUARE_WEBHOOK_SIGNATURE_KEY: { secret: true, provider: 'square', label: 'Webhook signature key' },
-  SQUARE_ENVIRONMENT: { secret: false, provider: 'square', label: 'Environment' },
-  // Which one this business actually uses: 'stripe' or 'square'.
-  PAYMENT_PROVIDER: { secret: false, provider: 'payments', label: 'Card payments through' },
 };
 
 const MASK = '•'.repeat(8);
@@ -147,7 +138,7 @@ function applyPatch(patch, { provider, userId, businessId } = {}) {
 
 const keysFor = (provider) => Object.entries(KEYS).filter(([, m]) => m.provider === provider).map(([k]) => k);
 
-// Small scratch space for things like the result of the last payment test. Not a credential,
+// Small scratch space for non-secret notes. Not a credential,
 // so it is stored in the clear and may be shown.
 function note(key, value) {
   db.run(`INSERT INTO app_settings (key, value, secret, updated_at) VALUES (?,?,0,datetime('now'))

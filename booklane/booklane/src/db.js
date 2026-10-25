@@ -161,68 +161,10 @@ CREATE TABLE IF NOT EXISTS calendar_profiles (
   UNIQUE (business_id, slug)
 );
 CREATE INDEX IF NOT EXISTS idx_calendar_profiles ON calendar_profiles (business_id, kind, active);
--- One row per attempt to buy a session. A 'pending' row also holds the slot, so two people cannot
--- pay for the same time; abandoned holds expire on their own and free the slot back up.
-CREATE TABLE IF NOT EXISTS orders (
-  id INTEGER PRIMARY KEY, business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
-  token TEXT NOT NULL UNIQUE,
-  event_type_id INTEGER REFERENCES event_types(id) ON DELETE SET NULL,
-  calendar_profile_id INTEGER REFERENCES calendar_profiles(id) ON DELETE SET NULL,
-  lead_id INTEGER REFERENCES leads(id) ON DELETE SET NULL,
-  booking_id INTEGER REFERENCES bookings(id) ON DELETE SET NULL,
-  product_name TEXT NOT NULL, amount_cents INTEGER NOT NULL DEFAULT 0, currency TEXT NOT NULL DEFAULT 'USD',
-  status TEXT NOT NULL DEFAULT 'pending', provider TEXT NOT NULL DEFAULT 'stripe',
-  provider_session_id TEXT, provider_payment_intent TEXT, provider_receipt_url TEXT,
-  customer_name TEXT, customer_email TEXT, customer_phone TEXT,
-  already_booked INTEGER NOT NULL DEFAULT 0, booking_number TEXT,
-  hold_host_user_id INTEGER, hold_start_utc TEXT, hold_end_utc TEXT, hold_expires_at INTEGER,
-  invitee_tz TEXT, answers TEXT NOT NULL DEFAULT '{}', last_error TEXT,
-  paid_at TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_orders_business ON orders (business_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_orders_hold ON orders (hold_host_user_id, status, hold_expires_at);
-CREATE INDEX IF NOT EXISTS idx_orders_provider_session ON orders (provider_session_id);
--- Stripe redelivers webhooks, sometimes more than once. Remember what has already been handled.
-CREATE TABLE IF NOT EXISTS products (
-  id INTEGER PRIMARY KEY, business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
-  slug TEXT NOT NULL, name TEXT NOT NULL, description TEXT, image_url TEXT,
-  -- Charged on top of whatever the chosen options cost. Zero when the options carry the whole price,
-  -- which is how the albums work: the 8x8 and the 10x10 are two priced choices of one option group.
-  base_cents INTEGER NOT NULL DEFAULT 0, currency TEXT NOT NULL DEFAULT 'USD',
-  -- [{ id, label, hint, required, applies_to:[choiceId], choices:[{ id, label, price_cents }] }]
-  -- applies_to lets a group show only when another group's choice is picked, so the cover choice
-  -- appears for the 10x10 and not for the 8x8.
-  option_groups TEXT NOT NULL DEFAULT '[]',
-  -- [{ id, label, hint, price_cents, max_qty }]
-  addons TEXT NOT NULL DEFAULT '[]',
-  min_qty INTEGER NOT NULL DEFAULT 1, max_qty INTEGER NOT NULL DEFAULT 10, default_qty INTEGER NOT NULL DEFAULT 1,
-  -- The booking page offered once it is paid for, e.g. the album design call.
-  followup_event_type_id INTEGER REFERENCES event_types(id) ON DELETE SET NULL,
-  settings TEXT NOT NULL DEFAULT '{}',
-  active INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  UNIQUE (business_id, slug)
-);
--- One row per cart line, priced by the server. The order's amount is the sum of these, never a
--- number the browser sent.
-CREATE TABLE IF NOT EXISTS order_items (
-  id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
-  product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
-  kind TEXT NOT NULL,
-  label TEXT NOT NULL, detail TEXT,
-  unit_cents INTEGER NOT NULL DEFAULT 0, qty INTEGER NOT NULL DEFAULT 1,
-  sort INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items (order_id);
 -- Custom forms: an ordered list of steps the customer walks through.
 --
 -- A form composes what already exists rather than keeping its own copy: a schedule step points at a
--- booking page for its hours and hosts, a product step points at a product for its options and
--- prices. One source of truth for a calendar, one for a price.
---
--- Where the payment step sits decides how the money works. Payment after a calendar step means the
--- slot is held while they pay, the way a session does it. Payment before means they buy first and
--- book afterwards, the way an album does. There is no separate setting; the order is the setting.
+-- booking page for its hours and hosts. One source of truth for a calendar.
 CREATE TABLE IF NOT EXISTS forms (
   id INTEGER PRIMARY KEY, business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
   slug TEXT NOT NULL, name TEXT NOT NULL, description TEXT,
@@ -231,10 +173,6 @@ CREATE TABLE IF NOT EXISTS forms (
   submissions INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE (business_id, slug)
-);
-CREATE TABLE IF NOT EXISTS provider_events (
-  provider TEXT NOT NULL, event_id TEXT NOT NULL, kind TEXT,
-  received_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (provider, event_id)
 );
 -- One rule: when to write, who to, and what to say. Conditions are stored as JSON id lists;
 -- an empty list means "applies to everything", which is the common case.
@@ -290,8 +228,7 @@ CREATE TABLE IF NOT EXISTS app_settings (
 -- Credentials belonging to one business.
 --
 -- app_settings stays as the platform-wide fallback, so nothing that works today stops working:
--- a key saved here wins for this business, then the platform default, then the environment. That
--- chain is what lets a second company bring its own payment account without touching the first.
+-- a key saved here wins for this business, then the platform default, then the environment.
 CREATE TABLE IF NOT EXISTS business_credentials (
   business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
   key TEXT NOT NULL, value TEXT, secret INTEGER NOT NULL DEFAULT 0,
@@ -310,24 +247,15 @@ raw.exec(SCHEMA);
 for (const sql of [
   "ALTER TABLE memberships ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
   'ALTER TABLE memberships ADD COLUMN invite_token TEXT',
-  // 'call' is a plain scheduled call; 'session' is a sellable session with a price on it.
+  // 'call' is a plain scheduled call; 'session' is booked on a market or designer calendar.
   "ALTER TABLE event_types ADD COLUMN kind TEXT NOT NULL DEFAULT 'call'",
   // A login-less user row that exists only to own a calendar (a market, or the album designer).
   'ALTER TABLE users ADD COLUMN is_resource INTEGER NOT NULL DEFAULT 0',
-  // Which custom form a lead or order came through, so a form can report its own results.
+  // Which custom form a lead came through, so a form can report its own results.
   'ALTER TABLE leads ADD COLUMN form_id INTEGER',
-  'ALTER TABLE orders ADD COLUMN form_id INTEGER',
   // Whether this service takes part in combination pricing. Add-ons and ready-made packages do
   // not: a guest book sitting in the basket must never stop a combination from being recognised.
   'ALTER TABLE services ADD COLUMN bundle_eligible INTEGER NOT NULL DEFAULT 1',
-  // Orders grew from one session to a cart of lines; 'product' orders are scheduled after payment,
-  // not before, so the slot columns stay empty for them.
-  'ALTER TABLE orders ADD COLUMN product_id INTEGER',
-  "ALTER TABLE orders ADD COLUMN order_kind TEXT NOT NULL DEFAULT 'session'",
-  'ALTER TABLE orders ADD COLUMN schedule_token TEXT',
-  // An album's price is a combination (size x cover), not a single choice, so the price lives in a
-  // rule table rather than on one option. Extra spreads are priced the same way, by size and paper.
-  "ALTER TABLE products ADD COLUMN price_rules TEXT NOT NULL DEFAULT '[]'",
   // Which team runs this booking page, and what kind of booking it is. Set on the page rather than
   // worked out from whoever is hosting: a page can draw hosts from more than one team, and moving a
   // person between teams should not silently re-file the pages they happen to cover.
@@ -348,6 +276,37 @@ for (const sql of [
   // moving a Zoom call onto the phone.
   'ALTER TABLE bookings ADD COLUMN place_id TEXT',
 ]) { try { raw.exec(sql); } catch { /* column already exists */ } }
+
+// Booklane no longer takes payments. Drop what the shop, the paid sessions and the card providers
+// left behind. Children before parents, so the foreign keys never see a dangling row. Every step is
+// IF EXISTS, so this is a no-op on a database that never had them and on every boot after the first.
+for (const sql of [
+  'DROP TABLE IF EXISTS order_items',
+  'DROP TABLE IF EXISTS orders',
+  'DROP TABLE IF EXISTS products',
+  'DROP TABLE IF EXISTS provider_events',
+  // Card-provider keys and the old $1 test result. Nothing reads them any more.
+  "DELETE FROM app_settings WHERE substr(key, 1, 7) IN ('STRIPE_', 'SQUARE_') OR key IN ('PAYMENT_PROVIDER', 'stripe.last_diagnostic')",
+  "DELETE FROM business_credentials WHERE substr(key, 1, 7) IN ('STRIPE_', 'SQUARE_') OR key = 'PAYMENT_PROVIDER'",
+]) { try { raw.exec(sql); } catch (e) { console.error('[db] cleanup step failed:', e.message); } }
+
+// Sessions saved while they could be sold carry a price and checkout copy, and their booking-number
+// setting meant "required when they say they already paid". With no payment branch left, that
+// setting would demand a number from every new customer, so it becomes optional here. Only rows
+// that still have a price key are touched, which makes this run once per session and never again.
+try {
+  const RETIRED = ['price_cents', 'currency', 'booked_question', 'booked_yes_label', 'booked_no_label', 'booked_note',
+    'price_heading', 'price_blurb', 'includes', 'pay_cta', 'free_cta', 'paid_note', 'hold_minutes'];
+  for (const row of raw.prepare("SELECT id, settings FROM event_types WHERE kind = 'session'").all()) {
+    let settings;
+    try { settings = JSON.parse(row.settings || '{}'); } catch { continue; }
+    const sess = settings && settings.session;
+    if (!sess || !Object.prototype.hasOwnProperty.call(sess, 'price_cents')) continue;
+    for (const k of RETIRED) delete sess[k];
+    sess.booking_number_required = false;
+    raw.prepare('UPDATE event_types SET settings = ? WHERE id = ?').run(JSON.stringify(settings), row.id);
+  }
+} catch (e) { console.error('[db] session settings cleanup failed:', e.message); }
 
 const cache = new Map();
 function stmt(sql) {

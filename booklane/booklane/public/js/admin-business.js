@@ -260,7 +260,7 @@
           <label class="label">Ask for in the contract request</label><div class="stack" style="margin-top:8px">${Object.entries({ billing_address: 'Billing address', venue_address: 'Venue address', event_start_time: 'Start time', event_end_time: 'End time', planner_name: 'Planner name' }).map(([k, v]) => A.toggle(`settings.quote.contract_fields.${k}`, Q.contract_fields[k], v)).join('')}</div></div></div></div>`;
     } else if (tab === 'integrations') {
       const BB = s.integrations.boothbook, W = s.integrations.webhook;
-      // Stripe, Twilio and Resend live above BoothBook. They are global credentials with their own
+      // Twilio and Resend live above BoothBook. They are global credentials with their own
       // save buttons, so they are filled in after paint rather than riding the settings form.
       providerHost = '<div id="provider-cards"></div>';
       const events = ['lead.partial', 'lead.completed', 'booking.created', 'booking.cancelled', 'quote.submitted', 'contract.requested', 'callback.requested'];

@@ -31,15 +31,15 @@ function createBusiness({ name, timezone, email, ownerId, withDefaults = true })
 }
 
 /**
- * Create one sellable session and point it at a set of calendars.
+ * Create one session and point it at a set of calendars.
  * Idempotent on slug, so running the seed twice does not duplicate anything.
  */
-function createSessionProduct(business, { name, slug, description, duration_min = 90, price_cents = 0, location_type = 'in_person', calendarIds = [], session = {} }) {
+function createSessionProduct(business, { name, slug, description, duration_min = 90, location_type = 'in_person', calendarIds = [], session = {} }) {
   const S = require('./sessions');
   const finalSlug = slugify(slug || name) || 'session';
   let et = db.get('SELECT * FROM event_types WHERE business_id = ? AND slug = ?', business.id, finalSlug);
   if (!et) {
-    const settings = { session: deepMerge(SESSION_SETTINGS, { price_cents, currency: business.settings?.quote?.currency || 'USD', ...session }) };
+    const settings = { session: deepMerge(SESSION_SETTINGS, session) };
     const sort = (db.get('SELECT MAX(sort) m FROM event_types WHERE business_id = ?', business.id) || {}).m || 0;
     const { lastId } = db.run(`INSERT INTO event_types (business_id, slug, name, description, duration_min, location_type,
         buffer_after, min_notice_min, max_days_ahead, slot_interval_min, kind, steps, settings, sort)
@@ -53,7 +53,7 @@ function createSessionProduct(business, { name, slug, description, duration_min 
 }
 
 /**
- * Set up the markets and the sellable sessions. Safe to run on an existing business: calendars and
+ * Set up the markets and the sessions. Safe to run on an existing business: calendars and
  * products are matched by slug, so nothing is duplicated and nothing already configured is reset.
  */
 function seedSessions(business, { markets = DEFAULT_MARKETS, products = DEFAULT_SESSION_PRODUCTS, withAlbum = true } = {}) {
@@ -89,20 +89,12 @@ function seedSessions(business, { markets = DEFAULT_MARKETS, products = DEFAULT_
     }
     const before = db.get('SELECT 1 FROM event_types WHERE business_id = ? AND slug = ?', business.id, 'photo-album');
     createSessionProduct(business, {
-      name: 'Photo Album', slug: 'photo-album', duration_min: 60, price_cents: 0, location_type: 'zoom',
-      description: 'Choose your album, then sit down with our designer to lay it out page by page.',
+      name: 'Album Design Session', slug: 'photo-album', duration_min: 60, location_type: 'zoom',
+      description: 'Sit down with our designer to lay out your album page by page.',
       calendarIds: [designer.id],
-      session: {
-        choose_label: 'Who are you designing with?',
-        booked_question: 'Have you already paid for your album?',
-        booked_yes_label: 'Yes, it’s on my contract',
-        booked_no_label: 'Not yet',
-        price_blurb: 'Buy your album now, then book your design session on the next screen.',
-        pay_cta: 'Buy the album and pick a time',
-        free_cta: 'Book my design session',
-      },
+      session: { choose_label: 'Who are you designing with?', book_cta: 'Book my design session' },
     });
-    if (!before) created.products.push('Photo Album');
+    if (!before) created.products.push('Album Design Session');
   }
   return created;
 }

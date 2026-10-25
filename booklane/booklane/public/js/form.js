@@ -1,8 +1,8 @@
 /* A custom form: whatever steps the admin put on it, walked in order.
-   Questions, contact details, a note, a live date check, a calendar, album options, a payment.
+   Questions, contact details, a note, a live date check, a calendar.
 
-   The page never decides money or availability. Totals come back from the server for every change,
-   and the calendar comes from the booking page the form names, so what is shown is what is real. */
+   The page never decides availability: the calendar comes from the booking page the form names,
+   so what is shown is what is real. */
 (function () {
   'use strict';
   const { esc, api, icons, $, $$ } = BL;
@@ -17,10 +17,6 @@
     answers: {},
     contact: { first_name: '', last_name: '', email: '', phone: '', sms_consent: false },
     slot: null,
-    options: {},          // product step: groupId -> choiceId
-    addons: {},           // product step: addonId -> qty
-    qty: 1,
-    quote: null,
     avail: null,          // the date check's answer
     leadToken: null,
     busy: false,
@@ -29,11 +25,8 @@
   };
   const app = document.getElementById('app');
 
-  const productStep = () => steps.find((s) => s.type === 'product' && s.product) || null;
-  const prod = () => (productStep() || {}).product || null;
   const cur = () => steps[st.i];
   const isLast = () => st.i === steps.length - 1;
-  const cents = (n) => `$${(n / 100).toFixed(2).replace(/\.00$/, '')}`;
 
   // ---------- lead capture, same as every other flow ----------
   const saver = BL.createSaver({
@@ -54,36 +47,11 @@
     ensureLead().then((t) => t && saver.queue(Object.assign({ step_index: st.i, step_key: cur().key, step_total: steps.length }, patch), now));
   }
 
-  // ---------- product pricing, server-side ----------
-  let quoteSeq = 0;
-  async function refreshQuote() {
-    const p = prod();
-    if (!p) return;
-    const missing = p.option_groups.filter((g) => liveGroup(g) && g.required && !st.options[g.id]);
-    if (missing.length) { st.quote = null; paintTotals(); return; }
-    const seq = ++quoteSeq;
-    try {
-      const r = await api('POST', `/api/public/b/${biz.slug}/f/${form.slug}/quote`, { selection: { options: st.options, addons: st.addons, qty: st.qty } });
-      if (seq !== quoteSeq) return;
-      st.quote = r;
-    } catch (e) {
-      if (seq !== quoteSeq) return;
-      st.quote = null;
-      if (e.status !== 422) st.error = e.message;
-    }
-    paintTotals();
-  }
-  const liveGroup = (g) => !g.applies_to.length || g.applies_to.some((id) => Object.values(st.options).map(String).includes(String(id)));
-
   // ---------- pieces ----------
   function side() {
-    const q = st.quote;
     return `<aside class="booker-side">
       <div class="biz">${BL.logo(biz)}<div class="biz-name">${esc(biz.name)}</div></div>
       <div><h1 class="event-title">${esc(form.name)}</h1>${form.description ? `<p class="muted desc" style="margin:8px 0 0">${esc(form.description)}</p>` : ''}</div>
-      ${q ? `<div class="cart-side">${q.lines.map((l) => `
-        <div class="cart-line"><span>${esc(l.label)}${l.qty > 1 ? ` <span class="muted">x${l.qty}</span>` : ''}${l.detail ? `<span class="cart-detail">${esc(l.detail)}</span>` : ''}</span><span>${esc(cents(l.line_cents))}</span></div>`).join('')}
-        <div class="cart-line cart-total"><span>Total</span><span>${esc(cents(q.total_cents))}</span></div></div>` : ''}
       ${st.slot ? `<div class="selected-time">${esc(BL.fmtDate(st.slot, st.tz, { weekday: 'short', month: 'short' }))}, ${esc(BL.fmtTime(st.slot, st.tz))}</div>` : ''}
       <ul class="trust">${(biz.settings.trust_points || []).map((t) => `<li>${esc(t)}</li>`).join('')}</ul>
     </aside>`;
@@ -126,42 +94,6 @@
     </form>`;
   }
 
-  function renderProduct(step) {
-    const p = step.product;
-    if (!p) return '<p class="muted">This product is not available right now.</p>';
-    const groups = p.option_groups.filter(liveGroup);
-    return groups.map((g) => `
-      <div class="opt-group">
-        ${groups.length > 1 ? `<h3 class="opt-group-title">${esc(g.label)}</h3>` : ''}
-        <div class="options ${g.layout === 'cards' || g.layout === 'swatches' ? 'list' : 'list'}">${g.choices.map((ch) => `
-          <label class="opt radio${st.options[g.id] === ch.id ? ' is-on' : ''}">
-            <input type="radio" name="g-${esc(g.id)}" value="${esc(ch.id)}" data-opt="${esc(g.id)}"${st.options[g.id] === ch.id ? ' checked' : ''}>
-            <span class="tick"></span><span class="opt-stack"><span>${esc(ch.label)}</span></span>
-            ${ch.price_cents > 0 ? `<span class="opt-price">${esc(cents(ch.price_cents))}</span>` : ''}
-          </label>`).join('')}</div>
-      </div>`).join('')
-      + (p.addons.length ? `<div class="opt-group"><h3 class="opt-group-title">${esc(p.copy.addons_label || 'Anything else?')}</h3>
-        <div class="options list">${p.addons.map((a) => {
-    const n = Number(st.addons[a.id] || 0);
-    return `<div class="opt check${n > 0 ? ' is-on' : ''}">
-          <label class="opt-main"><input type="checkbox" data-addon="${esc(a.id)}"${n > 0 ? ' checked' : ''}><span class="tick"></span><span class="opt-stack"><span>${esc(a.label)}</span></span></label>
-          <span class="opt-right">${a.max_qty > 1 && n > 0 ? `<input class="input input-qty" type="number" min="1" max="${a.max_qty}" value="${n}" data-addon-qty="${esc(a.id)}" aria-label="How many ${esc(a.label)}">` : ''}<span class="opt-price">${a.price_cents > 0 ? esc(cents(a.price_cents)) : ''}</span></span>
-        </div>`;
-  }).join('')}</div></div>` : '');
-  }
-
-  function renderPayment(step) {
-    const total = st.quote ? st.quote.total_cents : (step.source === 'fixed' ? step.amount_cents : null);
-    return `<div class="price-panel">
-      ${total === null ? '<p class="muted">Go back and finish choosing.</p>' : `
-        <div class="price-figure"><div class="price-amount">${esc(cents(total))}</div>
-        <div class="muted">${esc(step.label || form.name)}</div></div>`}
-      ${st.quote ? `<div class="cart">${st.quote.lines.map((l) => `<div class="cart-line"><span>${esc(l.label)}${l.detail ? `<span class="cart-detail">${esc(l.detail)}</span>` : ''}${l.qty > 1 ? ` <span class="muted">x${l.qty}</span>` : ''}</span><span>${esc(cents(l.line_cents))}</span></div>`).join('')}
-        <div class="cart-line cart-total"><span>Total</span><span>${esc(cents(st.quote.total_cents))}</span></div></div>` : ''}
-      ${form.shape.schedules_after_payment ? '<p>You will pick a time on the next screen, once this is paid for.</p>' : ''}
-    </div>`;
-  }
-
   function renderAvailability(step) {
     const a = st.avail;
     const when = st.answers[step.date_question_id];
@@ -184,24 +116,12 @@
     if (step.type === 'message') return `<div class="price-panel"><p>${esc(step.body || '')}</p></div>`;
     if (step.type === 'availability') return renderAvailability(step);
     if (step.type === 'schedule') return '<div id="scheduler"></div>';
-    if (step.type === 'product') return renderProduct(step);
-    if (step.type === 'payment') return renderPayment(step);
     return '';
   }
 
   function ctaLabel() {
     const step = cur();
-    if (isLast()) {
-      if (step.type === 'payment') return 'Pay now';
-      return C.submit_cta || 'Submit';
-    }
-    return 'Continue';
-  }
-
-  function paintTotals() {
-    const sideEl = $('.booker-side', app);
-    if (sideEl) sideEl.outerHTML = side();
-    if (cur().type === 'payment') { const b = $('.step-body', app); if (b) b.innerHTML = renderPayment(cur()); }
+    return isLast() ? (C.submit_cta || 'Submit') : 'Continue';
   }
 
   function render() {
@@ -277,13 +197,7 @@
       if (f.phone === 'required' && st.contact.phone.replace(/\D/g, '').length < 7) errs.phone = 'Enter a valid phone number';
       if (Object.keys(errs).length) { BL.fieldErrors(app, errs); return 'Please fix the highlighted fields.'; }
     }
-    if (step.type === 'product') {
-      const p = step.product;
-      const missing = (p ? p.option_groups : []).filter(liveGroup).find((g) => g.required && !st.options[g.id]);
-      if (missing) return `Please choose ${String(missing.label || 'an option').toLowerCase()}.`;
-    }
     if (step.type === 'schedule' && !st.slot) return 'Pick a time to continue.';
-    if (step.type === 'payment' && !st.quote && step.source === 'product') return 'Go back and finish choosing.';
     return null;
   }
 
@@ -299,7 +213,6 @@
     }
     capture({}, false);
     render();
-    if (cur().type === 'payment') refreshQuote();
   }
 
   async function submit() {
@@ -311,9 +224,7 @@
         answers: st.answers,
         start: st.slot,
         timezone: st.tz,
-        selection: { options: st.options, addons: st.addons, qty: st.qty },
       });
-      if (r.kind === 'checkout' && r.checkout_url) { location.href = r.checkout_url; return; }
       if (r.kind === 'booked' && r.redirect) { location.href = r.redirect; return; }
       if (r.redirect) { location.href = r.redirect; return; }
       done(r);
@@ -366,26 +277,10 @@
       const fl = t.closest('.field');
       if (fl && fl.classList.contains('has-error')) { fl.classList.remove('has-error'); const fe = $('.field-error', fl); if (fe) fe.remove(); }
       capture({ contact: { [t.name]: st.contact[t.name] } }, e.type === 'change' || t.type === 'checkbox');
-    } else if (t.hasAttribute('data-opt')) {
-      const gid = t.getAttribute('data-opt');
-      st.options[gid] = t.value;
-      const p = prod();
-      if (p) { const live = new Set(p.option_groups.filter(liveGroup).map((g) => g.id)); for (const k of Object.keys(st.options)) if (!live.has(k)) delete st.options[k]; }
-      render(); refreshQuote();
-    } else if (t.hasAttribute('data-addon')) {
-      const id = t.getAttribute('data-addon');
-      if (t.checked) st.addons[id] = Math.max(1, Number(st.addons[id] || 1)); else delete st.addons[id];
-      render(); refreshQuote();
-    } else if (t.hasAttribute('data-addon-qty')) {
-      const id = t.getAttribute('data-addon-qty');
-      st.addons[id] = Math.max(1, Number(t.value) || 1);
-      refreshQuote();
     }
   }
   app.addEventListener('input', onInput);
   app.addEventListener('change', (e) => { if (e.target.type === 'checkbox' || e.target.type === 'radio' || e.target.tagName === 'SELECT' || e.target.type === 'number') onInput(e); });
 
-  if (D.cancelled) st.error = 'Your payment was cancelled, so nothing was charged. Your answers are still here.';
   render();
-  if (cur().type === 'payment') refreshQuote();
 })();

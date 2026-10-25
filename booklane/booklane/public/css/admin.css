@@ -148,8 +148,7 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
   .table-wrap { margin: 0 -20px; }
 }
 
-/* Sessions: order status pills and the payment-setup notice */
-.pill.paid, .pill.not_required { background: #e6f6ee; color: #17744a; }
+/* Status pills and the warning box */
 .pill.pending { background: #fff4e5; color: #8a4b00; }
 .pill.expired { background: #f3f1f1; color: #8a7f7f; }
 .pill.refunded { background: #ecebff; color: #4633c9; }

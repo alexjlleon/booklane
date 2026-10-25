@@ -533,43 +533,20 @@ test('short CTA: the embed passes an answer through and the lead is saved before
 });
 
 // ---------------------------------------------------------------------------
-// Sellable sessions: markets, the two branches, slot holds and Stripe
+// Sessions: markets, booking on a market's own calendar, and no payments anywhere
 // ---------------------------------------------------------------------------
-const crypto = require('node:crypto');
-const stripeLib = require('../src/lib/stripe');
-
-const WHSEC = 'whsec_test_secret';
-let checkoutCalls = [];
-
-function signWebhook(bodyStr, secret = WHSEC, tsOffset = 0) {
-  const ts = Math.floor(Date.now() / 1000) + tsOffset;
-  const sig = crypto.createHmac('sha256', secret).update(`${ts}.${bodyStr}`).digest('hex');
-  return `t=${ts},v1=${sig}`;
-}
-const postWebhook = (event, header) => req('POST', '/api/public/stripe/webhook', event, { headers: { 'Stripe-Signature': header === undefined ? signWebhook(JSON.stringify(event)) : header } });
-
-// Stub only the two calls that would leave the machine. Everything else is the real code path.
-function stubStripe() {
-  process.env.STRIPE_SECRET_KEY = 'sk_test_stubbed';
-  process.env.STRIPE_WEBHOOK_SECRET = WHSEC;
-  checkoutCalls = [];
-  stripeLib.createCheckoutSession = async (opts) => {
-    checkoutCalls.push(opts);
-    return { id: `cs_test_${checkoutCalls.length}`, url: `https://checkout.stripe.test/${checkoutCalls.length}` };
-  };
-  stripeLib.retrieveCheckoutSession = async (id) => ({ id, status: 'open', payment_status: 'unpaid' });
-}
-
 let sessSlug = 'engagement-session';
 let markets = [];
+// These book more times in a few seconds than a visitor would in a week, so the per-IP booking
+// limit is reset between tests rather than loosened for everyone.
+const resetBookLimits = () => require('../src/lib/security').resetRateLimits();
 
-test('seeding creates the five markets, the four sessions and the album flow', async () => {
-  stubStripe();
+test('seeding creates the five markets, the four sessions and the album design session', async () => {
   const r = await req('POST', '/api/admin/sessions/seed', {}, { cookie: ownerCookie });
   assert.equal(r.status, 200, JSON.stringify(r.data));
   assert.deepEqual(r.data.calendars, ['Houston', 'Austin', 'San Antonio', 'Dallas / Fort Worth', 'Phoenix', 'Album Designer']);
   assert.ok(r.data.products.includes('Engagement Session'));
-  assert.ok(r.data.products.includes('Photo Album'));
+  assert.ok(r.data.products.includes('Album Design Session'));
 
   // Running it again must not duplicate anything.
   const again = await req('POST', '/api/admin/sessions/seed', {}, { cookie: ownerCookie });
@@ -578,26 +555,26 @@ test('seeding creates the five markets, the four sessions and the album flow', a
 
   const list = await req('GET', '/api/admin/sessions', null, { cookie: ownerCookie });
   const eng = list.data.sessions.find((x) => x.slug === sessSlug);
-  assert.equal(eng.price_cents, 49500, 'engagement session is $495');
+  assert.equal(eng.price_cents, undefined, 'a session carries no price');
+  assert.equal(eng.session.price_cents, undefined);
   assert.equal(eng.calendar_ids.length, 5, 'offered in all five markets');
   const album = list.data.sessions.find((x) => x.slug === 'photo-album');
-  assert.equal(album.calendar_ids.length, 1, 'the album books against one designer');
+  assert.equal(album.calendar_ids.length, 1, 'the album design session books against one designer');
 
   markets = (await req('GET', '/api/admin/session-calendars', null, { cookie: ownerCookie })).data;
   assert.equal(markets.filter((m) => m.kind === 'market').length, 5);
   assert.ok(markets.every((m) => m.has_hours), 'every calendar starts with hours');
 });
 
-test('the public session page offers the city choice and the price', async () => {
+test('the public session page offers the city choice and nothing to pay', async () => {
   const r = await req('GET', `/api/public/b/${bizSlug}/s/${sessSlug}`);
   assert.equal(r.status, 200);
   const s = r.data.session;
-  assert.equal(s.price_display, '$495');
   assert.equal(s.calendars.length, 5);
   assert.match(s.labels.choose_label, /city/i);
-  assert.equal(s.payable, true, 'Stripe is stubbed in, so it is buyable');
+  for (const k of ['price', 'price_cents', 'price_display', 'payable', 'payments_ready']) assert.equal(s[k], undefined, `${k} is gone`);
 
-  // A single-calendar session hides the choice, which is what makes the album flow short.
+  // A single-calendar session hides the choice.
   const album = await req('GET', `/api/public/b/${bizSlug}/s/photo-album`);
   assert.equal(album.data.session.calendars.length, 1);
 
@@ -615,180 +592,108 @@ async function firstSlot(slug, calendar, skip = 0) {
 }
 
 test('each market shows only its own calendar', async () => {
+  resetBookLimits();
   const hou = await firstSlot(sessSlug, 'houston');
   const contact = { first_name: 'Dana', last_name: 'Ruiz', email: 'dana@example.com', phone: '8325551234' };
-  const booked = await req('POST', `/api/public/b/${bizSlug}/s/${sessSlug}/claim`,
-    { calendar: 'houston', start: hou.start, timezone: 'America/Chicago', contact, booking_number: ' wu-1234 ' });
+  const booked = await req('POST', `/api/public/b/${bizSlug}/s/${sessSlug}/book`,
+    { calendar: 'houston', start: hou.start, timezone: 'America/Chicago', contact });
   assert.equal(booked.status, 200, JSON.stringify(booked.data));
+  assert.match(booked.data.redirect, /^\/booking\//);
 
   // The same instant is still free in Austin: separate calendars, separate diaries.
   const austin = await req('GET', `/api/public/b/${bizSlug}/s/${sessSlug}/slots?calendar=austin&from=${hou.day}&to=${hou.day}&tz=America/Chicago`);
   assert.ok((austin.data.days[hou.day] || []).includes(hou.start), 'booking Houston must not block Austin');
 
-  // But Houston itself no longer offers it.
+  // But Houston itself no longer offers it, and a second booking for it is refused.
   const again = await req('GET', `/api/public/b/${bizSlug}/s/${sessSlug}/slots?calendar=houston&from=${hou.day}&to=${hou.day}&tz=America/Chicago`);
   assert.ok(!(again.data.days[hou.day] || []).includes(hou.start), 'the booked time is gone from Houston');
+  const twice = await req('POST', `/api/public/b/${bizSlug}/s/${sessSlug}/book`,
+    { calendar: 'houston', start: hou.start, timezone: 'America/Chicago', contact: { ...contact, email: 'second@example.com' } });
+  assert.equal(twice.status, 409, 'two people must never get the same time');
 
-  // The booking number is recorded, upper-cased and trimmed, and flagged for matching.
-  const order = db.get("SELECT * FROM orders WHERE already_booked = 1 ORDER BY id DESC");
-  assert.equal(order.booking_number, 'WU-1234');
-  assert.equal(order.status, 'not_required');
-  assert.equal(order.amount_cents, 0);
-  const bk = db.get('SELECT * FROM bookings WHERE id = ?', order.booking_id);
-  assert.match(JSON.parse(bk.answers).payment, /already booked/i);
-  assert.equal(JSON.parse(bk.answers).location, 'Houston');
+  const bk = db.get("SELECT * FROM bookings WHERE email = 'dana@example.com'");
+  const answers = JSON.parse(bk.answers);
+  assert.equal(answers.location, 'Houston');
+  assert.equal(answers.session, 'Engagement Session');
+  assert.equal(answers.payment, undefined, 'nothing about payment is written on the booking');
 });
 
-test('a missing booking number is refused when it is required', async () => {
-  const hou = await firstSlot(sessSlug, 'houston', 1);
-  const r = await req('POST', `/api/public/b/${bizSlug}/s/${sessSlug}/claim`,
-    { calendar: 'houston', start: hou.start, timezone: 'America/Chicago', contact: { first_name: 'No', last_name: 'Number', email: 'nn@example.com', phone: '8325550000' } });
-  assert.equal(r.status, 422);
-  assert.ok(r.data.details.booking_number, 'the field is called out by name');
-});
-
-let orderToken, heldStart, heldDay;
-
-test('buying holds the slot, and a second buyer cannot take it', async () => {
+test('the old /claim path still books, so an open page survives the deploy', async () => {
+  resetBookLimits();
   const slot = await firstSlot(sessSlug, 'phoenix');
-  heldStart = slot.start; heldDay = slot.day;
-  const contact = { first_name: 'Sam', last_name: 'Ortiz', email: 'sam@example.com', phone: '6025551111' };
-  const r = await req('POST', `/api/public/b/${bizSlug}/s/${sessSlug}/checkout`,
-    { calendar: 'phoenix', start: heldStart, timezone: 'America/Phoenix', contact });
-  assert.equal(r.status, 200, JSON.stringify(r.data));
-  assert.match(r.data.checkout_url, /^https:\/\/checkout\.stripe\.test\//);
-  orderToken = r.data.order_token;
-
-  // Stripe was asked for the right amount, in cents, with the order token attached.
-  const call = checkoutCalls[checkoutCalls.length - 1];
-  assert.equal(call.amountCents, 49500);
-  assert.equal(call.metadata.order_token, orderToken);
-  assert.match(call.productName, /Engagement Session .* Phoenix/);
-  assert.match(call.successUrl, new RegExp(`/session/${orderToken}`));
-
-  // Nothing is booked yet, but the time is off the market.
-  const order = db.get('SELECT * FROM orders WHERE token = ?', orderToken);
-  assert.equal(order.status, 'pending');
-  assert.equal(order.booking_id, null);
-  const slots = await req('GET', `/api/public/b/${bizSlug}/s/${sessSlug}/slots?calendar=phoenix&from=${heldDay}&to=${heldDay}&tz=America/Phoenix`);
-  assert.ok(!(slots.data.days[heldDay] || []).includes(heldStart), 'a held slot is not offered to anyone else');
-
-  const second = await req('POST', `/api/public/b/${bizSlug}/s/${sessSlug}/checkout`,
-    { calendar: 'phoenix', start: heldStart, timezone: 'America/Phoenix', contact: { first_name: 'Other', last_name: 'Buyer', email: 'other@example.com', phone: '6025552222' } });
-  assert.equal(second.status, 409, 'two people must never buy the same time');
-});
-
-test('nobody can skip payment by claiming a priced session is free', async () => {
-  const slot = await firstSlot(sessSlug, 'austin');
   const r = await req('POST', `/api/public/b/${bizSlug}/s/${sessSlug}/claim`,
-    { calendar: 'austin', start: slot.start, timezone: 'America/Chicago', already_booked: false,
-      contact: { first_name: 'Free', last_name: 'Rider', email: 'free@example.com', phone: '5125550000' } });
-  assert.equal(r.status, 402, 'the free path is refused on a session that costs money');
-  assert.equal(db.get("SELECT COUNT(*) c FROM orders WHERE customer_email = 'free@example.com'").c, 0);
+    { calendar: 'phoenix', start: slot.start, timezone: 'America/Phoenix', already_booked: false,
+      contact: { first_name: 'Sam', last_name: 'Ortiz', email: 'sam@example.com', phone: '6025551111' } });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
 });
 
-test('a signed webhook books the held slot, and a replay changes nothing', async () => {
-  const order = db.get('SELECT * FROM orders WHERE token = ?', orderToken);
-  const event = { id: 'evt_book_1', type: 'checkout.session.completed', data: { object: {
-    id: order.provider_session_id, client_reference_id: orderToken, payment_status: 'paid', amount_total: 49500, payment_intent: 'pi_test_1',
-  } } };
+test('a booking number is asked for only when the session is set to ask, and required only when set', async () => {
+  resetBookLimits();
+  const eng = (await req('GET', '/api/admin/sessions', null, { cookie: ownerCookie })).data.sessions.find((x) => x.slug === sessSlug);
+  assert.equal(eng.session.ask_booking_number, false, 'off by default now');
 
-  const ok = await postWebhook(event);
+  const on = await req('PATCH', `/api/admin/sessions/${eng.id}`, { name: eng.name, session: { ask_booking_number: true, booking_number_required: true } }, { cookie: ownerCookie });
+  assert.equal(on.status, 200, JSON.stringify(on.data));
+  assert.equal(on.data.session.booking_number_required, true);
+
+  const hou = await firstSlot(sessSlug, 'houston', 1);
+  const missing = await req('POST', `/api/public/b/${bizSlug}/s/${sessSlug}/book`,
+    { calendar: 'houston', start: hou.start, timezone: 'America/Chicago', contact: { first_name: 'No', last_name: 'Number', email: 'nn@example.com', phone: '8325550000' } });
+  assert.equal(missing.status, 422);
+  assert.ok(missing.data.details.booking_number, 'the field is called out by name');
+
+  const ok = await req('POST', `/api/public/b/${bizSlug}/s/${sessSlug}/book`,
+    { calendar: 'houston', start: hou.start, timezone: 'America/Chicago', booking_number: ' wu-1234 ',
+      contact: { first_name: 'Has', last_name: 'Number', email: 'hn@example.com', phone: '8325550001' } });
   assert.equal(ok.status, 200, JSON.stringify(ok.data));
-  assert.equal(ok.data.result, 'booked');
+  const bk = db.get("SELECT answers FROM bookings WHERE email = 'hn@example.com'");
+  assert.equal(JSON.parse(bk.answers).booking_number, 'WU-1234', 'upper-cased and trimmed');
 
-  const after = db.get('SELECT * FROM orders WHERE token = ?', orderToken);
-  assert.equal(after.status, 'paid');
-  assert.ok(after.booking_id, 'the booking exists');
-  assert.equal(after.provider_payment_intent, 'pi_test_1');
-  const bk = db.get('SELECT * FROM bookings WHERE id = ?', after.booking_id);
-  assert.equal(bk.start_utc, heldStart);
-  assert.match(JSON.parse(bk.answers).payment, /\$495/);
-  assert.equal(bk.email, 'sam@example.com');
-
-  const replay = await postWebhook(event);
-  assert.equal(replay.data.result, 'duplicate', 'Stripe redelivers; we must not double-book');
-  assert.equal(db.get("SELECT COUNT(*) c FROM bookings WHERE start_utc = ? AND host_user_id = ?", heldStart, bk.host_user_id).c, 1);
-
-  // The customer's return page now knows where to send them.
-  const poll = await req('GET', `/api/public/orders/${orderToken}`);
-  assert.equal(poll.data.order.status, 'paid');
-  assert.match(poll.data.order.redirect, /^\/booking\//);
+  await req('PATCH', `/api/admin/sessions/${eng.id}`, { name: eng.name, session: { ask_booking_number: false, booking_number_required: false } }, { cookie: ownerCookie });
 });
 
-test('a webhook with a bad, stale or missing signature is rejected outright', async () => {
-  const body = { id: 'evt_forged', type: 'checkout.session.completed', data: { object: { client_reference_id: orderToken, payment_status: 'paid' } } };
-  const str = JSON.stringify(body);
-
-  const forged = await postWebhook(body, `t=${Math.floor(Date.now() / 1000)},v1=${'0'.repeat(64)}`);
-  assert.equal(forged.status, 400, 'a forged signature must not be trusted');
-
-  const wrongSecret = await postWebhook(body, signWebhook(str, 'whsec_not_ours'));
-  assert.equal(wrongSecret.status, 400);
-
-  const stale = await postWebhook(body, signWebhook(str, WHSEC, -4000));
-  assert.equal(stale.status, 400, 'an old timestamp must not be replayable');
-
-  const none = await postWebhook(body, '');
-  assert.equal(none.status, 400);
-
-  // None of those were recorded, so a later genuine delivery still works.
-  assert.equal(db.get("SELECT COUNT(*) c FROM provider_events WHERE event_id = 'evt_forged'").c, 0);
-});
-
-test('an abandoned checkout gives the slot back', async () => {
-  const slot = await firstSlot(sessSlug, 'san-antonio');
-  const r = await req('POST', `/api/public/b/${bizSlug}/s/${sessSlug}/checkout`,
-    { calendar: 'san-antonio', start: slot.start, timezone: 'America/Chicago', contact: { first_name: 'Gone', last_name: 'Away', email: 'gone@example.com', phone: '2105550000' } });
-  assert.equal(r.status, 200);
-  const token = r.data.order_token;
-
-  const held = await req('GET', `/api/public/b/${bizSlug}/s/${sessSlug}/slots?calendar=san-antonio&from=${slot.day}&to=${slot.day}&tz=America/Chicago`);
-  assert.ok(!(held.data.days[slot.day] || []).includes(slot.start));
-
-  // Stripe tells us the page expired.
-  const order = db.get('SELECT * FROM orders WHERE token = ?', token);
-  const out = await postWebhook({ id: 'evt_exp_1', type: 'checkout.session.expired', data: { object: { id: order.provider_session_id, client_reference_id: token } } });
-  assert.equal(out.data.result, 'hold released');
-  assert.equal(db.get('SELECT status FROM orders WHERE token = ?', token).status, 'expired');
-
-  const back = await req('GET', `/api/public/b/${bizSlug}/s/${sessSlug}/slots?calendar=san-antonio&from=${slot.day}&to=${slot.day}&tz=America/Chicago`);
-  assert.ok((back.data.days[slot.day] || []).includes(slot.start), 'the time is on sale again');
-});
-
-test('a free session books with no card and no booking number', async () => {
+test('saving a session drops any price or checkout setting left from before', async () => {
+  resetBookLimits();
   const create = await req('POST', '/api/admin/sessions', {
-    name: 'Complimentary Consult', price_cents: 0, duration_min: 30,
+    name: 'Complimentary Consult', duration_min: 30, price_cents: 9900,
+    session: { price_cents: 9900, hold_minutes: 45, pay_cta: 'Pay now', book_cta: 'Find a time' },
     calendar_ids: [markets.find((m) => m.slug === 'houston').id],
   }, { cookie: ownerCookie });
   assert.equal(create.status, 200, JSON.stringify(create.data));
-  const slug = create.data.slug;
+  const s = create.data.session;
+  assert.equal(s.book_cta, 'Find a time');
+  for (const k of ['price_cents', 'hold_minutes', 'pay_cta', 'currency']) assert.equal(s[k], undefined, `${k} is not kept`);
 
-  const slot = await firstSlot(slug, 'houston');
-  const r = await req('POST', `/api/public/b/${bizSlug}/s/${slug}/claim`,
-    { calendar: 'houston', start: slot.start, timezone: 'America/Chicago', already_booked: false,
+  const slot = await firstSlot(create.data.slug, 'houston');
+  const r = await req('POST', `/api/public/b/${bizSlug}/s/${create.data.slug}/book`,
+    { calendar: 'houston', start: slot.start, timezone: 'America/Chicago',
       contact: { first_name: 'Free', last_name: 'Session', email: 'freebie@example.com', phone: '7135550000' } });
   assert.equal(r.status, 200, JSON.stringify(r.data));
-  const order = db.get("SELECT * FROM orders WHERE customer_email = 'freebie@example.com'");
-  assert.equal(order.already_booked, 0);
-  assert.equal(order.amount_cents, 0);
-  assert.equal(JSON.parse(db.get('SELECT answers FROM bookings WHERE id = ?', order.booking_id).answers).payment, 'No charge');
 });
 
-test('the orders screen and its export show the money and the booking numbers', async () => {
-  const r = await req('GET', '/api/admin/orders', null, { cookie: ownerCookie });
-  assert.equal(r.status, 200);
-  assert.ok(r.data.summary.paid_total >= 495, 'the paid engagement session is counted');
-  assert.ok(r.data.rows.some((x) => x.booking_number === 'WU-1234'));
-  assert.ok(r.data.rows.some((x) => x.status === 'paid' && x.amount_display === '$495'));
-  assert.equal(r.data.summary.paid_but_unbooked, 0, 'nothing paid is left off a calendar');
-
-  const paidOnly = await req('GET', '/api/admin/orders?status=paid', null, { cookie: ownerCookie });
-  assert.ok(paidOnly.data.rows.every((x) => x.status === 'paid'));
-
-  const csv = await fetch(`${base}/api/admin/orders/export.csv`, { headers: { Cookie: ownerCookie } }).then((x) => x.text());
-  assert.match(csv, /^created_at,status,product_name/);
-  assert.match(csv, /WU-1234/);
+test('every payment and shop endpoint is gone', async () => {
+  const gone = [
+    ['POST', `/api/public/b/${bizSlug}/s/${sessSlug}/checkout`],
+    ['POST', '/api/public/stripe/webhook'],
+    ['POST', `/api/public/stripe/webhook/${bizSlug}`],
+    ['POST', `/api/public/square/webhook/${bizSlug}`],
+    ['GET', '/api/public/orders/anything'],
+    ['GET', `/api/public/b/${bizSlug}/p/photo-album`],
+    ['GET', '/api/admin/orders'],
+    ['GET', '/api/admin/products'],
+    ['GET', '/api/admin/payments'],
+    ['POST', '/api/admin/integrations/stripe/test-charge'],
+  ];
+  for (const [m, url] of gone) {
+    const r = await req(m, url, m === 'GET' ? null : {}, { cookie: ownerCookie });
+    assert.equal(r.status, 404, `${m} ${url} should be gone, got ${r.status}`);
+  }
+  for (const page of [`/session/abc`, `/b/${bizSlug}/p/photo-album`, `/b/${bizSlug}/schedule/abc`]) {
+    const res = await fetch(base + page, { redirect: 'manual' });
+    assert.notEqual(res.status, 200, `${page} should not render`);
+  }
+  const tables = db.all("SELECT name FROM sqlite_master WHERE type = 'table'").map((t) => t.name);
+  for (const t of ['orders', 'order_items', 'products', 'provider_events']) assert.ok(!tables.includes(t), `${t} table is dropped`);
 });
 
 test('session pages and admin endpoints are closed to outsiders', async () => {
@@ -797,13 +702,6 @@ test('session pages and admin endpoints are closed to outsiders', async () => {
   assert.equal(anon.status, 401);
   const anonCal = await req('POST', '/api/admin/session-calendars', { name: 'Sneaky' });
   assert.equal(anonCal.status, 401);
-
-  // Keys are never handed back to the browser.
-  const pay = await req('GET', '/api/admin/payments', null, { cookie: ownerCookie });
-  assert.equal(pay.data.configured, true);
-  assert.equal(pay.data.mode, 'test');
-  assert.ok(!JSON.stringify(pay.data).includes('sk_test'), 'the secret key must never reach the client');
-  assert.ok(!JSON.stringify(pay.data).includes(WHSEC));
 
   // An unknown or switched-off session is a 404, not a hint.
   assert.equal((await req('GET', `/api/public/b/${bizSlug}/s/not-a-session`)).status, 404);
@@ -816,8 +714,10 @@ test('markets and sessions with real bookings cannot be deleted by accident', as
   assert.match(delCal.data.error, /Switch it off/);
 
   const eng = (await req('GET', '/api/admin/sessions', null, { cookie: ownerCookie })).data.sessions.find((x) => x.slug === sessSlug);
+  assert.ok(eng.booked >= 1, 'the list counts its bookings');
   const delSess = await req('DELETE', `/api/admin/sessions/${eng.id}`, null, { cookie: ownerCookie });
-  assert.equal(delSess.status, 409, 'it has a paid order attached');
+  assert.equal(delSess.status, 409, 'it has upcoming bookings');
+  assert.match(delSess.data.error, /Switch it off/);
 });
 
 test('a bodyless DELETE reaches the handler instead of being turned away as non-JSON', async () => {
@@ -1123,32 +1023,38 @@ test('the built-in 24h reminder steps aside once a "before" automation exists', 
 });
 
 // ---------------------------------------------------------------------------
-// Integrations: Stripe, Twilio and Resend credentials
+// Integrations: Twilio and Resend credentials
 // ---------------------------------------------------------------------------
 const appConfig = require('../src/lib/config');
 const providers = require('../src/services/providers');
 
 test('a saved key overrides the environment, and clearing it falls back', async () => {
-  // Railway value is in place from the earlier Stripe tests.
-  assert.equal(appConfig.source('STRIPE_SECRET_KEY'), 'env');
-  assert.equal(appConfig.get('STRIPE_SECRET_KEY'), 'sk_test_stubbed');
+  const prevEnv = process.env.RESEND_API_KEY;
+  process.env.RESEND_API_KEY = 're_from_railway';
+  appConfig.clear('RESEND_API_KEY');
+  appConfig.invalidate();
+  assert.equal(appConfig.source('RESEND_API_KEY'), 'env');
+  assert.equal(appConfig.get('RESEND_API_KEY'), 're_from_railway');
 
-  appConfig.set('STRIPE_SECRET_KEY', 'sk_test_saved_in_app', 1);
-  assert.equal(appConfig.source('STRIPE_SECRET_KEY'), 'app', 'what you type in the app wins');
-  assert.equal(appConfig.get('STRIPE_SECRET_KEY'), 'sk_test_saved_in_app');
+  appConfig.set('RESEND_API_KEY', 're_saved_in_app', 1);
+  assert.equal(appConfig.source('RESEND_API_KEY'), 'app', 'what you type in the app wins');
+  assert.equal(appConfig.get('RESEND_API_KEY'), 're_saved_in_app');
 
   // Stored encrypted, not sitting in the table in the clear.
-  const row = db.get("SELECT value, secret FROM app_settings WHERE key = 'STRIPE_SECRET_KEY'");
+  const row = db.get("SELECT value, secret FROM app_settings WHERE key = 'RESEND_API_KEY'");
   assert.equal(row.secret, 1);
   assert.match(row.value, /^v1:/);
-  assert.ok(!row.value.includes('sk_test_saved_in_app'), 'the plain key is not in the database');
+  assert.ok(!row.value.includes('re_saved_in_app'), 'the plain key is not in the database');
 
-  appConfig.clear('STRIPE_SECRET_KEY');
-  assert.equal(appConfig.source('STRIPE_SECRET_KEY'), 'env', 'clearing returns to the Railway value');
-  assert.equal(appConfig.get('STRIPE_SECRET_KEY'), 'sk_test_stubbed');
+  appConfig.clear('RESEND_API_KEY');
+  assert.equal(appConfig.source('RESEND_API_KEY'), 'env', 'clearing returns to the Railway value');
+  assert.equal(appConfig.get('RESEND_API_KEY'), 're_from_railway');
+
+  if (prevEnv === undefined) delete process.env.RESEND_API_KEY; else process.env.RESEND_API_KEY = prevEnv;
+  appConfig.invalidate();
 });
 
-test('the integrations API never hands a secret back to the browser', async () => {
+test('the integrations API never hands a secret back to the browser, and offers no card providers', async () => {
   appConfig.set('RESEND_API_KEY', 're_super_secret_value_1234', 1);
   appConfig.set('TWILIO_AUTH_TOKEN', 'twilio_secret_token_abcd', 1);
 
@@ -1157,16 +1063,13 @@ test('the integrations API never hands a secret back to the browser', async () =
   const blob = JSON.stringify(r.data);
   assert.ok(!blob.includes('re_super_secret_value_1234'), 'the Resend key must never be returned');
   assert.ok(!blob.includes('twilio_secret_token_abcd'), 'the Twilio token must never be returned');
-  assert.ok(!blob.includes('sk_test_stubbed'));
-  assert.ok(!blob.includes(WHSEC));
+  for (const k of ['stripe', 'square', 'payments']) assert.equal(r.data[k], undefined, `${k} is not offered`);
 
   // What it does return is enough to show the state of things.
   const key = r.data.resend.fields.find((f) => f.key === 'RESEND_API_KEY');
   assert.equal(key.set, true);
   assert.equal(key.source, 'app');
   assert.match(key.hint, /^re_•+1234$/, 'only a masked tail comes back');
-  assert.equal(r.data.stripe.mode, 'test');
-  assert.ok(Array.isArray(r.data.stripe.webhook.events));
   assert.match(r.data.twilio.webhook.url, /\/api\/public\/sms\/inbound$/);
   // Non-secret fields are safe to show in full so they can be edited.
   assert.equal(r.data.twilio.fields.find((f) => f.key === 'TWILIO_FROM_NUMBER').hint, '+18325550000');
@@ -1176,39 +1079,35 @@ test('the integrations API never hands a secret back to the browser', async () =
 });
 
 test('leaving the mask in place keeps a key; an empty string clears it', async () => {
-  // Payment credentials saved through the admin belong to the business that saved them, so this
-  // reads them back at that scope. The platform-wide value underneath is the fallback.
-  const myBiz = db.get('SELECT id FROM businesses WHERE slug = ?', bizSlug).id;
-  appConfig.set('STRIPE_WEBHOOK_SECRET', 'whsec_original_value', 1, myBiz);
+  appConfig.set('RESEND_API_KEY', 're_original_value', 1);
 
   // The screen sends the mask back for anything the user did not retype.
-  const keep = await req('PUT', '/api/admin/integrations/providers/stripe',
-    { STRIPE_WEBHOOK_SECRET: appConfig.MASK }, { cookie: ownerCookie });
-  assert.equal(keep.status, 200);
+  const keep = await req('PUT', '/api/admin/integrations/providers/resend',
+    { RESEND_API_KEY: appConfig.MASK }, { cookie: ownerCookie });
+  assert.equal(keep.status, 200, JSON.stringify(keep.data));
   assert.deepEqual(keep.data.changed, [], 'the mask changes nothing');
-  assert.equal(appConfig.get('STRIPE_WEBHOOK_SECRET', myBiz), 'whsec_original_value');
+  assert.equal(appConfig.get('RESEND_API_KEY'), 're_original_value');
 
-  const change = await req('PUT', '/api/admin/integrations/providers/stripe',
-    { STRIPE_WEBHOOK_SECRET: 'whsec_brand_new' }, { cookie: ownerCookie });
-  assert.deepEqual(change.data.changed, ['STRIPE_WEBHOOK_SECRET']);
-  assert.equal(appConfig.get('STRIPE_WEBHOOK_SECRET', myBiz), 'whsec_brand_new');
-  assert.equal(appConfig.source('STRIPE_WEBHOOK_SECRET', myBiz), 'business');
+  const change = await req('PUT', '/api/admin/integrations/providers/resend',
+    { RESEND_API_KEY: 're_brand_new' }, { cookie: ownerCookie });
+  assert.deepEqual(change.data.changed, ['RESEND_API_KEY']);
+  assert.equal(appConfig.get('RESEND_API_KEY'), 're_brand_new');
 
-  const cleared = await req('PUT', '/api/admin/integrations/providers/stripe',
-    { STRIPE_WEBHOOK_SECRET: '' }, { cookie: ownerCookie });
+  const cleared = await req('PUT', '/api/admin/integrations/providers/resend',
+    { RESEND_API_KEY: '' }, { cookie: ownerCookie });
   assert.equal(cleared.status, 200);
-  assert.equal(appConfig.source('STRIPE_WEBHOOK_SECRET', myBiz), 'env', 'back to the Railway value');
+  assert.notEqual(appConfig.source('RESEND_API_KEY'), 'app', 'nothing saved in the app any more');
 
   // A key belonging to another provider is refused rather than quietly written.
-  appConfig.clear('RESEND_API_KEY');
-  const wrong = await req('PUT', '/api/admin/integrations/providers/stripe',
-    { RESEND_API_KEY: 're_nope' }, { cookie: ownerCookie });
+  const wrong = await req('PUT', '/api/admin/integrations/providers/resend',
+    { TWILIO_AUTH_TOKEN: 'nope' }, { cookie: ownerCookie });
   assert.equal(wrong.status, 422);
-  assert.match(wrong.data.error, /does not belong to stripe/);
-  assert.notEqual(appConfig.get('RESEND_API_KEY'), 're_nope', 'nothing was written');
+  assert.match(wrong.data.error, /does not belong to resend/);
 
-  const unknownProvider = await req('PUT', '/api/admin/integrations/providers/paypal', {}, { cookie: ownerCookie });
-  assert.equal(unknownProvider.status, 404);
+  for (const gone of ['stripe', 'square', 'payments', 'paypal']) {
+    const r = await req('PUT', `/api/admin/integrations/providers/${gone}`, {}, { cookie: ownerCookie });
+    assert.equal(r.status, 404, `${gone} is not an integration`);
+  }
 });
 
 test('only an owner can write credentials; a host cannot even read them', async () => {
@@ -1221,61 +1120,12 @@ test('only an owner can write credentials; a host cannot even read them', async 
   const hostCookie = accepted.cookie;
 
   assert.equal((await req('GET', '/api/admin/integrations/providers', null, { cookie: hostCookie })).status, 403);
-  assert.equal((await req('PUT', '/api/admin/integrations/providers/stripe', { STRIPE_SECRET_KEY: 'sk_test_x' }, { cookie: hostCookie })).status, 403);
-  assert.equal((await req('POST', '/api/admin/integrations/stripe/test-charge', { confirm: 'CHARGE' }, { cookie: hostCookie })).status, 403);
-  assert.equal(appConfig.get('STRIPE_SECRET_KEY'), 'sk_test_stubbed', 'the host changed nothing');
+  assert.equal((await req('PUT', '/api/admin/integrations/providers/resend', { RESEND_API_KEY: 're_x' }, { cookie: hostCookie })).status, 403);
+  assert.notEqual(appConfig.get('RESEND_API_KEY'), 're_x', 'the host changed nothing');
 
   // And nobody unauthenticated gets near it.
   assert.equal((await req('GET', '/api/admin/integrations/providers')).status, 401);
   assert.equal((await req('PUT', '/api/admin/integrations/providers/twilio', { TWILIO_AUTH_TOKEN: 'x' })).status, 401);
-});
-
-test('the $1 test needs a typed confirmation and never creates a booking', async () => {
-  const bookingsBefore = db.get('SELECT COUNT(*) c FROM bookings').c;
-  const ordersBefore = db.get('SELECT COUNT(*) c FROM orders').c;
-
-  const noConfirm = await req('POST', '/api/admin/integrations/stripe/test-charge', {}, { cookie: ownerCookie });
-  assert.equal(noConfirm.status, 422, 'real money needs a deliberate confirmation');
-  assert.ok(noConfirm.data.details.confirm);
-
-  const wrongWord = await req('POST', '/api/admin/integrations/stripe/test-charge', { confirm: 'yes' }, { cookie: ownerCookie });
-  assert.equal(wrongWord.status, 422);
-
-  // With both keys in place and the confirmation typed, it opens a checkout.
-  appConfig.set('STRIPE_WEBHOOK_SECRET', WHSEC, 1);
-  const go = await req('POST', '/api/admin/integrations/stripe/test-charge', { confirm: 'charge' }, { cookie: ownerCookie });
-  assert.equal(go.status, 200, JSON.stringify(go.data));
-  assert.equal(go.data.amount, 1);
-  assert.match(go.data.ref, /^diag_/);
-  const call = checkoutCalls[checkoutCalls.length - 1];
-  assert.equal(call.amountCents, 100);
-  assert.equal(call.metadata.diagnostic, '1');
-
-  // Nothing was booked or sold by starting it.
-  assert.equal(db.get('SELECT COUNT(*) c FROM orders').c, ordersBefore, 'the test does not create an order');
-  assert.equal(providers.lastDiagnostic().status, 'awaiting_payment');
-
-  // The webhook for it records the result rather than hunting for an order.
-  const event = { id: 'evt_diag_1', type: 'checkout.session.completed', data: { object: {
-    id: 'cs_diag_1', client_reference_id: go.data.ref, payment_status: 'paid', amount_total: 100,
-    payment_intent: 'pi_diag_1', metadata: { diagnostic: '1', ref: go.data.ref },
-  } } };
-  const hook = await postWebhook(event);
-  assert.equal(hook.status, 200, JSON.stringify(hook.data));
-  assert.equal(hook.data.result, 'connection test recorded');
-
-  const last = providers.lastDiagnostic();
-  assert.equal(last.status, 'webhook_received');
-  assert.equal(last.amount, 1);
-  assert.equal(last.payment_intent, 'pi_diag_1');
-
-  assert.equal(db.get('SELECT COUNT(*) c FROM bookings').c, bookingsBefore, 'no booking was created');
-  assert.equal(db.get('SELECT COUNT(*) c FROM orders').c, ordersBefore, 'and no session order either');
-
-  // It shows up on the integrations screen as a passed test.
-  const view = await req('GET', '/api/admin/integrations/providers', null, { cookie: ownerCookie });
-  assert.equal(view.data.stripe.last_test.status, 'webhook_received');
-  assert.ok(view.data.stripe.webhook.received > 0);
 });
 
 test('a test email reports honestly when no key is live', async () => {
@@ -1334,137 +1184,8 @@ test('changing a key takes effect immediately, without a restart', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Products bought outright: matrix pricing, then scheduling after payment.
-// The point of these is that the money is decided by the server, never the page.
-// ---------------------------------------------------------------------------
-let albumId;
-
-test('a product prices a combination from its own table', async () => {
-  const made = await req('POST', '/api/admin/products', {
-    name: 'Wedding Album',
-    description: 'Flush mount, laid out with you.',
-    base_price: 0,
-    min_qty: 1, max_qty: 3,
-    settings: { base_pages: 20 },
-    option_groups: [
-      { id: 'size', label: 'Size', layout: 'cards', required: true, choices: [{ id: 'sq8', label: '8x8 Square' }, { id: 'ls811', label: '8x11 Landscape' }] },
-      { id: 'cover', label: 'Cover', layout: 'swatches', required: true, choices: [{ id: 'printed', label: 'Printed' }, { id: 'velvet', label: 'Velvet' }] },
-    ],
-    price_rules: [
-      { when: { size: 'sq8', cover: 'printed' }, price_cents: 16600 },
-      { when: { size: 'sq8', cover: 'velvet' }, price_cents: 19000 },
-      { when: { size: 'ls811', cover: 'printed' }, price_cents: 19000 },
-    ],
-    addons: [{ id: 'spreads', label: 'Extra spread (2 pages)', unit_label: 'per spread', ui: 'stepper', per_unit: true, max_qty: 20,
-      price_rules: [{ when: { size: 'sq8' }, price_cents: 5000 }, { when: { size: 'ls811' }, price_cents: 7500 }] }],
-  }, { cookie: ownerCookie });
-  assert.equal(made.status, 200, JSON.stringify(made.data));
-  albumId = made.data.id;
-
-  const quote = (selection) => req('POST', `/api/public/b/${bizSlug}/p/${made.data.slug}/quote`, { selection });
-
-  const plain = await quote({ options: { size: 'sq8', cover: 'printed' } });
-  assert.equal(plain.status, 200);
-  assert.equal(plain.data.total_cents, 16600, 'the 8x8 printed comes from the rule table');
-
-  const velvet = await quote({ options: { size: 'sq8', cover: 'velvet' } });
-  assert.equal(velvet.data.total_cents, 19000);
-
-  // Extra spreads are priced by size, and sit in every copy, so they scale with the order.
-  const withPages = await quote({ options: { size: 'ls811', cover: 'printed' }, addons: { spreads: 4 } });
-  assert.equal(withPages.data.total_cents, 19000 + 4 * 7500);
-  const twoCopies = await quote({ options: { size: 'ls811', cover: 'printed' }, addons: { spreads: 4 }, qty: 2 });
-  assert.equal(twoCopies.data.total_cents, 2 * (19000 + 4 * 7500), 'two copies cost exactly twice one copy');
-
-  // A combination nobody has priced refuses rather than falling back to zero.
-  const gap = await quote({ options: { size: 'ls811', cover: 'velvet' } });
-  assert.equal(gap.status, 409);
-  assert.match(gap.data.error, /do not have a price/i);
-
-  // A required choice cannot be skipped.
-  const missing = await quote({ options: { size: 'sq8' } });
-  assert.equal(missing.status, 422);
-  assert.ok(missing.data.details['options.cover']);
-});
-
-test('a price sent by the browser is ignored', async () => {
-  const p = await req('GET', '/api/admin/products', null, { cookie: ownerCookie });
-  const album = p.data.products.find((x) => x.id === albumId);
-  // Everything a tampered page could plausibly send: its own prices, on every shape we accept.
-  const tampered = await req('POST', `/api/public/b/${bizSlug}/p/${album.slug}/quote`, {
-    selection: {
-      options: { size: 'sq8', cover: 'velvet' },
-      addons: { spreads: 1 },
-      qty: 1,
-      price_cents: 1, total_cents: 1, amount_cents: 1,
-      lines: [{ label: 'Album', unit_cents: 1, qty: 1 }],
-    },
-    total_cents: 1,
-    amount_cents: 1,
-  });
-  assert.equal(tampered.status, 200);
-  assert.equal(tampered.data.total_cents, 19000 + 5000, 'the server re-prices from its own table');
-});
-
-test('a price matrix can be pasted, and adds the choices it names', async () => {
-  const pasted = await req('POST', `/api/admin/products/${albumId}/price-matrix`, {
-    target: 'product',
-    text: [
-      'Variation, Cover, Price',                 // a header line is ignored
-      '8x11 Landscape, Velvet, $240.00',         // fills the gap the test above found
-      '12x12 Square | Crystal (leather) | 1,298.00', // thousands separator, pipes, a new size
-      'not a priced row at all',
-    ].join('\n'),
-  }, { cookie: ownerCookie });
-  assert.equal(pasted.status, 200, JSON.stringify(pasted.data));
-  assert.equal(pasted.data.rules, 2, 'two readable rows, header and prose skipped');
-  assert.equal(pasted.data.choices_added, 2, '12x12 Square and Crystal (leather) were new');
-
-  const slug = pasted.data.product.slug;
-  const filled = await req('POST', `/api/public/b/${bizSlug}/p/${slug}/quote`, { selection: { options: { size: 'ls811', cover: 'velvet' } } });
-  assert.equal(filled.data.total_cents, 24000, 'the gap is now priced');
-
-  const big = await req('GET', `/api/public/b/${bizSlug}/p/${slug}`);
-  const sizes = big.data.product.option_groups.find((g) => g.id === 'size');
-  assert.ok(sizes.choices.some((c) => c.label === '12x12 Square'), 'the new size is offered');
-  const priced = await req('POST', `/api/public/b/${bizSlug}/p/${slug}/quote`, { selection: { options: { size: sizes.choices.find((c) => c.label === '12x12 Square').id, cover: big.data.product.option_groups.find((g) => g.id === 'cover').choices.find((c) => c.label === 'Crystal (leather)').id } } });
-  assert.equal(priced.data.total_cents, 129800, '$1,298 survived the comma');
-});
-
-test('an unpaid order cannot book the design call', async () => {
-  const p = await req('GET', '/api/admin/products', null, { cookie: ownerCookie });
-  const album = p.data.products.find((x) => x.id === albumId);
-  // Create a pending order the way checkout would, without paying for it.
-  const lead = await req('POST', `/api/public/b/${bizSlug}/leads`, { source: 'booking' });
-  db.run(`INSERT INTO orders (business_id, token, lead_id, product_id, order_kind, product_name, amount_cents, currency, status, provider, customer_name, customer_email)
-    VALUES ((SELECT id FROM businesses WHERE slug = ?), 'tok-unpaid', (SELECT id FROM leads WHERE token = ?), ?, 'product', 'Wedding Album', 19000, 'USD', 'pending', 'stripe', 'Nobody', 'nobody@test.dev')`,
-  bizSlug, lead.data.token, album.id);
-
-  const tryBook = await req('POST', '/api/public/orders/tok-unpaid/schedule', { start: new Date(Date.now() + 5 * 86400000).toISOString(), timezone: 'America/Chicago' });
-  assert.equal(tryBook.status, 409);
-  assert.match(tryBook.data.error, /not been paid/i);
-
-  // And the public view of it never leaks a scheduling token while it is unpaid.
-  const view = await req('GET', '/api/public/orders/tok-unpaid');
-  assert.equal(view.data.order.paid, false);
-  assert.equal(view.data.order.schedule_token, null);
-});
-
-test('a product switched off is not for sale', async () => {
-  const p = await req('GET', '/api/admin/products', null, { cookie: ownerCookie });
-  const album = p.data.products.find((x) => x.id === albumId);
-  await req('PATCH', `/api/admin/products/${albumId}`, { name: album.name, active: false }, { cookie: ownerCookie });
-  const gone = await req('GET', `/api/public/b/${bizSlug}/p/${album.slug}`);
-  assert.equal(gone.status, 404);
-  const page = await req('GET', `/b/${bizSlug}/p/${album.slug}`);
-  assert.equal(page.status, 404);
-  await req('PATCH', `/api/admin/products/${albumId}`, { name: album.name, active: true }, { cookie: ownerCookie });
-});
-
-// ---------------------------------------------------------------------------
-// Custom forms. The interesting part is that a form's behaviour comes from the
-// order of its steps, so these check the order decides the money, and that a
-// form cannot be built into a shape that would take money without reserving time.
+// Custom forms. A form with a calendar books a time; one without records a lead.
+// Booklane takes no payments, so the old product and payment steps must fall away.
 // ---------------------------------------------------------------------------
 let ctaFormSlug;
 
@@ -1478,7 +1199,7 @@ test('a short form just records a lead', async () => {
     settings: { done_heading: 'Got it' },
   }, { cookie: ownerCookie });
   assert.equal(made.status, 200, JSON.stringify(made.data));
-  assert.equal(made.data.shape.lead_only, true, 'no calendar and no payment means it is a lead form');
+  assert.equal(made.data.shape.lead_only, true, 'no calendar means it is a lead form');
   ctaFormSlug = made.data.slug;
 
   const sent = await req('POST', `/api/public/b/${bizSlug}/f/${ctaFormSlug}/submit`, {
@@ -1512,46 +1233,42 @@ test('a required field cannot be skipped, and a hidden one is not demanded', asy
   assert.equal(fine.status, 200);
 });
 
-test('the order of the steps decides how the money works', async () => {
-  const shapeOf = async (steps) => {
-    const r = await req('POST', '/api/admin/forms', { name: `Shape ${Math.random()}`, steps }, { cookie: ownerCookie });
-    return r.status === 200 ? r.data.shape : r;
-  };
-  const et = db.get('SELECT id FROM event_types WHERE business_id = (SELECT id FROM businesses WHERE slug = ?) LIMIT 1', bizSlug);
+test('a form books a time or records a lead, and a payment or product step is dropped', async () => {
+  const et = db.get("SELECT id FROM event_types WHERE business_id = (SELECT id FROM businesses WHERE slug = ?) AND kind = 'call' LIMIT 1", bizSlug);
 
-  const payThenBook = await shapeOf([
-    { type: 'contact', title: 'You' },
-    { type: 'payment', title: 'Pay', source: 'fixed', amount_cents: 49500 },
-    { type: 'schedule', title: 'Time', event_type_id: et.id },
-  ]);
-  assert.equal(payThenBook.charges, true);
-  assert.equal(payThenBook.schedules_after_payment, true, 'payment before the calendar means buy first, book after');
+  const booking = await req('POST', '/api/admin/forms', {
+    name: 'Book a call form',
+    steps: [{ type: 'contact', title: 'You' }, { type: 'schedule', title: 'Time', event_type_id: et.id }],
+  }, { cookie: ownerCookie });
+  assert.equal(booking.status, 200, JSON.stringify(booking.data));
+  assert.deepEqual(booking.data.shape, { schedules: true, lead_only: false });
 
-  // The reverse would need the slot held during checkout. Rather than build a second, weaker
-  // implementation of slot holding, the form refuses and points at the sessions.
-  const bookThenPay = await req('POST', '/api/admin/forms', {
-    name: 'Hold then pay',
+  // A builder that still sends the old step types gets a form without them, not an error.
+  const old = await req('POST', '/api/admin/forms', {
+    name: 'Old album flow',
     steps: [
+      { type: 'product', title: 'Choose your album', product_id: 1 },
       { type: 'contact', title: 'You' },
-      { type: 'schedule', title: 'Time', event_type_id: et.id },
       { type: 'payment', title: 'Pay', source: 'fixed', amount_cents: 49500 },
+      { type: 'schedule', title: 'Time', event_type_id: et.id },
     ],
   }, { cookie: ownerCookie });
-  assert.equal(bookThenPay.status, 422);
-  assert.match(bookThenPay.data.error, /Session already does/i);
+  assert.equal(old.status, 200, JSON.stringify(old.data));
+  assert.deepEqual(old.data.steps.map((s) => s.type), ['contact', 'schedule']);
+
+  // A form saved before payments were removed loses those steps when it is read.
+  const raw = JSON.stringify([{ type: 'contact', title: 'You', fields: {} }, { type: 'payment', title: 'Pay', source: 'fixed', amount_cents: 100 }]);
+  db.run("INSERT INTO forms (business_id, slug, name, steps) VALUES ((SELECT id FROM businesses WHERE slug = ?), 'legacy-paid', 'Legacy paid', ?)", bizSlug, raw);
+  const pub = await req('GET', `/api/public/b/${bizSlug}/f/legacy-paid`);
+  assert.equal(pub.status, 200, JSON.stringify(pub.data));
+  assert.deepEqual(pub.data.form.steps.map((s) => s.type), ['contact']);
+  assert.equal(pub.data.form.shape.lead_only, true);
 });
 
 test('a form cannot be built into a shape that would fail later', async () => {
   const bad = async (steps) => (await req('POST', '/api/admin/forms', { name: `Bad ${Math.random()}`, steps }, { cookie: ownerCookie }));
 
-  const noProduct = await bad([{ type: 'contact', title: 'You' }, { type: 'payment', title: 'Pay', source: 'product' }]);
-  assert.equal(noProduct.status, 422);
-  assert.match(noProduct.data.error, /needs a product step/i);
-
-  const noAmount = await bad([{ type: 'contact', title: 'You' }, { type: 'payment', title: 'Pay', source: 'fixed', amount_cents: 0 }]);
-  assert.equal(noAmount.status, 422);
-
-  const noContact = await bad([{ type: 'payment', title: 'Pay', source: 'fixed', amount_cents: 1000 }]);
+  const noContact = await bad([{ type: 'schedule', title: 'Time' }]);
   assert.equal(noContact.status, 422);
   assert.match(noContact.data.error, /contact step/i);
 
@@ -1561,7 +1278,10 @@ test('a form cannot be built into a shape that would fail later', async () => {
 
 test('every template builds into a valid form', async () => {
   const list = await req('GET', '/api/admin/forms', null, { cookie: ownerCookie });
-  assert.ok(list.data.templates.length >= 4, 'the named flows are all offered');
+  assert.ok(list.data.templates.length >= 3, 'the named flows are all offered');
+  assert.ok(!list.data.templates.some((t) => /album-selling|buy-book/.test(t.id)), 'no template sells anything');
+  assert.equal(list.data.products, undefined, 'the builder is no longer handed products');
+  assert.ok(!list.data.step_types.includes('payment') && !list.data.step_types.includes('product'));
   for (const t of list.data.templates) {
     const made = await req('POST', '/api/admin/forms/from-template', { template: t.id }, { cookie: ownerCookie });
     assert.equal(made.status, 200, `${t.id}: ${JSON.stringify(made.data)}`);
@@ -1580,166 +1300,6 @@ test('a form switched off is not reachable', async () => {
   assert.equal((await req('GET', `/b/${bizSlug}/f/${ctaFormSlug}`)).status, 404);
   const blocked = await req('POST', `/api/public/b/${bizSlug}/f/${ctaFormSlug}/submit`, { answers: { interest: 'DJ' }, contact: { first_name: 'X', email: 'x@example.com' } });
   assert.equal(blocked.status, 404, 'and it stops accepting submissions too');
-});
-
-// ---------------------------------------------------------------------------
-// Two payment providers, and the isolation between businesses.
-// The point of these is that money is scoped to a business: its own credentials,
-// its own webhook URL, and no way to reach across to another company's account.
-// ---------------------------------------------------------------------------
-const appConfigP = require('../src/lib/config');
-const squareLib = require('../src/lib/square');
-const paymentsLib = require('../src/lib/payments');
-
-test('a credential saved for one business does not leak to another', () => {
-  const a = db.get('SELECT id FROM businesses WHERE slug = ?', bizSlug).id;
-  const b = db.run("INSERT INTO businesses (slug, name, timezone) VALUES ('other-co','Other Co','America/Chicago')").lastId;
-
-  appConfigP.set('SQUARE_ACCESS_TOKEN', 'token-for-A', null, a);
-  appConfigP.set('SQUARE_LOCATION_ID', 'LOC_A', null, a);
-
-  assert.equal(appConfigP.get('SQUARE_ACCESS_TOKEN', a), 'token-for-A');
-  assert.equal(appConfigP.get('SQUARE_ACCESS_TOKEN', b), '', 'the other business sees nothing');
-  assert.equal(appConfigP.source('SQUARE_ACCESS_TOKEN', a), 'business');
-  assert.equal(appConfigP.source('SQUARE_ACCESS_TOKEN', b), null);
-
-  // Stored encrypted, not in the clear.
-  const row = db.get('SELECT value, secret FROM business_credentials WHERE business_id = ? AND key = ?', a, 'SQUARE_ACCESS_TOKEN');
-  assert.equal(row.secret, 1);
-  assert.ok(!String(row.value).includes('token-for-A'), 'the token is not readable in the database');
-
-  // Square needs a location as well as a token, so one without the other is not "configured".
-  assert.equal(squareLib.configured(a), true);
-  assert.equal(squareLib.configured(b), false);
-
-  appConfigP.clear('SQUARE_ACCESS_TOKEN', a);
-  appConfigP.clear('SQUARE_LOCATION_ID', a);
-  db.run('DELETE FROM businesses WHERE id = ?', b);
-  appConfigP.invalidate();
-});
-
-test('a Square webhook is checked against that business own signing key', () => {
-  const crypto = require('node:crypto');
-  const a = db.get('SELECT id FROM businesses WHERE slug = ?', bizSlug).id;
-  const KEY = 'square-signing-key-for-A';
-  appConfigP.set('SQUARE_WEBHOOK_SIGNATURE_KEY', KEY, null, a);
-
-  const url = `${base}/api/public/square/webhook/${bizSlug}`;
-  const body = JSON.stringify({ event_id: 'evt_sq_1', type: 'payment.updated', data: { object: { payment: { id: 'pay_1', status: 'COMPLETED' } } } });
-  const sign = (k, u, b) => crypto.createHmac('sha256', k).update(u + b).digest('base64');
-
-  // The real signature is accepted.
-  const good = squareLib.verifyWebhook(body, { 'x-square-hmacsha256-signature': sign(KEY, url, body) }, url, a);
-  assert.equal(good.type, 'payment.updated');
-
-  // Everything else is refused: a changed body, another key, a different URL, no header at all.
-  const rejects = [
-    ['tampered body', body.replace('COMPLETED', 'FAILED'), sign(KEY, url, body), url],
-    ['someone else key', body, sign('not-the-key', url, body), url],
-    ['different URL', body, sign(KEY, url, body), `${url}x`],
-  ];
-  for (const [why, b, sig, u] of rejects) {
-    assert.throws(() => squareLib.verifyWebhook(b, { 'x-square-hmacsha256-signature': sig }, u, a), /Signature does not match/, why);
-  }
-  assert.throws(() => squareLib.verifyWebhook(body, {}, url, a), /Missing signature/);
-
-  appConfigP.clear('SQUARE_WEBHOOK_SIGNATURE_KEY', a);
-  appConfigP.invalidate();
-});
-
-test('a forged Square webhook is rejected over HTTP, not just in the library', async () => {
-  const a = db.get('SELECT id FROM businesses WHERE slug = ?', bizSlug).id;
-  appConfigP.set('SQUARE_WEBHOOK_SIGNATURE_KEY', 'a-real-key', null, a);
-  const forged = await req('POST', `/api/public/square/webhook/${bizSlug}`,
-    { event_id: 'evt_forged', type: 'payment.updated', data: { object: { payment: { id: 'p', status: 'COMPLETED' } } } },
-    { headers: { 'x-square-hmacsha256-signature': 'obviously-wrong' } });
-  assert.equal(forged.status, 400);
-  assert.match(forged.data.error, /Invalid signature/);
-
-  const unknownBiz = await req('POST', '/api/public/square/webhook/no-such-business', { type: 'payment.updated' });
-  assert.equal(unknownBiz.status, 404);
-
-  appConfigP.clear('SQUARE_WEBHOOK_SIGNATURE_KEY', a);
-  appConfigP.invalidate();
-});
-
-test('each business gets its own webhook URL, and the provider follows the credentials', () => {
-  const biz = db.get('SELECT * FROM businesses WHERE slug = ?', bizSlug);
-
-  // With nothing saved, Square is not an option.
-  assert.equal(paymentsLib.providerFor(biz.id) === 'square', false);
-
-  appConfigP.set('SQUARE_ACCESS_TOKEN', 'tok', null, biz.id);
-  appConfigP.set('SQUARE_LOCATION_ID', 'LOC', null, biz.id);
-  assert.equal(paymentsLib.providerFor(biz.id), 'square', 'saving Square credentials is enough to switch to it');
-
-  // An explicit choice beats inference, so a business can keep both sets of keys and still decide.
-  appConfigP.set('PAYMENT_PROVIDER', 'stripe', null, biz.id);
-  assert.equal(paymentsLib.providerFor(biz.id), 'stripe');
-
-  const d = paymentsLib.describe(biz);
-  assert.match(d.square.webhook_url, new RegExp(`/api/public/square/webhook/${bizSlug}$`));
-  assert.match(d.stripe.webhook_url, new RegExp(`/api/public/stripe/webhook/${bizSlug}$`));
-  assert.notEqual(d.square.webhook_url, d.stripe.webhook_url, 'the two providers do not share an endpoint');
-
-  appConfigP.clear('PAYMENT_PROVIDER', biz.id);
-  appConfigP.clear('SQUARE_ACCESS_TOKEN', biz.id);
-  appConfigP.clear('SQUARE_LOCATION_ID', biz.id);
-  appConfigP.invalidate();
-});
-
-test('Square builds an itemised checkout and never sends a price the browser chose', async () => {
-  const biz = db.get('SELECT * FROM businesses WHERE slug = ?', bizSlug);
-  appConfigP.set('SQUARE_ACCESS_TOKEN', 'tok', null, biz.id);
-  appConfigP.set('SQUARE_LOCATION_ID', 'LOC_1', null, biz.id);
-
-  // Capture what would go to Square rather than calling it.
-  const realCreate = squareLib.createCheckout;
-  let sent = null;
-  squareLib.createCheckout = async (args) => { sent = args; return { id: 'pl_1', url: 'https://square.link/u/abc', orderId: 'ord_1' }; };
-
-  const out = await paymentsLib.createCheckout(biz, {
-    items: [{ label: 'Wedding Album', detail: '8x8 / Velvet', unit_cents: 19000, qty: 2 }, { label: 'Extra spread', unit_cents: 5000, qty: 3 }],
-    currency: 'USD', referenceId: 'tok_abc', customerEmail: 'buyer@example.com',
-    successUrl: 'https://example.com/done',
-  });
-  assert.equal(out.provider, 'square');
-  assert.equal(out.url, 'https://square.link/u/abc');
-  assert.equal(sent.items.length, 2, 'both lines are itemised for the buyer');
-  assert.equal(sent.referenceId, 'tok_abc', 'our own order token rides along so the webhook can match it');
-  assert.equal(sent.bizId, biz.id, 'and it is charged to this business account, not a shared one');
-
-  squareLib.createCheckout = realCreate;
-  appConfigP.clear('SQUARE_ACCESS_TOKEN', biz.id);
-  appConfigP.clear('SQUARE_LOCATION_ID', biz.id);
-  appConfigP.invalidate();
-});
-
-test('both providers report a payment in the same shape', async () => {
-  const biz = db.get('SELECT * FROM businesses WHERE slug = ?', bizSlug);
-
-  const fromStripe = await paymentsLib.readEvent('stripe', {
-    id: 'evt_1', type: 'checkout.session.completed',
-    data: { object: { id: 'cs_1', payment_status: 'paid', client_reference_id: 'tok_9', payment_intent: 'pi_1', amount_total: 49500 } },
-  }, biz);
-  assert.equal(fromStripe.kind, 'paid');
-  assert.equal(fromStripe.referenceId, 'tok_9');
-  assert.equal(fromStripe.amountCents, 49500);
-
-  const fromSquare = await paymentsLib.readEvent('square', {
-    event_id: 'evt_2', type: 'payment.updated',
-    data: { object: { payment: { id: 'pay_9', status: 'COMPLETED', reference_id: 'tok_9', amount_money: { amount: 49500 }, receipt_url: 'https://sq/r' } } },
-  }, biz);
-  assert.equal(fromSquare.kind, 'paid');
-  assert.equal(fromSquare.referenceId, 'tok_9', 'same field name, whoever sent it');
-  assert.equal(fromSquare.amountCents, 49500);
-
-  // A payment that has not completed is never treated as money in.
-  const pending = await paymentsLib.readEvent('square', {
-    event_id: 'evt_3', type: 'payment.updated',
-    data: { object: { payment: { id: 'pay_x', status: 'PENDING', amount_money: { amount: 100 } } } },
-  }, biz);
-  assert.equal(pending.kind, 'pending');
 });
 
 // ---------------------------------------------------------------------------

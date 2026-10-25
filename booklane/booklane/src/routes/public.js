@@ -14,18 +14,14 @@ const S = require('../services/scheduling');
 const Q = require('../services/quotes');
 const BK = require('../services/bookings');
 const SESS = require('../services/sessions');
-const PROD = require('../services/products');
 const FORMS = require('../services/forms');
 const MSG = require('../services/messaging');
-const stripe = require('../lib/stripe');
-const payments = require('../lib/payments');
 const sms = require('../lib/sms');
 const { LOCATION_TYPES } = require('../defaults');
 
 const writeLimit = rateLimit({ windowMs: 60000, max: 90 });
 const createLimit = rateLimit({ windowMs: 10 * 60000, max: 40 });
 const bookLimit = rateLimit({ windowMs: 10 * 60000, max: 15 });
-const payLimit = rateLimit({ windowMs: 10 * 60000, max: 12 });
 
 function getBusiness(slug) {
   const b = B.bySlug(slug);
@@ -98,25 +94,15 @@ module.exports = function publicRoutes(app) {
       data: { business: publicBusiness(b), eventType: publicEventType(et), serviceNames: services } }));
   });
 
-  // ---------- Sessions you can buy ----------
+  // ---------- Sessions (market calendars) ----------
   app.get('/b/:slug/s/:event', (req, res) => {
     const b = getBusiness(req.params.slug);
     const et = SESS.bySlug(b, req.params.event);
     res.html(page({ title: `${et.name} · ${b.name}`, description: et.description || b.settings.tagline, business: b, embed: bool(req.query.embed),
       scripts: ['common.js', 'scheduler.js', 'session.js'],
-      data: { business: publicBusiness(b), session: SESS.publicSession(et, b), cancelled: req.query.cancelled ? true : false } }));
+      data: { business: publicBusiness(b), session: SESS.publicSession(et, b) } }));
   });
 
-  // Where Stripe sends them back to. The webhook usually lands first, but this page also asks
-  // Stripe directly, so a slow webhook never leaves someone staring at a spinner.
-  app.get('/session/:token', (req, res) => {
-    const order = SESS.orderByToken(req.params.token);
-    if (!order) throw new HttpError(404, 'Not found');
-    const b = B.byId(order.business_id);
-    res.set('X-Robots-Tag', 'noindex');
-    res.html(page({ title: `Finishing up · ${b.name}`, business: b, scripts: ['common.js', 'session-return.js'],
-      data: { business: publicBusiness(b), order: SESS.publicOrder(order) } }));
-  });
 
   // ---------- Custom forms ----------
   app.get('/b/:slug/f/:form', (req, res) => {
@@ -124,19 +110,9 @@ module.exports = function publicRoutes(app) {
     const f = FORMS.bySlug(b, req.params.form);
     res.html(page({ title: `${f.name} · ${b.name}`, description: f.description || b.settings.tagline, business: b, embed: bool(req.query.embed),
       scripts: ['common.js', 'scheduler.js', 'form.js'],
-      data: { business: publicBusiness(b), form: FORMS.publicForm(b, f), cancelled: req.query.cancelled ? true : false } }));
+      data: { business: publicBusiness(b), form: FORMS.publicForm(b, f) } }));
   });
 
-  // Where a form that charges sends people back to.
-  app.get('/b/:slug/f/:form/done', (req, res) => {
-    const b = getBusiness(req.params.slug);
-    const f = FORMS.bySlug(b, req.params.form);
-    const order = PROD.orderByToken(req.query.order);
-    if (!order || order.business_id !== b.id) throw new HttpError(404, 'Not found');
-    res.set('X-Robots-Tag', 'noindex');
-    res.html(page({ title: `Thank you · ${b.name}`, business: b, scripts: ['common.js', 'scheduler.js', 'product-return.js'],
-      data: { business: publicBusiness(b), order: PROD.publicOrder(b, order), orderToken: order.token, form: { slug: f.slug, name: f.name } } }));
-  });
 
   app.get('/api/public/b/:slug/f/:form', (req) => {
     const b = getBusiness(req.params.slug);
@@ -163,20 +139,6 @@ module.exports = function publicRoutes(app) {
     return { timezone: tz, from, to, days };
   });
 
-  // Price a product step's selection, so the running total on the page is the server's figure.
-  app.post('/api/public/b/:slug/f/:form/quote', (req) => {
-    const b = getBusiness(req.params.slug);
-    const f = FORMS.bySlug(b, req.params.form);
-    const step = f.steps.find((x) => x.type === 'product');
-    if (!step || !step.product_id) throw new HttpError(409, 'This form has nothing to price.');
-    const product = db.get('SELECT * FROM products WHERE id = ? AND business_id = ? AND active = 1', step.product_id, b.id);
-    if (!product) throw new HttpError(409, 'That product is not available.');
-    const priced = PROD.priceSelection(product, (req.body || {}).selection || {});
-    return {
-      total_cents: priced.total_cents,
-      lines: priced.lines.map((l) => ({ label: l.label, detail: l.detail || '', qty: l.qty, unit_cents: l.unit_cents, line_cents: l.unit_cents * l.qty })),
-    };
-  });
 
   app.post('/api/public/b/:slug/f/:form/submit', async (req) => {
     writeLimit(req);
@@ -185,88 +147,6 @@ module.exports = function publicRoutes(app) {
     return FORMS.submit(b, f, req.body || {});
   });
 
-  // ---------- Products you can buy outright ----------
-  // A product is paid for first and scheduled afterwards, which is the opposite order to a session.
-  // Nothing here trusts a price from the browser: every total is recomputed from the product row.
-  app.get('/b/:slug/p/:product', (req, res) => {
-    const b = getBusiness(req.params.slug);
-    const p = PROD.bySlug(b, req.params.product);
-    res.html(page({ title: `${p.name} · ${b.name}`, description: p.description || b.settings.tagline, business: b, embed: bool(req.query.embed),
-      scripts: ['common.js', 'product.js'],
-      data: { business: publicBusiness(b), product: PROD.publicProduct(b, p), cancelled: req.query.cancelled ? true : false } }));
-  });
-
-  // Where Stripe sends them back to.
-  app.get('/b/:slug/p/:product/done', (req, res) => {
-    const b = getBusiness(req.params.slug);
-    PROD.bySlug(b, req.params.product);
-    const order = PROD.orderByToken(req.query.order);
-    if (!order || order.business_id !== b.id) throw new HttpError(404, 'Not found');
-    res.set('X-Robots-Tag', 'noindex');
-    res.html(page({ title: `Thank you · ${b.name}`, business: b, scripts: ['common.js', 'scheduler.js', 'product-return.js'],
-      data: { business: publicBusiness(b), order: PROD.publicOrder(b, order), orderToken: order.token } }));
-  });
-
-  // The link in the confirmation email, for anyone who closed the tab before booking their call.
-  app.get('/b/:slug/schedule/:token', (req, res) => {
-    const b = getBusiness(req.params.slug);
-    const order = PROD.orderByScheduleToken(req.params.token);
-    if (!order || order.business_id !== b.id) throw new HttpError(404, 'Not found');
-    res.set('X-Robots-Tag', 'noindex');
-    res.html(page({ title: `Book your call · ${b.name}`, business: b, scripts: ['common.js', 'scheduler.js', 'product-return.js'],
-      data: { business: publicBusiness(b), order: PROD.publicOrder(b, order), orderToken: order.token } }));
-  });
-
-  app.get('/api/public/b/:slug/p/:product', (req) => {
-    const b = getBusiness(req.params.slug);
-    return { product: PROD.publicProduct(b, PROD.bySlug(b, req.params.product)) };
-  });
-
-  // The running total the page shows comes from here, so what they read is what they will be charged.
-  app.post('/api/public/b/:slug/p/:product/quote', (req) => {
-    const b = getBusiness(req.params.slug);
-    const p = PROD.bySlug(b, req.params.product);
-    const priced = PROD.priceSelection(p, (req.body || {}).selection || {});
-    return {
-      total_cents: priced.total_cents,
-      lines: priced.lines.map((l) => ({ label: l.label, detail: l.detail || '', qty: l.qty, unit_cents: l.unit_cents, line_cents: l.unit_cents * l.qty })),
-    };
-  });
-
-  app.post('/api/public/b/:slug/p/:product/checkout', async (req) => {
-    writeLimit(req);
-    const b = getBusiness(req.params.slug);
-    const p = PROD.bySlug(b, req.params.product);
-    return PROD.startCheckout(b, p, req.body || {});
-  });
-
-  app.get('/api/public/orders/:token/slots', async (req) => {
-    const order = PROD.orderByToken(req.params.token);
-    if (!order || order.order_kind !== 'product') throw new HttpError(404, 'Not found');
-    const b = B.byId(order.business_id);
-    const prod = order.product_id ? PROD.hydrate(db.get('SELECT * FROM products WHERE id = ?', order.product_id)) : null;
-    if (!prod || !prod.followup_event_type_id) throw new HttpError(409, 'There is nothing to schedule for this order.');
-    const row = db.get('SELECT * FROM event_types WHERE id = ? AND business_id = ? AND active = 1', prod.followup_event_type_id, b.id);
-    if (!row) throw new HttpError(404, 'That booking page is not available.');
-    const et = BK.hydrateEt(row);
-    const tz = T.isValidTz(req.query.tz) ? req.query.tz : b.timezone;
-    const from = T.isDateStr(req.query.from) ? req.query.from : T.utcToZoned(Date.now(), tz).date;
-    let to = T.isDateStr(req.query.to) ? req.query.to : T.addDays(from, 30);
-    if (to < from) to = from;
-    if (Date.parse(to) - Date.parse(from) > 62 * 86400000) to = T.addDays(from, 62);
-    const slots = await S.computeSlots(et, from, to, tz);
-    const days = {};
-    for (const [d, list] of Object.entries(slots)) days[d] = list.map((x) => x.start);
-    return { timezone: tz, from, to, days, event: { name: et.name, duration_min: et.duration_min } };
-  });
-
-  app.post('/api/public/orders/:token/schedule', async (req) => {
-    writeLimit(req);
-    const order = PROD.orderByToken(req.params.token);
-    if (!order || order.order_kind !== 'product') throw new HttpError(404, 'Not found');
-    const b = B.byId(order.business_id);
-    return { order: await PROD.scheduleFollowup(b, order, req.body || {}) };
-  });
 
   app.get('/api/public/b/:slug/s/:event', (req) => {
     const b = getBusiness(req.params.slug);
@@ -288,90 +168,18 @@ module.exports = function publicRoutes(app) {
     return { timezone: tz, from, to, calendar: cal.slug, days };
   });
 
-  // Book without a card. Either they already paid and have a booking number, or the session is
-  // free. The service refuses the free path on any session that actually has a price.
-  app.post('/api/public/b/:slug/s/:event/claim', async (req) => {
+  // Book a session on the chosen market's calendar. Booklane takes no payments, so this is the
+  // only way in; '/claim' is the older name and stays so an open page keeps working through a deploy.
+  const bookSession = async (req) => {
     bookLimit(req);
     const b = getBusiness(req.params.slug);
     const et = SESS.bySlug(b, req.params.event);
-    const body = req.body || {};
-    const { booking } = await SESS.claimBooked(b, et, body, { alreadyBooked: body.already_booked !== false });
+    const { booking } = await SESS.bookSession(b, et, req.body || {});
     return { token: booking.token, redirect: `/booking/${booking.token}?new=1` };
-  });
+  };
+  app.post('/api/public/b/:slug/s/:event/book', bookSession);
+  app.post('/api/public/b/:slug/s/:event/claim', bookSession);
 
-  // Not booked yet: hold the slot and hand back a Stripe Checkout URL.
-  app.post('/api/public/b/:slug/s/:event/checkout', async (req) => {
-    payLimit(req);
-    const b = getBusiness(req.params.slug);
-    const et = SESS.bySlug(b, req.params.event);
-    return SESS.startCheckout(b, et, req.body || {});
-  });
-
-  // One path, two kinds of order. A session order reports where to send them once the slot is
-  // booked; a product order reports what they bought and whether a call still needs scheduling.
-  app.get('/api/public/orders/:token', async (req) => {
-    const order = SESS.orderByToken(req.params.token);
-    if (!order) throw new HttpError(404, 'Not found');
-    if (order.order_kind === 'product') {
-      const b = B.byId(order.business_id);
-      return { order: PROD.publicOrder(b, await PROD.reconcile(order)) };
-    }
-    return { order: await SESS.reconcileOrder(order) };
-  });
-
-  // Stripe posts here. The signature check is what stops anyone faking a paid order, so an
-  // unverified body is never parsed as an event.
-  /**
-   * One webhook endpoint per provider per business.
-   *
-   * The business is in the path rather than the body because the signature has to be checked with
-   * that business's own key before any field of the payload is read -- and Square signs the
-   * notification URL along with the body, so the URL has to be the one registered anyway.
-   */
-  app.post('/api/public/:provider/webhook/:slug', async (req, res) => {
-    const provider = req.params.provider === 'square' ? 'square' : 'stripe';
-    let business;
-    try { business = getBusiness(req.params.slug); } catch { res.statusCode = 404; return res.json({ error: 'Unknown business' }); }
-
-    let event;
-    try {
-      event = payments.verifyWebhook(provider, req.rawBody, req.headers, { business });
-    } catch (e) {
-      console.error(`[${provider} webhook] rejected:`, e.message);
-      res.statusCode = 400;
-      return res.json({ error: 'Invalid signature' });
-    }
-    try {
-      const result = await SESS.handleStripeEvent(event, { provider, business });
-      return res.json({ received: true, result });
-    } catch (e) {
-      // Answer 500 so the provider retries a transient failure rather than giving up on it.
-      console.error(`[${provider} webhook]`, event.type, e.message);
-      res.statusCode = 500;
-      return res.json({ error: 'Could not process that event' });
-    }
-  });
-
-  // The original Stripe endpoint, kept working for any webhook already registered against it.
-  app.post('/api/public/stripe/webhook', async (req, res) => {
-    let event;
-    try {
-      event = stripe.verifyWebhook(req.rawBody, req.headers['stripe-signature']);
-    } catch (e) {
-      console.error('[stripe webhook] rejected:', e.message);
-      res.statusCode = 400;
-      return res.json({ error: 'Invalid signature' });
-    }
-    try {
-      const result = await SESS.handleStripeEvent(event, { provider: 'stripe' });
-      return res.json({ received: true, result });
-    } catch (e) {
-      // Answer 500 so Stripe retries a transient failure rather than giving up on it.
-      console.error('[stripe webhook]', event.type, e.message);
-      res.statusCode = 500;
-      return res.json({ error: 'Could not process that event' });
-    }
-  });
 
   // Twilio posts replies here. A STOP must be honoured, so the signature is checked first:
   // without it, anyone could post a forged STOP and silence our messages to a real customer,

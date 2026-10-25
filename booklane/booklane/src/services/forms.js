@@ -1,23 +1,20 @@
 'use strict';
 // Custom forms: build any flow out of ordered steps.
 //
-// The four step types the booking pages already had - questions, contact, a live date check, a
-// calendar - plus two that let a form sell: `product` to choose options, and `payment` to charge.
+// The step types the booking pages already had - questions, contact, a live date check, a
+// calendar - plus a plain message. A form with a calendar step books a time; one without is a lead.
+// Booklane takes no payments, so no step charges anything.
 //
-// Money follows the order of the steps rather than a separate setting:
-//   calendar ... then payment  -> hold the slot while they pay   (how a session works)
-//   payment  ... then calendar -> take the money, schedule after (how an album works)
-//   payment with no calendar   -> a plain purchase
-//   neither                    -> the submission is just a lead
-//
-// Nothing here owns a calendar or a price. A schedule step names a booking page, a product step
-// names a product, and this module reads them, so there is still one place to change hours and one
-// place to change prices.
+// Nothing here owns a calendar. A schedule step names a booking page and this module reads it, so
+// there is still one place to change hours.
 const db = require('../db');
 const { HttpError } = require('../lib/router');
-const { slugify, clampStr, int, deepMerge, money, isEmail, baseUrl } = require('../lib/util');
+const { slugify, clampStr, int, deepMerge, isEmail, baseUrl } = require('../lib/util');
 
-const STEP_TYPES = ['questions', 'contact', 'availability', 'schedule', 'product', 'payment', 'message'];
+const STEP_TYPES = ['questions', 'contact', 'availability', 'schedule', 'message'];
+// Step types from when forms could sell. A saved form that still has one simply loses it.
+const RETIRED_STEP_TYPES = ['product', 'payment'];
+const liveSteps = (steps) => (Array.isArray(steps) ? steps.filter((s) => !(s && RETIRED_STEP_TYPES.includes(s.type))) : []);
 const Q_TYPES = ['text', 'textarea', 'number', 'date', 'select', 'choice', 'multi'];
 
 const FORM_SETTINGS = {
@@ -33,7 +30,7 @@ const formSettings = (f) => deepMerge(FORM_SETTINGS, (typeof f.settings === 'str
 function hydrate(f) {
   if (!f) return f;
   const parse = (v, fallback) => (typeof v === 'string' ? db.json(v, fallback) : (v ?? fallback));
-  f.steps = parse(f.steps, []);
+  f.steps = liveSteps(parse(f.steps, []));
   f.settings = parse(f.settings, {});
   f.copy = formSettings(f);
   return f;
@@ -45,7 +42,7 @@ function hydrate(f) {
  */
 function sanitizeSteps(steps, business) {
   if (!Array.isArray(steps)) throw new HttpError(422, 'Steps must be a list', { steps: 'Expected a list' });
-  const out = steps.slice(0, 20).map((s, i) => {
+  const out = liveSteps(steps).slice(0, 20).map((s, i) => {
     const type = STEP_TYPES.includes(s.type) ? s.type : 'questions';
     const step = {
       key: slugify(s.key || s.title || `step-${i + 1}`) || `step-${i + 1}`,
@@ -73,16 +70,6 @@ function sanitizeSteps(steps, business) {
       step.event_type_id = int(s.event_type_id, 0) || null;
       if (business && step.event_type_id && !db.get('SELECT 1 FROM event_types WHERE id = ? AND business_id = ?', step.event_type_id, business.id)) step.event_type_id = null;
     }
-    if (type === 'product') {
-      step.product_id = int(s.product_id, 0) || null;
-      if (business && step.product_id && !db.get('SELECT 1 FROM products WHERE id = ? AND business_id = ?', step.product_id, business.id)) step.product_id = null;
-    }
-    if (type === 'payment') {
-      // Either it charges for a product chosen earlier, or it charges a fixed amount.
-      step.source = s.source === 'fixed' ? 'fixed' : 'product';
-      step.amount_cents = int(s.amount_cents, 0, 0, 100000000);
-      step.label = clampStr(s.label || '', 160);
-    }
     if (type === 'questions') {
       step.questions = (Array.isArray(s.questions) ? s.questions : []).slice(0, 20).map((q, j) => ({
         id: (slugify(q.id || q.label || `q${j + 1}`) || `q${j + 1}`).replace(/-/g, '_'),
@@ -102,47 +89,17 @@ function sanitizeSteps(steps, business) {
 
   if (out.filter((s) => s.type === 'availability').length > 1) throw new HttpError(422, 'Only one date check per form', { steps: 'Two date checks' });
   if (out.filter((s) => s.type === 'schedule').length > 1) throw new HttpError(422, 'Only one calendar per form', { steps: 'Two calendars' });
-  if (out.filter((s) => s.type === 'payment').length > 1) throw new HttpError(422, 'Only one payment step per form', { steps: 'Two payments' });
-
-  const pay = out.find((s) => s.type === 'payment');
-  if (pay && pay.source === 'product' && !out.some((s) => s.type === 'product')) {
-    throw new HttpError(422, 'A payment step that charges for a product needs a product step before it', { steps: 'Missing product step' });
-  }
-  if (pay && pay.source === 'fixed' && !(pay.amount_cents > 0)) {
-    throw new HttpError(422, 'Give the payment step an amount, or point it at a product', { steps: 'No amount' });
-  }
-  if (pay && pay.source === 'product') {
-    const prodAt = out.findIndex((s) => s.type === 'product');
-    const payAt = out.findIndex((s) => s.type === 'payment');
-    if (prodAt > payAt) throw new HttpError(422, 'The product step has to come before the payment step', { steps: 'Product after payment' });
-  }
-  // Anything that takes money or books a time needs to know who the person is.
-  if (out.some((s) => s.type === 'payment' || s.type === 'schedule') && !out.some((s) => s.type === 'contact')) {
-    throw new HttpError(422, 'A form that books or charges needs a contact step', { steps: 'Missing contact step' });
-  }
-  // Holding a slot while someone pays needs the hold-and-expire machinery the sellable sessions
-  // already have. Building a second implementation of that here is how double bookings happen, so
-  // this refuses rather than quietly producing a form that takes money without reserving the time.
-  const shape = shapeOf(out);
-  if (shape.holds_slot) {
-    throw new HttpError(422, 'Put the payment step before the calendar, so they pay and then pick a time. Charging after a time is picked means the slot has to be held during checkout, which is what a sellable Session already does - use one of those instead.', { steps: 'Calendar before payment' });
+  // Anything that books a time needs to know who the person is.
+  if (out.some((s) => s.type === 'schedule') && !out.some((s) => s.type === 'contact')) {
+    throw new HttpError(422, 'A form that books a time needs a contact step', { steps: 'Missing contact step' });
   }
   return out;
 }
 
-/** How this form handles money and time, worked out from the order of its steps. */
+/** What this form does when it is finished, worked out from its steps. */
 function shapeOf(steps) {
-  const at = (t) => steps.findIndex((s) => s.type === t);
-  const sched = at('schedule');
-  const pay = at('payment');
-  return {
-    schedules: sched >= 0,
-    charges: pay >= 0,
-    // A calendar before the payment means the slot is theirs while they pay for it.
-    holds_slot: sched >= 0 && pay >= 0 && sched < pay,
-    schedules_after_payment: sched >= 0 && pay >= 0 && pay < sched,
-    lead_only: sched < 0 && pay < 0,
-  };
+  const schedules = steps.some((s) => s.type === 'schedule');
+  return { schedules, lead_only: !schedules };
 }
 
 const listAll = (business) => db.all('SELECT * FROM forms WHERE business_id = ? ORDER BY sort, id', business.id).map(hydrate);
@@ -160,10 +117,9 @@ function bySlug(business, slug) {
   return hydrate(f);
 }
 
-/** What the browser gets: the steps, plus enough about any referenced page or product to render. */
+/** What the browser gets: the steps, plus enough about any referenced booking page to render. */
 function publicForm(business, form) {
   const f = hydrate(form);
-  const PROD = require('./products');
   const steps = f.steps.map((s) => {
     const out = Object.assign({}, s);
     if (s.type === 'schedule' && s.event_type_id) {
@@ -171,12 +127,6 @@ function publicForm(business, form) {
       out.event = et ? { slug: et.slug, name: et.name, duration_min: et.duration_min, max_days_ahead: et.max_days_ahead } : null;
       delete out.event_type_id;
     }
-    if (s.type === 'product' && s.product_id) {
-      const p = db.get('SELECT * FROM products WHERE id = ? AND active = 1', s.product_id);
-      out.product = p ? PROD.publicProduct(business, p) : null;
-      delete out.product_id;
-    }
-    if (s.type === 'payment') out.amount_display = s.source === 'fixed' ? money(s.amount_cents / 100, 'USD') : '';
     return out;
   });
   return {
@@ -217,10 +167,8 @@ function validateAnswers(steps, body) {
 
 /**
  * Finish a form. What happens depends on the steps it has:
- *   nothing to book or buy -> record the lead and say thank you
+ *   nothing to book        -> record the lead and say thank you
  *   a calendar             -> create the booking
- *   a payment              -> hand back a Stripe Checkout URL; the booking, if any, is made on the
- *                             way back, once the money is in
  *
  * Contact details and answers are validated against the steps that asked for them, so a form that
  * never asked for a phone number is not rejected for missing one.
@@ -240,34 +188,6 @@ async function submit(business, form, body = {}) {
 
   db.run('UPDATE forms SET submissions = submissions + 1 WHERE id = ?', f.id);
 
-  // Paying comes first whenever there is a payment step: nothing is booked on a promise.
-  if (shape.charges) {
-    const pay = f.steps.find((s) => s.type === 'payment');
-    const PROD = require('./products');
-    const payments = require('../lib/payments');
-    if (!payments.configured(business.id)) throw new HttpError(503, 'Card payments are not switched on yet. Please call us and we will take your order.');
-
-    if (pay.source === 'product') {
-      const prodStep = f.steps.find((s) => s.type === 'product');
-      const product = db.get('SELECT * FROM products WHERE id = ? AND business_id = ?', prodStep.product_id, business.id);
-      if (!product) throw new HttpError(409, 'That product is not available any more.');
-      const started = await PROD.startCheckout(business, product, {
-        selection: body.selection || {},
-        contact,
-        lead_token: lead.token,
-      });
-      const sched = f.steps.find((s) => s.type === 'schedule');
-      db.run('UPDATE orders SET form_id = ? WHERE token = ?', f.id, started.order_token);
-      B.logActivity(business.id, lead.id, 'form', `Started checkout from ${f.name}`, { form_id: f.id });
-      return Object.assign({ kind: 'checkout', schedules_after: !!sched }, started);
-    }
-
-    // A fixed amount: the figure comes from the saved step, never from the browser.
-    const order = await fixedCheckout(business, f, pay, lead, contact, answers);
-    B.logActivity(business.id, lead.id, 'form', `Started checkout from ${f.name}`, { form_id: f.id });
-    return order;
-  }
-
   if (shape.schedules) {
     const step = f.steps.find((s) => s.type === 'schedule');
     const row = db.get('SELECT * FROM event_types WHERE id = ? AND business_id = ? AND active = 1', step.event_type_id, business.id);
@@ -286,48 +206,11 @@ async function submit(business, form, body = {}) {
     return { kind: 'booked', redirect: `/booking/${booking.token}` };
   }
 
-  // Nothing to book or buy: the lead is the whole point.
+  // Nothing to book: the lead is the whole point.
   L.setStatus(lead, 'new', { complete: true });
   B.logActivity(business.id, lead.id, 'form', `Submitted ${f.name}`, { form_id: f.id });
   try { await notifyTeam(business, f, lead, contact, answers); } catch { /* the email log records it */ }
   return { kind: 'done', copy: f.copy, redirect: f.copy.redirect_url || '' };
-}
-
-/** A form that charges a set amount, with no product behind it. */
-async function fixedCheckout(business, form, pay, lead, contact, answers) {
-  const payments = require('../lib/payments');
-  const { token } = require('../lib/security');
-  const t = token(20);
-  const label = clampStr(pay.label || form.name, 160);
-  const orderId = db.run(`INSERT INTO orders (business_id, token, lead_id, form_id, order_kind, product_name, amount_cents, currency,
-      status, provider, customer_name, customer_email, customer_phone, answers)
-    VALUES (?,?,?,?,'product',?,?, 'USD','pending','stripe',?,?,?,?)`,
-  business.id, t, lead.id, form.id, label, pay.amount_cents,
-  clampStr([contact.first_name, contact.last_name].filter(Boolean).join(' '), 160),
-  String(contact.email || '').trim().toLowerCase(), clampStr(contact.phone || '', 40),
-  JSON.stringify(Object.assign({ form: form.name }, answers))).lastId;
-  db.run('INSERT INTO order_items (order_id, kind, label, detail, unit_cents, qty, sort) VALUES (?,?,?,?,?,1,0)',
-    orderId, 'product', label, '', pay.amount_cents);
-
-  const base = baseUrl();
-  try {
-    const cs = await payments.createCheckout(business, {
-      amountCents: pay.amount_cents,
-      items: [{ label, unit_cents: pay.amount_cents, qty: 1 }],
-      productName: label,
-      successUrl: `${base}/b/${business.slug}/f/${form.slug}/done?order=${t}`,
-      cancelUrl: `${base}/b/${business.slug}/f/${form.slug}?cancelled=${t}`,
-      customerEmail: String(contact.email || '').trim().toLowerCase() || undefined,
-      referenceId: t,
-      metadata: { business: business.slug, form: form.slug },
-      idempotencyKey: `form-${t}`,
-    });
-    db.run('UPDATE orders SET provider = ?, provider_session_id = ? WHERE id = ?', cs.provider, cs.orderId || cs.id, orderId);
-    return { kind: 'checkout', checkout_url: cs.url, order_token: t, total_cents: pay.amount_cents, schedules_after: false };
-  } catch (e) {
-    db.run("UPDATE orders SET status = 'failed', last_error = ? WHERE id = ?", clampStr(e.message, 300), orderId);
-    throw e;
-  }
 }
 
 async function notifyTeam(business, form, lead, contact, answers) {
@@ -349,8 +232,8 @@ async function notifyTeam(business, form, lead, contact, answers) {
 // ---------- ready-made shapes ----------
 //
 // Starting points, not fixed flows: each one is written into the forms table and is then yours to
-// edit. They wire themselves to whatever this business already has - a real product for the album
-// one, a real booking page for the call - and say so plainly when a piece is missing, rather than
+// edit. They wire themselves to whatever this business already has - a real booking page for the
+// call - and say so plainly when a piece is missing, rather than
 // producing a form that looks finished and cannot work.
 
 const TEMPLATES = {
@@ -395,7 +278,7 @@ const TEMPLATES = {
   },
   'engagement-booking': {
     name: 'Engagement session booking',
-    description: 'For someone whose session is already paid for: they pick a city and a time.',
+    description: 'They pick a city and a time for their engagement session.',
     build: (b) => {
       const et = eventTypeBySlug(b, 'engagement-session') || firstEventType(b);
       return {
@@ -403,46 +286,11 @@ const TEMPLATES = {
           { type: 'questions', title: 'Which city are you in?', subtitle: 'So we show you the right calendar.',
             questions: [{ id: 'city', label: 'City', type: 'choice', display: 'cards', required: true, options: marketNames(b) }] },
           { type: 'questions', title: 'Your booking number', subtitle: 'It is on your contract and your confirmation email.',
-            questions: [{ id: 'booking_number', label: 'Booking number', type: 'text', required: true, placeholder: 'e.g. WU-10432' }] },
+            questions: [{ id: 'booking_number', label: 'Booking number', type: 'text', required: false, placeholder: 'e.g. WU-10432' }] },
           { type: 'contact', title: 'Who are we photographing?', fields: { first_name: 'required', last_name: 'optional', email: 'required', phone: 'required', sms_consent: 'optional' } },
           { type: 'schedule', title: 'Pick your time', event_type_id: et ? et.id : null },
         ],
         warnings: et ? [] : ['No booking page exists yet for the calendar step.'],
-      };
-    },
-  },
-  'album-selling': {
-    name: 'Album selling flow',
-    description: 'Choose an album, pay, then book the design call.',
-    build: (b) => {
-      const product = db.get("SELECT * FROM products WHERE business_id = ? AND active = 1 ORDER BY sort, id LIMIT 1", b.id);
-      const et = eventTypeBySlug(b, 'photo-album') || firstEventType(b);
-      return {
-        steps: [
-          { type: 'product', title: 'Choose your album', product_id: product ? product.id : null },
-          { type: 'contact', title: 'Where should we send it?', fields: { first_name: 'required', last_name: 'optional', email: 'required', phone: 'optional', sms_consent: 'hidden' } },
-          { type: 'payment', title: 'Your order', source: 'product' },
-          { type: 'schedule', title: 'Book your design call', subtitle: 'Sit down with our designer and lay it out page by page.', event_type_id: et ? et.id : null },
-        ],
-        warnings: [product ? null : 'No product exists yet, so the album step has nothing to sell. Create one under Products first.',
-          et ? null : 'No booking page exists yet for the design call.'].filter(Boolean),
-      };
-    },
-  },
-  'engagement-buy-book': {
-    name: 'Engagement session, buy and book',
-    description: 'Pay for the session, then pick a time.',
-    build: (b) => {
-      const et = eventTypeBySlug(b, 'engagement-session') || firstEventType(b);
-      return {
-        steps: [
-          { type: 'questions', title: 'Which city are you in?', questions: [{ id: 'city', label: 'City', type: 'choice', display: 'cards', required: true, options: marketNames(b) }] },
-          { type: 'contact', title: 'Who are we photographing?', fields: { first_name: 'required', last_name: 'optional', email: 'required', phone: 'required', sms_consent: 'optional' } },
-          { type: 'payment', title: 'Your session', source: 'fixed', amount_cents: 49500, label: 'Engagement Session' },
-          { type: 'schedule', title: 'Pick your time', event_type_id: et ? et.id : null },
-        ],
-        warnings: ['This charges first and books afterwards. If you would rather hold the slot while they pay, use the sellable Session instead - that is what it is built for.']
-          .concat(et ? [] : ['No booking page exists yet for the calendar step.']),
       };
     },
   },
@@ -469,7 +317,7 @@ function buildTemplate(business, id) {
 }
 
 module.exports = {
-  STEP_TYPES, Q_TYPES, FORM_SETTINGS, hydrate, sanitizeSteps, shapeOf,
+  STEP_TYPES, RETIRED_STEP_TYPES, Q_TYPES, FORM_SETTINGS, hydrate, sanitizeSteps, shapeOf,
   listAll, byId, bySlug, publicForm, validateAnswers, formSettings, submit,
   templateList, buildTemplate, TEMPLATES,
 };

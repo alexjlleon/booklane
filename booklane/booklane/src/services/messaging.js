@@ -10,7 +10,7 @@
 //      is never texted again.
 const db = require('../db');
 const T = require('../lib/time');
-const { esc, clampStr, int, baseUrl, isEmail, money } = require('../lib/util');
+const { esc, clampStr, int, baseUrl, isEmail } = require('../lib/util');
 const { sendEmail, layout } = require('../lib/email');
 const sms = require('../lib/sms');
 const B = require('./business');
@@ -41,7 +41,6 @@ const VARIABLES = [
   ['host', 'Who is running it'],
   ['services', 'Services they showed interest in'],
   ['booking_number', 'Their booking number, when they gave one'],
-  ['amount_paid', 'What they paid, when they paid'],
   ['manage_url', 'Link to reschedule or cancel'],
   ['quote_url', 'Link to their quote, when they have one'],
   ['business_name', 'Your business name'],
@@ -57,7 +56,6 @@ function contextFor(booking) {
   const host = booking.host_user_id ? db.get('SELECT name, is_resource FROM users WHERE id = ?', booking.host_user_id) : null;
   const cal = host ? db.get('SELECT name FROM calendar_profiles WHERE user_id = ? AND business_id = ?', booking.host_user_id, booking.business_id) : null;
   const lead = booking.lead_id ? db.get('SELECT * FROM leads WHERE id = ?', booking.lead_id) : null;
-  const order = db.get('SELECT * FROM orders WHERE booking_id = ?', booking.id);
   const quote = booking.quote_id ? db.get('SELECT token FROM quotes WHERE id = ?', booking.quote_id) : null;
   const answers = db.json(booking.answers, {});
   const leadAnswers = lead ? db.json(lead.answers, {}) : {};
@@ -101,8 +99,7 @@ function contextFor(booking) {
     location: booking.location || '',
     host: host && !host.is_resource ? host.name : (cal ? cal.name : ''),
     services: serviceList.join(', '),
-    booking_number: order ? (order.booking_number || '') : '',
-    amount_paid: order && order.status === 'paid' ? money(order.amount_cents / 100, order.currency) : '',
+    booking_number: answers.booking_number ? String(answers.booking_number) : '',
     manage_url: `${baseUrl()}/booking/${booking.token}`,
     quote_url: quote ? `${baseUrl()}/q/${quote.token}` : '',
     business_name: business.name,
@@ -338,7 +335,7 @@ function sampleContext(business) {
     when: T.formatDateTime(start, tz), date: T.formatDateTime(start, tz, { hour: undefined, minute: undefined, timeZoneName: undefined, year: undefined }),
     time: T.formatTime(start, tz), weekday: new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'long' }).format(new Date(start)), timezone: tz,
     market: 'Houston', location: 'Hermann Park, Houston', host: 'Houston', services: 'Photography, Photo Booth',
-    booking_number: 'WU-10432', amount_paid: '$495',
+    booking_number: 'WU-10432',
     manage_url: `${baseUrl()}/booking/sample`, quote_url: '',
     business_name: business.name, business_phone: business.phone || '', business_email: business.email || '', website: business.website || '',
   };

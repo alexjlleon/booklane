@@ -12,8 +12,8 @@
       const d = await api('GET', '/event-types');
       A.cache.et = d;
       const slug = A.me.business.slug;
-      // A sellable session is paid for first and scheduled afterwards, so it has no "Pick a time"
-      // step and the rules on this screen can never save it. It belongs to Sessions & markets.
+      // A session is booked on a market calendar and has no "Pick a time" step of its own, so the
+      // rules on this screen can never save it. It belongs to Sessions & markets.
       const pages = d.event_types.filter((e) => (e.kind || 'call') !== 'session');
       return `<div class="topbar"><div><h1>Booking pages</h1><div class="sub">Each call type gets its own link, steps and scheduling rules.</div></div>
         <div class="tools">${isAdmin() ? '<a class="btn btn-primary" href="#/event-types/new">+ New call type</a>' : ''}</div></div>
@@ -43,13 +43,13 @@
       const src = isNew ? { name: '', slug: '', description: '', duration_min: 30, location_type: 'phone', location_value: '', buffer_before: 0, buffer_after: 0, min_notice_min: 240, max_days_ahead: 60, slot_interval_min: 30, daily_limit: 0, assignment: 'round_robin', color: '#5b3df5', active: true, hosts: [A.me.user.id], steps: d.default_steps, team_id: '', booking_type_id: '' }
         : d.event_types.find((e) => String(e.id) === p.id && e.kind !== 'session');
       if (!src) {
-        // Most often this is a sellable session someone reached by its old link. Say where it
+        // Most often this is a session someone reached by its old link. Say where it
         // lives rather than leaving them on an editor that can never save.
         const sess = (d.event_types || []).find((x) => String(x.id) === p.id && x.kind === 'session');
         if (sess) {
           return `<div class="topbar"><div><a href="#/event-types" class="small">← Booking pages</a><h1 style="margin-top:6px">${esc(sess.name)}</h1></div></div>
             <div class="panel"><div class="warn-box"><b>${esc(sess.name)} is a session, not a booking page.</b>
-              <p style="margin:8px 0 0">A session is paid for first and scheduled afterwards, so it has no "Pick a time" step and is set up on its own screen.</p></div>
+              <p style="margin:8px 0 0">A session is booked on its market calendars, so it has no "Pick a time" step and is set up on its own screen.</p></div>
               <a class="btn btn-primary" style="margin-top:14px" href="#/sessions">Open Sessions &amp; markets</a></div>`;
         }
         throw new Error('Call type not found');

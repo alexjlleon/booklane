@@ -6,7 +6,7 @@
 
   const STEP_LABEL = {
     questions: 'Questions', contact: 'Contact details', message: 'A note',
-    availability: 'Date check', schedule: 'Calendar', product: 'Choose a product', payment: 'Payment',
+    availability: 'Date check', schedule: 'Calendar',
   };
   const STEP_HINT = {
     questions: 'Any fields you like',
@@ -14,19 +14,13 @@
     message: 'Just words. Useful for setting expectations.',
     availability: 'Checks a date they gave against your calendar',
     schedule: 'Pick a time on one of your booking pages',
-    product: 'Choose album options, sizes, extras',
-    payment: 'Take the money',
   };
   const Q_LABEL = { text: 'Short text', textarea: 'Long text', number: 'Number', date: 'Date', select: 'Dropdown', choice: 'Pick one', multi: 'Pick several' };
-  const dollars = (c) => (Number(c || 0) / 100).toFixed(2);
   const stat = (k, v, s) => `<div class="stat"><div class="k">${esc(k)}</div><div class="v">${esc(String(v))}</div><div class="s">${s}</div></div>`;
 
   function shapeWords(sh) {
     if (sh.lead_only) return 'Captures a lead';
-    const bits = [];
-    if (sh.charges) bits.push(sh.schedules_after_payment ? 'Pays, then books' : 'Takes payment');
-    else if (sh.schedules) bits.push('Books a time');
-    return bits.join(' · ') || 'Captures a lead';
+    return sh.schedules ? 'Books a time' : 'Captures a lead';
   }
 
   A.route('/forms', {
@@ -39,7 +33,7 @@
       if (!data.forms.length) {
         return `<div class="panel"><div class="empty-state">
           <h3>No forms yet</h3>
-          <p>A form is any flow you want: two questions behind a button on the website, or a long one that checks a date, takes a payment and books a call. Start from a shape below, or build one from scratch.</p>
+          <p>A form is any flow you want: two questions behind a button on the website, or a long one that checks a date and books a call. Start from a shape below, or build one from scratch.</p>
           <div class="row" style="justify-content:center;flex-wrap:wrap;gap:8px;margin-top:6px">
             ${data.templates.map((t) => `<button type="button" class="btn btn-ghost btn-sm" data-tpl="${esc(t.id)}" title="${esc(t.description)}">${esc(t.name)}</button>`).join('')}
             <button type="button" class="btn btn-primary btn-sm" data-new>Blank form</button>
@@ -48,14 +42,14 @@
       }
 
       return `<div class="row between" style="margin-bottom:16px">
-        <div><h1 style="font-size:24px;font-weight:800">Forms</h1><div class="small muted" style="margin-top:2px">Custom flows. Your booking pages, sessions and products stay where they are.</div></div>
+        <div><h1 style="font-size:24px;font-weight:800">Forms</h1><div class="small muted" style="margin-top:2px">Custom flows. Your booking pages and sessions stay where they are.</div></div>
         <div class="row"><button type="button" class="btn btn-ghost" data-tpl-menu>Start from a shape</button><button type="button" class="btn btn-primary" data-new>New form</button></div>
       </div>
 
       <div class="stats">
         ${stat('Forms', data.forms.filter((f) => f.active).length, `of ${data.forms.length} · ${data.forms.filter((f) => !f.active).length} off`)}
         ${stat('Submissions', total, total ? '<a href="#/leads">see the leads</a>' : 'none yet')}
-        ${stat('Taking payment', data.forms.filter((f) => f.shape.charges).length, 'of your forms')}
+        ${stat('Booking a time', data.forms.filter((f) => f.shape.schedules).length, 'of your forms')}
       </div>
 
       <div class="panel">
@@ -99,7 +93,7 @@
 
   function templateMenu(data) {
     A.drawer(`<div class="drawer-head"><div><div class="small muted">Start from</div><h2>A ready-made shape</h2></div><button class="icon-x" data-close-drawer aria-label="Close">&times;</button></div>
-      <p class="help">Each one is a starting point wired to your own pages and products. Everything is editable afterwards.</p>
+      <p class="help">Each one is a starting point wired to your own booking pages. Everything is editable afterwards.</p>
       <div class="stack">${data.templates.map((t) => `<button type="button" class="opt" style="text-align:left;width:100%" data-tpl="${esc(t.id)}">
         <span class="opt-stack"><span>${esc(t.name)}</span><span class="opt-hint">${esc(t.description)}</span></span></button>`).join('')}</div>`);
   }
@@ -121,7 +115,6 @@
   function editForm(x, data) {
     const steps = JSON.parse(JSON.stringify(x ? x.steps : []));
     const etOptions = Object.fromEntries([['', 'Choose a booking page…']].concat(data.event_types.map((e) => [e.id, e.name])));
-    const prodOptions = Object.fromEntries([['', 'Choose a product…']].concat(data.products.map((p) => [p.id, p.name])));
 
     const questionRow = (si, qi, q) => `<tr>
       <td><input class="input" data-q-label="${si}.${qi}" value="${esc(q.label || '')}" placeholder="What is your wedding date?"></td>
@@ -152,16 +145,6 @@
       if (s.type === 'schedule') {
         return A.field('Which calendar', `<select class="select" data-s-et="${i}">${Object.entries(etOptions).map(([v, l]) => `<option value="${v}" ${String(s.event_type_id || '') === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`,
           'The booking page that owns the hours and the people. Change hours there, not here.');
-      }
-      if (s.type === 'product') {
-        return A.field('Which product', `<select class="select" data-s-prod="${i}">${Object.entries(prodOptions).map(([v, l]) => `<option value="${v}" ${String(s.product_id || '') === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`,
-          'Its options and prices come from Products.');
-      }
-      if (s.type === 'payment') {
-        const fixed = s.source === 'fixed';
-        return `${A.field('What are they paying for', `<select class="select" data-s-src="${i}"><option value="product" ${fixed ? '' : 'selected'}>Whatever they chose on the product step</option><option value="fixed" ${fixed ? 'selected' : ''}>A set amount</option></select>`)}
-          ${A.field('Amount', `<input class="input" type="number" step="0.01" min="0" data-s-amt="${i}" value="${esc(dollars(s.amount_cents))}" ${fixed ? '' : 'disabled'}>`)}
-          ${A.field('Shown as', `<input class="input" data-s-plabel="${i}" value="${esc(s.label || '')}" placeholder="Engagement Session">`)}`;
       }
       return '';
     };
@@ -221,13 +204,6 @@
         if (s.type === 'message') s.body = val('s-body');
         if (s.type === 'availability') { s.date_question_id = val('s-date'); s.available_text = val('s-avail'); s.unavailable_text = val('s-unavail'); }
         if (s.type === 'schedule') s.event_type_id = Number(val('s-et')) || null;
-        if (s.type === 'product') s.product_id = Number(val('s-prod')) || null;
-        if (s.type === 'payment') {
-          s.source = val('s-src');
-          const amt = $(`[data-s-amt="${i}"]`, root);
-          if (amt) s.amount_cents = Math.round(Number(amt.value || 0) * 100);
-          s.label = val('s-plabel');
-        }
         if (s.type === 'contact') {
           s.fields = s.fields || {};
           for (const k of ['first_name', 'last_name', 'email', 'phone', 'sms_consent']) {
@@ -260,7 +236,6 @@
           const fresh = { type, title: STEP_LABEL[type], subtitle: '' };
           if (type === 'questions') fresh.questions = [{ id: '', label: '', type: 'text', required: false, options: [] }];
           if (type === 'contact') fresh.fields = { first_name: 'required', last_name: 'optional', email: 'required', phone: 'optional', sms_consent: 'hidden' };
-          if (type === 'payment') fresh.source = 'product';
           if (type === 'availability') fresh.date_question_id = 'event_date';
           steps.push(fresh); repaint(root); return;
         }
@@ -270,9 +245,9 @@
         const aq = t.closest('[data-add-q]'); if (aq) { harvest(root); steps[Number(aq.dataset.addQ)].questions.push({ id: '', label: '', type: 'text', required: false, options: [] }); return repaint(root); }
         const rq = t.closest('[data-rm-q]'); if (rq) { harvest(root); const [i, qi] = rq.dataset.rmQ.split('.').map(Number); steps[i].questions.splice(qi, 1); return repaint(root); }
       });
-      // Changing a question's type or a payment's source changes which inputs make sense.
+      // Changing a question's type changes which inputs make sense.
       root.addEventListener('change', (e) => {
-        if (e.target.matches('[data-q-type],[data-s-src]')) repaint(root);
+        if (e.target.matches('[data-q-type]')) repaint(root);
       });
 
       $('#form-form', root).addEventListener('submit', async (ev) => {

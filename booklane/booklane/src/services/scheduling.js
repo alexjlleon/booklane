@@ -31,29 +31,10 @@ function internalBusy(userId, fromMs, toMs, excludeBookingId) {
 }
 
 /**
- * Slots someone is part-way through paying for. A pending order holds its time so a second buyer
- * cannot pay for it too; the hold expires on its own if they abandon the checkout.
- * This lives here rather than in the sessions service so the scheduler has no circular import.
- */
-function holdBusy(userId, fromMs, toMs, { excludeOrderId } = {}) {
-  return db.all(`SELECT id, hold_start_utc, hold_end_utc FROM orders
-    WHERE hold_host_user_id = ? AND status = 'pending' AND hold_expires_at > ?
-      AND hold_end_utc > ? AND hold_start_utc < ?`,
-  userId, Date.now(), new Date(fromMs - 86400000).toISOString(), new Date(toMs + 86400000).toISOString())
-    .filter((r) => r.id !== excludeOrderId && r.hold_start_utc && r.hold_end_utc)
-    .map((r) => [Date.parse(r.hold_start_utc), Date.parse(r.hold_end_utc)]);
-}
-
-/** Free up holds whose checkout window has passed. Returns how many were released. */
-function releaseExpiredHolds() {
-  return db.run("UPDATE orders SET status = 'expired' WHERE status = 'pending' AND hold_expires_at IS NOT NULL AND hold_expires_at < ?", Date.now()).changes;
-}
-
-/**
  * Compute open slots for an event type between two dates (inclusive) in the invitee's timezone.
  * Returns { [dateInInviteeTz]: [{ start: ISO, hosts: [userId] }] }
  */
-async function computeSlots(et, fromDate, toDate, inviteeTz, { excludeBookingId, excludeOrderId, restrictHostIds, now = Date.now() } = {}) {
+async function computeSlots(et, fromDate, toDate, inviteeTz, { excludeBookingId, restrictHostIds, now = Date.now() } = {}) {
   let hosts = hostsFor(et.id);
   // A session on a market calendar only offers that market's openings, never the other cities'.
   if (Array.isArray(restrictHostIds)) {
@@ -76,8 +57,7 @@ async function computeSlots(et, fromDate, toDate, inviteeTz, { excludeBookingId,
     const cache = {};
     const busy = internalBusy(host.id, fromMs, toMs, excludeBookingId);
     const external = await calendars.getBusy(host.id, fromMs - 3600000, toMs + 3600000);
-    const held = holdBusy(host.id, fromMs, toMs, { excludeOrderId });
-    const allBusy = busy.map((b) => [b.start, b.end]).concat(external, held);
+    const allBusy = busy.map((b) => [b.start, b.end]).concat(external);
     let d = T.utcToZoned(fromMs - 86400000, tz).date;
     const endD = T.utcToZoned(toMs + 86400000, tz).date;
     let guard = 0;
@@ -134,4 +114,4 @@ function pickHost(et, hostIds) {
   return stats[0].id;
 }
 
-module.exports = { computeSlots, availableHostsAt, pickHost, hostsFor, holdBusy, releaseExpiredHolds };
+module.exports = { computeSlots, availableHostsAt, pickHost, hostsFor };

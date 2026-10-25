@@ -106,21 +106,14 @@ function assertFree(et, hostId, startMs, endMs, excludeId = 0) {
   }
 }
 
-async function createBooking({ business, et, startIso, tz, contact = {}, answers = {}, lead, quote, restrictHostIds, excludeOrderId, placeId, force = false }) {
+async function createBooking({ business, et, startIso, tz, contact = {}, answers = {}, lead, quote, restrictHostIds, placeId }) {
   const startMs = Date.parse(startIso);
   if (!Number.isFinite(startMs)) throw new HttpError(400, 'Pick a valid time');
   if (!T.isValidTz(tz)) tz = business.timezone;
   validateContact(et, contact, business);
-  let hostId;
-  if (force && Array.isArray(restrictHostIds) && restrictHostIds.length === 1) {
-    // The slot was held and paid for. Honour the hold even if someone edited the hours meanwhile;
-    // assertFree below still refuses a genuine clash with another confirmed booking.
-    hostId = Number(restrictHostIds[0]);
-  } else {
-    const hosts = await S.availableHostsAt(et, startMs, { restrictHostIds, excludeOrderId });
-    if (!hosts.length) throw new HttpError(409, 'Sorry, that time was just taken. Please pick another time.');
-    hostId = S.pickHost(et, hosts);
-  }
+  const hosts = await S.availableHostsAt(et, startMs, { restrictHostIds });
+  if (!hosts.length) throw new HttpError(409, 'Sorry, that time was just taken. Please pick another time.');
+  const hostId = S.pickHost(et, hosts);
   const endMs = startMs + et.duration_min * 60000;
   const name = [contact.first_name, contact.last_name].map((x) => String(x || '').trim()).filter(Boolean).join(' ');
   const cleanAnswers = L.sanitizeAnswers(answers);
@@ -152,7 +145,7 @@ async function createBooking({ business, et, startIso, tz, contact = {}, answers
   }
   const booking = db.get('SELECT * FROM bookings WHERE id = ?', bookingId);
   // Queue the scheduled emails and texts for this booking. Never let a template mistake stop a
-  // booking that has already been paid for and written to the calendar.
+  // booking that has already been written to the calendar.
   for (const trigger of ['booked', 'before', 'after']) {
     try { MSG.scheduleFor(booking, trigger); } catch (e) { console.error('[messaging schedule]', trigger, e.message); }
   }
