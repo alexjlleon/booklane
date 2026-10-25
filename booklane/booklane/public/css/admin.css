@@ -159,3 +159,5 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
 .panel.sub { background: var(--surface-2); border-style: dashed; margin-top: 14px; }
 .table.compact th, .table.compact td { padding: 6px 8px; font-size: 13.5px; vertical-align: top; }
 .table.compact .input { padding: 7px 9px; }
+.route-box { margin-top: 10px; }
+.route-box summary { cursor: pointer; }

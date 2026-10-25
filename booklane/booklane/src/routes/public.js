@@ -52,6 +52,46 @@ function publicEventType(et, teamsById) {
     // the page is laid out. An inactive team is simply not named, rather than named and misleading.
     team: team ? { id: team.id, name: team.name, color: team.color } : null };
 }
+/** The booking page an option routes to, if it is still live and still an ordinary booking page. */
+function routeTarget(b, id, fromId) {
+  if (!id || Number(id) === Number(fromId)) return null;
+  const row = db.get("SELECT * FROM event_types WHERE id = ? AND business_id = ? AND active = 1 AND kind != 'session'", id, b.id);
+  return row ? BK.hydrateEt(row) : null;
+}
+
+/**
+ * Where an answer sends this booking. The first question (in step order) whose chosen option has a
+ * route wins, so "I'm a client" picked alongside "Photography" still goes to the planning team.
+ * Worked out on the server from the answers, never taken from the browser.
+ */
+function routedEventType(b, et, answers = {}) {
+  for (const step of et.steps || []) {
+    for (const q of step.questions || []) {
+      const routes = q.routes || {};
+      const picked = [].concat(answers[q.id] ?? []).map(String);
+      for (const option of picked) {
+        const target = routeTarget(b, routes[option], et.id);
+        if (target) return target;
+      }
+    }
+  }
+  return null;
+}
+
+/** What the page needs to switch calendars: the target's slug and shape, per routed option. */
+function stepsWithRoutes(b, et) {
+  return (et.steps || []).map((step) => (step.questions ? Object.assign({}, step, {
+    questions: step.questions.map((q) => {
+      const out = {};
+      for (const [option, id] of Object.entries(q.routes || {})) {
+        const t = routeTarget(b, id, et.id);
+        if (t) out[option] = { slug: t.slug, name: t.name, duration_min: t.duration_min, max_days_ahead: t.max_days_ahead };
+      }
+      return Object.assign({}, q, { routes: out });
+    }),
+  }) : step));
+}
+
 const activeEventTypes = (b) => db.all('SELECT * FROM event_types WHERE business_id = ? AND active = 1 ORDER BY sort, id', b.id).map(BK.hydrateEt);
 /**
  * What the public page needs: the pages themselves, and the same pages gathered under their type
@@ -91,7 +131,7 @@ module.exports = function publicRoutes(app) {
     let services = [];
     try { services = Q.catalog(b.id).map((s) => s.name); } catch { /* ignore */ }
     res.html(page({ title: `${et.name} · ${b.name}`, description: et.description || b.settings.tagline, business: b, embed: bool(req.query.embed), scripts: ['common.js', 'scheduler.js', 'booking.js'],
-      data: { business: publicBusiness(b), eventType: publicEventType(et), serviceNames: services } }));
+      data: { business: publicBusiness(b), eventType: Object.assign(publicEventType(et), { steps: stepsWithRoutes(b, et) }), serviceNames: services } }));
   });
 
   // ---------- Sessions (market calendars) ----------
@@ -287,7 +327,10 @@ module.exports = function publicRoutes(app) {
     if (!body.answers || typeof body.answers !== 'object' || Array.isArray(body.answers)) body.answers = {};
     if (quote) body.answers.quote_total = String(quote.total);
     const contact = body.contact && typeof body.contact === 'object' ? body.contact : {};
-    const booking = await BK.createBooking({ business: b, et, startIso: body.start, tz: body.timezone, contact, answers: body.answers || {}, lead, quote, placeId: body.place_id });
+    // An answer can send them to another page's calendar, e.g. an existing client to the planning team.
+    const routed = routedEventType(b, et, body.answers);
+    if (routed) body.answers.routed_to = routed.name;
+    const booking = await BK.createBooking({ business: b, et: routed || et, contactEt: et, startIso: body.start, tz: body.timezone, contact, answers: body.answers || {}, lead, quote, placeId: routed ? undefined : body.place_id });
     if (quote) db.run("UPDATE quotes SET next_step = 'call', status = CASE WHEN status = 'draft' THEN 'submitted' ELSE status END, updated_at = datetime('now') WHERE id = ?", quote.id);
     return { token: booking.token, redirect: `/booking/${booking.token}?new=1` };
   });

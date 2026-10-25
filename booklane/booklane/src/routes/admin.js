@@ -34,6 +34,23 @@ function meResponse(req) {
     app: { base_url: baseUrl(), calendars: Object.fromEntries(Object.entries(calendars.PROVIDERS).map(([k, p]) => [k, { label: p.label, configured: calendars.isConfigured(k) }])), email_provider: appConfig.get('RESEND_API_KEY') ? 'resend' : 'log' } };
 }
 
+/**
+ * Per-option routing: picking this answer books them on another booking page's calendar.
+ * Stored as { option label: event type id }. Only pick-one and pick-many questions route, and an
+ * option that is no longer on the list loses its route rather than lingering invisibly.
+ */
+function cleanRoutes(q) {
+  if (!['choice', 'multi', 'select'].includes(q.type) || !q.routes || typeof q.routes !== 'object') return {};
+  const opts = new Set((Array.isArray(q.options) ? q.options : []).map((o) => clampStr(String(o), 120)));
+  const out = {};
+  for (const [label, id] of Object.entries(q.routes).slice(0, 30)) {
+    const key = clampStr(String(label), 120);
+    const n = int(id, 0);
+    if (n > 0 && opts.has(key)) out[key] = n;
+  }
+  return out;
+}
+
 function sanitizeSteps(steps) {
   if (!Array.isArray(steps)) throw new HttpError(422, 'Steps must be a list');
   const Q_TYPES = ['text', 'textarea', 'number', 'date', 'select', 'choice', 'multi'];
@@ -58,6 +75,7 @@ function sanitizeSteps(steps) {
         id: slugify(q.id || q.label || `q${j + 1}`).replace(/-/g, '_') || `q${j + 1}`, label: clampStr(q.label || 'Question', 160), type: Q_TYPES.includes(q.type) ? q.type : 'text',
         options: Array.isArray(q.options) ? q.options.map((o) => clampStr(String(o), 120)).filter(Boolean).slice(0, 30) : [],
         required: !!q.required, placeholder: clampStr(q.placeholder || '', 120), display: q.display === 'cards' ? 'cards' : 'list', use_services: !!q.use_services,
+        routes: cleanRoutes(q),
       }));
     }
     return step;

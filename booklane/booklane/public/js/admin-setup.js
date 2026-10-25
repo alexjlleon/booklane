@@ -131,6 +131,19 @@
       root.addEventListener('change', (e) => { if (e.target.dataset.pf === 'type') { const i = Number(e.target.closest('[data-pi]').dataset.pi); et.location_options[i].type = e.target.value; renderPlaces(); } });
 
       const stepsEl = $('#steps', root);
+      // Pages an option can send someone to: every other ordinary booking page, live or not, so a page
+      // can be wired up before it is switched on. The public side only routes to live ones.
+      const routePages = (data.event_types || []).filter((x) => (x.kind || 'call') !== 'session' && String(x.id) !== String(p.id));
+      const routeRows = (q) => {
+        const opts = q.options || [];
+        if (!['choice', 'multi', 'select'].includes(q.type) || !opts.length || !routePages.length) return '';
+        const routes = q.routes || {};
+        return `<details class="route-box"${Object.keys(routes).length ? ' open' : ''}><summary class="small"><b>Send some answers to a different calendar</b>${Object.keys(routes).length ? ` <span class="pill booked">${Object.keys(routes).length} routed</span>` : ''}</summary>
+          <p class="help" style="margin:6px 0 8px">If someone picks one of these, they book on that page's calendar instead of this one. Its hosts and round robin decide who they get.</p>
+          ${opts.map((o) => `<div class="grid-2" style="align-items:center;margin-bottom:6px"><div class="small">${esc(o)}</div>
+            <select class="select" data-route="${esc(o)}"><option value="">This page's calendar</option>${routePages.map((x) => `<option value="${x.id}" ${String(routes[o] || '') === String(x.id) ? 'selected' : ''}>${esc(x.name)}${x.active ? '' : ' (off)'}</option>`).join('')}</select></div>`).join('')}
+        </details>`;
+      };
       function renderSteps() {
         stepsEl.innerHTML = et.steps.map((s, i) => `<div class="step-card" data-si="${i}">
           <div class="step-card-head"><span class="step-num">${i + 1}</span><div style="flex:1"><div class="step-type">${STEP_TYPES[s.type]}</div></div>
@@ -147,6 +160,7 @@
               <div class="grid-2">${A.field('Label', `<input class="input" data-qf="label" value="${esc(q.label)}">`)}${A.field('Type', `<select class="select" data-qf="type">${Object.entries(Q_TYPES).map(([k, v]) => `<option value="${k}" ${q.type === k ? 'selected' : ''}>${v}</option>`).join('')}</select>`)}</div>
               ${['choice', 'multi', 'select'].includes(q.type) ? A.field('Options (one per line)', `<textarea class="textarea" rows="3" data-qf="options">${esc((q.options || []).join('\n'))}</textarea>`) : A.field('Placeholder', `<input class="input" data-qf="placeholder" value="${esc(q.placeholder || '')}">`)}
               <div class="row">${A.toggle('_', q.required, 'Required').replace('data-bind="_"', 'data-qf="required"')}${['choice', 'multi'].includes(q.type) ? A.toggle('_', q.display === 'cards', 'Show as cards').replace('data-bind="_"', 'data-qf="display"') : ''}${q.type === 'multi' || q.type === 'choice' ? A.toggle('_', q.use_services, 'Include quote services').replace('data-bind="_"', 'data-qf="use_services"') : ''}</div>
+              ${routeRows(q)}
             </div>`).join('')}<button class="btn btn-link btn-sm" data-add-q>+ Add question</button>` : ''}
         </div>`).join('');
       }
@@ -166,7 +180,18 @@
           if (f === 'type') renderSteps();
         }
       });
-      stepsEl.addEventListener('change', (e) => { if (e.target.dataset.qf === 'type' || e.target.dataset.cf) stepsEl.dispatchEvent(new Event('input', { bubbles: true })); });
+      stepsEl.addEventListener('change', (e) => {
+        if (e.target.dataset.route !== undefined) {
+          const card = e.target.closest('[data-si]'); const qe = e.target.closest('[data-qi]');
+          const q = et.steps[Number(card.dataset.si)].questions[Number(qe.dataset.qi)];
+          q.routes = Object.assign({}, q.routes);
+          if (e.target.value) q.routes[e.target.dataset.route] = Number(e.target.value); else delete q.routes[e.target.dataset.route];
+          return;
+        }
+        if (e.target.dataset.qf === 'type' || e.target.dataset.cf) stepsEl.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      // Options typed into the box become rows to route once the box loses focus.
+      stepsEl.addEventListener('focusout', (e) => { if (e.target.dataset && e.target.dataset.qf === 'options') renderSteps(); });
       root.addEventListener('click', async (e) => {
         const card = e.target.closest('[data-si]');
         const i = card ? Number(card.dataset.si) : -1;

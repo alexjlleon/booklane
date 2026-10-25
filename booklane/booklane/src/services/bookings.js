@@ -106,11 +106,13 @@ function assertFree(et, hostId, startMs, endMs, excludeId = 0) {
   }
 }
 
-async function createBooking({ business, et, startIso, tz, contact = {}, answers = {}, lead, quote, restrictHostIds, placeId }) {
+async function createBooking({ business, et, startIso, tz, contact = {}, answers = {}, lead, quote, restrictHostIds, placeId, contactEt }) {
   const startMs = Date.parse(startIso);
   if (!Number.isFinite(startMs)) throw new HttpError(400, 'Pick a valid time');
   if (!T.isValidTz(tz)) tz = business.timezone;
-  validateContact(et, contact, business);
+  // A routed booking is made on another page's calendar, but the person filled in this page's
+  // contact step, so that is the one their details are checked against.
+  validateContact(contactEt || et, contact, business);
   const hosts = await S.availableHostsAt(et, startMs, { restrictHostIds });
   if (!hosts.length) throw new HttpError(409, 'Sorry, that time was just taken. Please pick another time.');
   const hostId = S.pickHost(et, hosts);

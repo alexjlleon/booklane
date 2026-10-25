@@ -1871,3 +1871,59 @@ test('the markets screen carries what it needs to connect a calendar', async () 
   assert.ok(provs && provs.google && provs.microsoft, 'both providers are offered to the screen');
   for (const p of Object.values(provs)) assert.equal(typeof p.configured, 'boolean');
 });
+
+// ---------------------------------------------------------------------------
+// Answer routing: one option on a question books on another page's calendar,
+// e.g. "I'm a client, I want to talk to someone" goes to the planning team.
+// ---------------------------------------------------------------------------
+test('an answer routes the booking to another page, decided on the server', async () => {
+  require('../src/lib/security').resetRateLimits();
+  const planning = await req('POST', '/api/admin/event-types', { name: 'Client Planning Call', duration_min: 30 }, { cookie: ownerCookie });
+  assert.equal(planning.status, 200, JSON.stringify(planning.data));
+  const CLIENT = "I'm a client, I want to talk to someone";
+  const sales = await req('POST', '/api/admin/event-types', {
+    name: 'Routed Discovery', duration_min: 20,
+    steps: [
+      { type: 'questions', title: 'What are you interested in?', questions: [{ id: 'services', label: 'Services', type: 'multi', display: 'cards',
+        options: ['Photography', 'Videography', 'DJ', 'Photo Booth', 'Coordination', CLIENT],
+        routes: { [CLIENT]: planning.data.id, 'Not an option any more': planning.data.id } }] },
+      { type: 'contact', title: 'You', fields: { first_name: 'required', last_name: 'optional', email: 'required', phone: 'optional', sms_consent: 'hidden' } },
+      { type: 'schedule', title: 'Pick a time' },
+    ],
+  }, { cookie: ownerCookie });
+  assert.equal(sales.status, 200, JSON.stringify(sales.data));
+  const q = sales.data.steps[0].questions[0];
+  assert.deepEqual(q.routes, { [CLIENT]: planning.data.id }, 'a route for an option that is not on the list is dropped');
+
+  // The page is told which calendar that option switches to.
+  const html = (await req('GET', `/b/${bizSlug}/${sales.data.slug}`)).data;
+  const payload = JSON.parse(/window\.__BL__=(\{.*?\});<\/script>/s.exec(html)[1]);
+  assert.equal(payload.eventType.steps[0].questions[0].routes[CLIENT].slug, planning.data.slug);
+
+  const slotOn = async (slug) => {
+    const from = T.addDays(T.utcToZoned(Date.now(), 'America/Chicago').date, 3);
+    const r = await req('GET', `/api/public/b/${bizSlug}/e/${slug}/slots?from=${from}&to=${T.addDays(from, 20)}&tz=America/Chicago`);
+    const day = Object.keys(r.data.days).sort().find((d) => r.data.days[d].length);
+    return r.data.days[day].slice(-1)[0];
+  };
+  const contact = { first_name: 'Existing', email: 'existing.client@example.com' };
+
+  const routed = await req('POST', `/api/public/b/${bizSlug}/e/${sales.data.slug}/book`,
+    { start: await slotOn(planning.data.slug), timezone: 'America/Chicago', contact, answers: { services: ['Photography', CLIENT] } });
+  assert.equal(routed.status, 200, JSON.stringify(routed.data));
+  const bk = db.get('SELECT * FROM bookings WHERE token = ?', routed.data.token);
+  assert.equal(bk.event_type_id, planning.data.id, 'booked on the planning page, even with another service ticked too');
+  assert.equal(JSON.parse(bk.answers).routed_to, 'Client Planning Call');
+
+  const normal = await req('POST', `/api/public/b/${bizSlug}/e/${sales.data.slug}/book`,
+    { start: await slotOn(sales.data.slug), timezone: 'America/Chicago', contact: { first_name: 'New', email: 'new.couple@example.com' }, answers: { services: ['DJ'] } });
+  assert.equal(normal.status, 200, JSON.stringify(normal.data));
+  assert.equal(db.get('SELECT event_type_id FROM bookings WHERE token = ?', normal.data.token).event_type_id, sales.data.id, 'everyone else stays on this page');
+
+  // Switching the planning page off sends everyone back to the page they started on.
+  await req('PATCH', `/api/admin/event-types/${planning.data.id}`, { name: 'Client Planning Call', duration_min: 30, active: false }, { cookie: ownerCookie });
+  const fallback = await req('POST', `/api/public/b/${bizSlug}/e/${sales.data.slug}/book`,
+    { start: await slotOn(sales.data.slug), timezone: 'America/Chicago', contact: { first_name: 'Later', email: 'later.client@example.com' }, answers: { services: [CLIENT] } });
+  assert.equal(fallback.status, 200, JSON.stringify(fallback.data));
+  assert.equal(db.get('SELECT event_type_id FROM bookings WHERE token = ?', fallback.data.token).event_type_id, sales.data.id);
+});

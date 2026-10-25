@@ -14,6 +14,19 @@
     placeId: ((et.places || [])[0] || {}).id || null,
   };
   const steps = et.steps;
+
+  // An answer can route the booking to another page's calendar (an existing client to the planning
+  // team, say). The server makes the same decision from the answers; this just shows the right times.
+  function routeTarget() {
+    for (const step of steps) {
+      for (const q of step.questions || []) {
+        const routes = q.routes || {};
+        for (const option of [].concat(st.answers[q.id] ?? [])) if (routes[option]) return routes[option];
+      }
+    }
+    return null;
+  }
+  const bookingEt = () => routeTarget() || et;
   const app = document.getElementById('app');
 
   const saver = BL.createSaver({
@@ -40,9 +53,9 @@
     const hosts = (et.hosts || []).map((h) => h.name).join(', ');
     return `<aside class="booker-side">
       <div class="biz">${BL.logo(biz)}<div class="biz-name">${esc(biz.name)}</div></div>
-      <div><h1 class="event-title">${esc(et.name)}</h1>${et.description ? `<p class="muted desc" style="margin:8px 0 0">${esc(et.description)}</p>` : ''}</div>
+      <div><h1 class="event-title">${esc(bookingEt().name)}</h1>${!routeTarget() && et.description ? `<p class="muted desc" style="margin:8px 0 0">${esc(et.description)}</p>` : ''}</div>
       <div class="meta-list">
-        <div>${icons.clock}${et.duration_min} min</div>
+        <div>${icons.clock}${bookingEt().duration_min} min</div>
         <div>${BL.locIcon(et.location_type)}${esc(et.location_type === 'in_person' && et.location_value ? et.location_value : et.location_label)}</div>
         ${hosts && et.hosts.length === 1 ? `<div>${icons.user}${esc(hosts)}</div>` : ''}
       </div>
@@ -159,7 +172,7 @@
     const step = steps[st.i];
     const pos = visiblePos(st.i), total = visibleCount();
     let body = '';
-    if (step.type === 'schedule') body = placeChooser() + '<div id="scheduler"></div>';
+    if (step.type === 'schedule') body = (routeTarget() ? '' : placeChooser()) + '<div id="scheduler"></div>';
     else if (step.type === 'availability') body = renderAvailability(step);
     else if (step.type === 'contact') body = renderContact(step);
     else body = `<form class="step-form" novalidate>${(step.questions || []).map(renderQuestion).join('')}</form>`;
@@ -176,7 +189,7 @@
         </div>
       </main></div></div>${BL.powered()}`;
     if (step.type === 'schedule') {
-      BL.Scheduler({ root: $('#scheduler'), slug: biz.slug, eventSlug: et.slug, tz: st.tz, selected: st.slot, maxDaysAhead: et.max_days_ahead,
+      BL.Scheduler({ root: $('#scheduler'), slug: biz.slug, eventSlug: bookingEt().slug, tz: st.tz, selected: st.slot, maxDaysAhead: bookingEt().max_days_ahead,
         onTzChange: (tz) => { st.tz = tz; },
         onSelect: (iso) => {
           st.slot = iso; st.error = null;
@@ -292,8 +305,11 @@
       capture({ contact: { [t.name]: st.contact[t.name] } }, e.type === 'change' || t.type === 'checkbox');
     } else if (t.dataset.q) {
       const id = t.dataset.q;
+      const before = bookingEt().slug;
       if (t.dataset.multi === '1') st.answers[id] = $$(`input[data-q="${CSS.escape(id)}"]:checked`, app).map((x) => x.value);
       else st.answers[id] = t.value;
+      // A different calendar means a time picked earlier may not exist on it.
+      if (bookingEt().slug !== before) { st.slot = null; const sideEl = $('.booker-side'); if (sideEl) sideEl.outerHTML = side(); }
       if (t.closest('.opt')) $$(`input[data-q="${CSS.escape(id)}"]`, app).forEach((x) => x.closest('.opt').classList.toggle('is-on', x.checked));
       capture({ answers: { [id]: st.answers[id] } }, t.type === 'radio' || t.type === 'checkbox' || e.type === 'change');
       if (t.type === 'radio') {
