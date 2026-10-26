@@ -434,26 +434,30 @@ module.exports = function adminRoutes(app) {
     requireRole('owner')(req);
     const b = B.byId(bid(req));
     const body = req.body || {};
+    // Check everything before writing anything, so a bad email never leaves a half-saved domain.
+    let domain; let from;
     if (body.custom_domain !== undefined) {
-      const d = B.normalizeDomain(body.custom_domain);
-      if (d) {
-        if (!B.isDomain(d)) throw new HttpError(422, 'That does not look like a domain. Use something like book.yourcompany.com', { custom_domain: 'Not a domain' });
-        const taken = db.get('SELECT id FROM businesses WHERE custom_domain = ? AND id != ?', d, b.id);
+      domain = B.normalizeDomain(body.custom_domain);
+      if (domain) {
+        if (!B.isDomain(domain)) throw new HttpError(422, 'That does not look like a domain. Use something like book.yourcompany.com', { custom_domain: 'Not a domain' });
+        const taken = db.get('SELECT id FROM businesses WHERE custom_domain = ? AND id != ?', domain, b.id);
         if (taken) throw new HttpError(409, 'Another company on Booklane already uses that domain', { custom_domain: 'Already in use' });
       }
-      db.run('UPDATE businesses SET custom_domain = ? WHERE id = ?', d || null, b.id);
-      B.logActivity(b.id, null, 'settings', d ? `Domain set to ${d} by ${req.user.email}` : `Domain removed by ${req.user.email}`);
     }
     if (body.email_from !== undefined) {
-      const v = clampStr(String(body.email_from || '').trim(), 200);
-      if (v) {
-        const addr = (v.match(/<([^>]+)>/) || [null, v])[1].trim();
-        if (!isEmail(addr)) throw new HttpError(422, 'Use an address like Your Company <hello@yourcompany.com>', { email_from: 'Not an email address' });
-        appConfig.set('EMAIL_FROM', v, req.user.id, b.id);
-      } else {
-        appConfig.clear('EMAIL_FROM', b.id);
+      from = clampStr(String(body.email_from || '').trim(), 200);
+      if (from) {
+        const addr = (from.match(/<([^>]+)>/) || [null, from])[1].trim();
+        if (!isEmail(addr) || (from.match(/</g) || []).length > 1) throw new HttpError(422, 'Use an address like Your Company <hello@yourcompany.com>', { email_from: 'Not an email address' });
       }
-      B.logActivity(b.id, null, 'settings', v ? `Send-from address set to ${v} by ${req.user.email}` : `Send-from address cleared by ${req.user.email}`);
+    }
+    if (domain !== undefined && (domain || null) !== (b.custom_domain || null)) {
+      db.run('UPDATE businesses SET custom_domain = ? WHERE id = ?', domain || null, b.id);
+      B.logActivity(b.id, null, 'settings', domain ? `Domain set to ${domain} by ${req.user.email}` : `Domain removed by ${req.user.email}`);
+    }
+    if (from !== undefined) {
+      if (from) appConfig.set('EMAIL_FROM', from, req.user.id, b.id); else appConfig.clear('EMAIL_FROM', b.id);
+      B.logActivity(b.id, null, 'settings', from ? `Send-from address set to ${from} by ${req.user.email}` : `Send-from address cleared by ${req.user.email}`);
     }
     return domainOut(B.byId(b.id));
   });

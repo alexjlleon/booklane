@@ -2152,6 +2152,10 @@ test('every link sent for the company points at its domain, and it emails from i
   const other = db.get("SELECT id FROM businesses WHERE name = 'Second Company'").id;
   assert.notEqual(config.get('EMAIL_FROM', other), 'Example Co <bookings@example.test>', 'another company does not inherit it');
   assert.equal((await req('PUT', '/api/admin/business/domain', { email_from: 'nope' }, { cookie: ownerCookie })).status, 422);
+  // A rejected email leaves the domain exactly as it was.
+  const half = await req('PUT', '/api/admin/business/domain', { custom_domain: 'other.example.test', email_from: 'A <b@c.test>x<d@e.test>' }, { cookie: ownerCookie });
+  assert.equal(half.status, 422);
+  assert.equal(db.get('SELECT custom_domain FROM businesses WHERE id = ?', bizId).custom_domain, 'book.example.test', 'nothing was half-saved');
 
   const et = db.get("SELECT * FROM event_types WHERE business_id = ? AND slug = 'discovery-call'", bizId);
   const from = T.addDays(T.utcToZoned(Date.now(), 'America/Chicago').date, 3);
