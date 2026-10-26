@@ -1102,6 +1102,20 @@ module.exports = function adminRoutes(app) {
     return { ...out, requeued_note: dropped ? `${dropped} queued message${dropped === 1 ? '' : 's'} dropped; new bookings use the updated version` : null };
   });
 
+  // A copy to start a similar message from. It starts switched off, so nothing goes out twice
+  // until the copy has been changed and turned on.
+  app.post('/api/admin/automations/:id/clone', (req) => {
+    requireRole('admin')(req);
+    const a = getAutomation(req);
+    const sort = (db.get('SELECT MAX(sort) m FROM message_automations WHERE business_id = ?', bid(req)) || {}).m || 0;
+    const { lastId } = db.run(`INSERT INTO message_automations (business_id, name, channel, kind, trigger, offset_min,
+        event_type_ids, calendar_ids, service_match, match_mode, skip_if_rebooked, subject, body_html, sms_body, active, sort)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)`,
+    a.business_id, `${a.name} (copy)`.slice(0, 200), a.channel, a.kind, a.trigger, a.offset_min, a.event_type_ids, a.calendar_ids,
+    a.service_match, a.match_mode, a.skip_if_rebooked, a.subject, a.body_html, a.sms_body, sort + 1);
+    return MSG.listAutomations(bid(req)).find((x) => x.id === lastId);
+  });
+
   app.delete('/api/admin/automations/:id', (req) => {
     requireRole('admin')(req);
     const a = getAutomation(req);

@@ -792,6 +792,21 @@ const mkAutomation = (patch = {}) => req('POST', '/api/admin/automations', {
   subject: 'See you soon', body_html: 'Hi {{first_name}}, your {{session}} is {{when}}.', active: true, ...patch,
 }, { cookie: ownerCookie });
 
+test('cloning an automation copies everything but starts it switched off', async () => {
+  stubTwilio();
+  const orig = await mkAutomation({ name: 'Day-before reminder', channel: 'both', sms_body: 'See you {{when}}', service_match: ['DJ'], skip_if_rebooked: true });
+  assert.equal(orig.status, 200, JSON.stringify(orig.data));
+  const c = await req('POST', `/api/admin/automations/${orig.data.id}/clone`, null, { cookie: ownerCookie });
+  assert.equal(c.status, 200, JSON.stringify(c.data));
+  assert.notEqual(c.data.id, orig.data.id);
+  assert.equal(c.data.name, 'Day-before reminder (copy)');
+  assert.equal(c.data.active, false, 'off until switched on');
+  for (const k of ['channel', 'kind', 'trigger', 'offset_min', 'subject', 'body_html', 'sms_body', 'match_mode', 'skip_if_rebooked']) assert.deepEqual(c.data[k], orig.data[k], k);
+  assert.deepEqual(c.data.service_match, orig.data.service_match);
+  assert.equal((await req('POST', '/api/admin/automations/999999/clone', null, { cookie: ownerCookie })).status, 404);
+  for (const id of [orig.data.id, c.data.id]) await req('DELETE', `/api/admin/automations/${id}`, null, { cookie: ownerCookie });
+});
+
 test('an automation fires for a matching booking and skips one that does not match', async () => {
   freshLimits(); stubTwilio();
   const ets = (await req('GET', '/api/admin/event-types', null, { cookie: ownerCookie })).data.event_types;

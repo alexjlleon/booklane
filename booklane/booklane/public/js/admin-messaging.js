@@ -51,7 +51,7 @@
             <td class="small">${esc(CHANNELS[a.channel] || a.channel)}</td>
             <td class="small">${describeScope(a, d)}</td>
             <td class="num">${a.sent || ''}${a.failed ? ` <span style="color:#c0392b">(${a.failed} failed)</span>` : ''}</td>
-            <td class="num"><button type="button" class="btn btn-ghost btn-sm" data-edit="${a.id}">Edit</button></td>
+            <td class="num" style="white-space:nowrap"><button type="button" class="btn btn-ghost btn-sm" data-clone="${a.id}" title="Make a switched-off copy to start a similar message">Clone</button> <button type="button" class="btn btn-ghost btn-sm" data-edit="${a.id}">Edit</button></td>
           </tr>`).join('')}
         </tbody></table></div>` : `<div class="empty-state"><h3>Nothing scheduled yet</h3>
           <p>Add a reminder before the appointment, a thank-you after it, or a nudge for consults that did not book. You write the words; the timing and conditions are set here.</p>
@@ -63,6 +63,15 @@
         if (e.target.closest('[data-new]')) return editAutomation(null);
         const ed = e.target.closest('[data-edit]');
         if (ed) return editAutomation((A.cache.auto.automations || []).find((a) => a.id === Number(ed.dataset.edit)));
+        const cl = e.target.closest('[data-clone]');
+        if (cl) return (async () => {
+          cl.disabled = true;
+          try {
+            const copy = await A.guard(() => api('POST', `/automations/${cl.dataset.clone}/clone`), 'Copy made. It is off until you switch it on.');
+            await A.render();
+            if (copy) editAutomation(copy);
+          } catch (err) { cl.disabled = false; }
+        })();
       });
     },
   });
