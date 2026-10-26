@@ -179,6 +179,38 @@ test('date overrides and round robin across hosts', async () => {
   assert.equal(none, undefined, 'no slots when everyone is off');
 });
 
+test('round robin priority: the highest-rated free host gets the call', async () => {
+  const S = require('../src/services/scheduling');
+  const me = await req('GET', '/api/admin/auth/me', null, { cookie: ownerCookie });
+  const owner = me.data.user.id;
+  const riley = db.get("SELECT id FROM users WHERE email = 'riley@test.dev'").id;
+  const etRow = db.get("SELECT * FROM event_types WHERE slug = 'discovery-call'");
+
+  // Everyone starts at medium, so the even spread is unchanged.
+  let out = await req('PATCH', `/api/admin/event-types/${etRow.id}`, { hosts: [owner, riley] }, { cookie: ownerCookie });
+  assert.deepEqual(out.data.host_priorities, { [owner]: 'medium', [riley]: 'medium' });
+
+  // Riley high, owner low: Riley takes every time both are free, however many calls she has.
+  out = await req('PATCH', `/api/admin/event-types/${etRow.id}`, { hosts: [owner, riley], host_priorities: { [owner]: 'low', [riley]: 'High' } }, { cookie: ownerCookie });
+  assert.equal(out.status, 200, JSON.stringify(out.data));
+  assert.deepEqual(out.data.host_priorities, { [owner]: 'low', [riley]: 'high' });
+  const et = db.get('SELECT * FROM event_types WHERE id = ?', etRow.id);
+  assert.equal(S.pickHost(et, [owner, riley]), riley);
+  // ...and the low-priority person still gets it when nobody above them is free.
+  assert.equal(S.pickHost(et, [owner]), owner);
+
+  // Saving hosts without priorities keeps them; a nonsense value is ignored.
+  out = await req('PATCH', `/api/admin/event-types/${etRow.id}`, { hosts: [owner, riley], host_priorities: { [riley]: 'urgent' } }, { cookie: ownerCookie });
+  assert.deepEqual(out.data.host_priorities, { [owner]: 'low', [riley]: 'high' });
+  // Priorities alone (no hosts list) can be changed too.
+  out = await req('PATCH', `/api/admin/event-types/${etRow.id}`, { host_priorities: { [owner]: 'high', [riley]: 'high' } }, { cookie: ownerCookie });
+  assert.deepEqual(out.data.host_priorities, { [owner]: 'high', [riley]: 'high' });
+
+  // "Always first person listed" ignores priority.
+  assert.equal(S.pickHost({ ...et, assignment: 'single' }, [owner, riley]), owner);
+  await req('PATCH', `/api/admin/event-types/${etRow.id}`, { host_priorities: { [owner]: 'medium', [riley]: 'medium' } }, { cookie: ownerCookie });
+});
+
 test('quote pricing is computed server side; contract request emails, pushes to BoothBook and webhook', async () => {
   const svc = await req('POST', '/api/admin/services', {
     name: 'DJ', pricing_type: 'flat', option_groups: [{ name: 'Package', mode: 'base', required: true, choices: [{ name: 'Silver', price: 1000, default: true }, { name: 'Gold', price: 1500 }] }],

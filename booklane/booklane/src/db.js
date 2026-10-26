@@ -261,6 +261,10 @@ for (const sql of [
   // person between teams should not silently re-file the pages they happen to cover.
   'ALTER TABLE event_types ADD COLUMN team_id INTEGER',
   'ALTER TABLE event_types ADD COLUMN booking_type_id INTEGER',
+  // Round robin priority per host on a page: 3 high, 2 medium, 1 low. When several people are free
+  // for a time, only the highest priority among them is considered; the even spread happens within
+  // that tier. Everyone starts at medium, which is exactly how round robin behaved before.
+  'ALTER TABLE event_type_hosts ADD COLUMN priority INTEGER NOT NULL DEFAULT 2',
   // Whether an all-day entry on a connected calendar blocks bookings. Off by default: in a
   // business whose calendar carries an all-day entry per job, treating those as solid busy time
   // blacks out every working day, and the booking page silently offers nothing at all.

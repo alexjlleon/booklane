@@ -486,8 +486,12 @@ module.exports = function adminRoutes(app) {
   // Real people only. Market and designer calendars are login-less rows and belong on the
   // Sessions screen, not in the team list or the host pickers.
   const members = (businessId) => db.all("SELECT u.id, u.name, u.email, u.timezone, m.role FROM users u JOIN memberships m ON m.user_id = u.id WHERE m.business_id = ? AND m.status = 'active' AND COALESCE(u.is_resource,0) = 0 ORDER BY u.name", businessId);
+  const PRIORITY_VALUE = { high: 3, medium: 2, low: 1 };
+  const PRIORITY_NAME = { 3: 'high', 2: 'medium', 1: 'low' };
   function etOut(et) {
-    return { ...BK.hydrateEt(et), active: !!et.active, hosts: db.all('SELECT user_id FROM event_type_hosts WHERE event_type_id = ?', et.id).map((r) => r.user_id),
+    const hostRows = db.all('SELECT user_id, priority FROM event_type_hosts WHERE event_type_id = ?', et.id);
+    return { ...BK.hydrateEt(et), active: !!et.active, hosts: hostRows.map((r) => r.user_id),
+      host_priorities: Object.fromEntries(hostRows.map((r) => [r.user_id, PRIORITY_NAME[r.priority] || 'medium'])),
       bookings_30d: db.get("SELECT COUNT(*) c FROM bookings WHERE event_type_id = ? AND created_at >= datetime('now','-30 days')", et.id).c };
   }
   // ---------- Teams and booking types ----------
@@ -560,8 +564,20 @@ module.exports = function adminRoutes(app) {
         const valid = new Set(members(businessId).map((m) => m.id));
         let hosts = (Array.isArray(b.hosts) ? b.hosts : [req.user.id]).map(Number).filter((h) => valid.has(h));
         if (!hosts.length) hosts = [req.user.id];
+        // Keep each person's priority unless this save says otherwise, so un-ticking and re-ticking
+        // someone, or an older screen that does not send priorities, never quietly resets them.
+        const before = new Map(db.all('SELECT user_id, priority FROM event_type_hosts WHERE event_type_id = ?', id).map((r) => [r.user_id, r.priority]));
+        const sent = b.host_priorities && typeof b.host_priorities === 'object' ? b.host_priorities : {};
         db.run('DELETE FROM event_type_hosts WHERE event_type_id = ?', id);
-        for (const h of hosts) db.run('INSERT INTO event_type_hosts (event_type_id, user_id) VALUES (?,?)', id, h);
+        for (const h of hosts) {
+          const p = PRIORITY_VALUE[String(sent[h] || '').toLowerCase()] || before.get(h) || 2;
+          db.run('INSERT INTO event_type_hosts (event_type_id, user_id, priority) VALUES (?,?,?)', id, h, p);
+        }
+      } else if (b.host_priorities && typeof b.host_priorities === 'object') {
+        for (const [h, name] of Object.entries(b.host_priorities)) {
+          const p = PRIORITY_VALUE[String(name || '').toLowerCase()];
+          if (p) db.run('UPDATE event_type_hosts SET priority = ? WHERE event_type_id = ? AND user_id = ?', p, id, Number(h));
+        }
       }
     });
     return etOut(db.get('SELECT * FROM event_types WHERE id = ?', id));

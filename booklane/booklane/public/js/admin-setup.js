@@ -82,8 +82,10 @@
             <div class="grid-2">${A.field('Buffer before (min)', A.input('buffer_before', et.buffer_before, 'type="number" min="0" data-type="number"'))}${A.field('Buffer after (min)', A.input('buffer_after', et.buffer_after, 'type="number" min="0" data-type="number"'))}</div>
           </div>
           <div class="panel" id="hosts"><h2>Who takes these calls</h2><p class="desc">Times show when any selected person is free.</p>
-            <div class="stack" style="gap:8px">${d.members.map((m) => `<label class="check" style="font-size:14px"><input type="checkbox" data-host="${m.id}" ${et.hosts.includes(m.id) ? 'checked' : ''}><span><b>${esc(m.name)}</b> <span class="muted">${esc(m.email)}</span></span></label>`).join('')}</div>
+            <div class="stack" style="gap:8px">${d.members.map((m) => { const pr = (et.host_priorities || {})[m.id] || 'medium'; return `<div class="row between" style="gap:10px;align-items:center"><label class="check" style="font-size:14px;flex:1;min-width:0"><input type="checkbox" data-host="${m.id}" ${et.hosts.includes(m.id) ? 'checked' : ''}><span><b>${esc(m.name)}</b> <span class="muted">${esc(m.email)}</span></span></label>
+              <select class="select" data-priority="${m.id}" style="width:auto;padding:4px 8px;font-size:13px" aria-label="Priority for ${esc(m.name)}" title="Round robin priority">${['high', 'medium', 'low'].map((v) => `<option value="${v}" ${pr === v ? 'selected' : ''}>${v[0].toUpperCase() + v.slice(1)}</option>`).join('')}</select></div>`; }).join('')}</div>
             <div style="margin-top:14px">${A.field('When more than one person is free', A.select('assignment', et.assignment, { round_robin: 'Round robin (spread calls evenly)', single: 'Always first person listed' }))}</div>
+            <p class="help" data-priority-help style="margin:6px 0 0">Priority: when several people are free at a time, the call goes to the highest priority among them, spread evenly within that level. Lower priorities get calls when nobody above them is free.</p>
           </div>
           <div class="panel" id="filing"><h2>Filing</h2><p class="desc">The type is the heading this page sits under on your booking page. The team is shown on its card.</p>
             ${A.field('Booking type', A.select('booking_type_id', et.booking_type_id || '', Object.assign({ '': 'No type (shown at the bottom)' }, Object.fromEntries((d.booking_types || []).map((t) => [t.id, t.name])))))}
@@ -195,6 +197,18 @@
       });
       // Options typed into the box become rows to route once the box loses focus.
       stepsEl.addEventListener('focusout', (e) => { if (e.target.dataset && e.target.dataset.qf === 'options') renderSteps(); });
+      // Priority only means something for round robin with more than one person ticked.
+      const syncPriority = () => {
+        const rr = ($('[data-bind="assignment"]', root) || {}).value === 'round_robin';
+        const ticked = $$('[data-host]', root).filter((x) => x.checked).length;
+        for (const sel of $$('[data-priority]', root)) {
+          const on = rr && ticked > 1 && $(`[data-host="${sel.dataset.priority}"]`, root).checked;
+          sel.style.visibility = on ? 'visible' : 'hidden';
+        }
+        const help = $('[data-priority-help]', root); if (help) help.style.display = rr && ticked > 1 ? '' : 'none';
+      };
+      $('#hosts', root).addEventListener('change', syncPriority);
+      syncPriority();
       root.addEventListener('click', async (e) => {
         const card = e.target.closest('[data-si]');
         const i = card ? Number(card.dataset.si) : -1;
@@ -221,6 +235,7 @@
           body.location_value = (et.location_options[0] || {}).value || '';
           body.min_notice_min = Math.round(Number($('#notice', root).value || 0) * 60);
           body.hosts = $$('[data-host]', root).filter((x) => x.checked).map((x) => Number(x.dataset.host));
+          body.host_priorities = Object.fromEntries($$('[data-priority]', root).map((x) => [x.dataset.priority, x.value]));
           body.steps = et.steps.map((s) => Object.assign({}, s, { questions: s.questions && s.questions.map((q) => Object.assign({}, q, { id: q.id || q.label })) }));
           try {
             const saved = p.id === 'new' ? await api('POST', '/event-types', body) : await api('PATCH', `/event-types/${p.id}`, body);

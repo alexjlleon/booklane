@@ -105,6 +105,12 @@ async function availableHostsAt(et, startMs, opts = {}) {
 function pickHost(et, hostIds) {
   if (!hostIds.length) return null;
   if (et.assignment !== 'round_robin' || hostIds.length === 1) return hostIds[0];
+  // Priority first: of the people free at this time, only the highest-rated are in the running.
+  // A low-priority host still gets calls whenever nobody above them is free.
+  const prio = new Map(db.all(`SELECT user_id, priority FROM event_type_hosts WHERE event_type_id = ? AND user_id IN (${hostIds.map(() => '?').join(',')})`, et.id, ...hostIds).map((r) => [r.user_id, r.priority]));
+  const top = Math.max(...hostIds.map((id) => prio.get(id) ?? 2));
+  hostIds = hostIds.filter((id) => (prio.get(id) ?? 2) === top);
+  if (hostIds.length === 1) return hostIds[0];
   const since = new Date(Date.now() - 30 * 86400000).toISOString();
   const stats = hostIds.map((id) => {
     const r = db.get(`SELECT COUNT(*) c, MAX(created_at) last FROM bookings WHERE host_user_id = ? AND event_type_id = ? AND created_at >= ? AND status != 'cancelled'`, id, et.id, since);
