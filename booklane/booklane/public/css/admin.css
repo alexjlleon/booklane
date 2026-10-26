@@ -161,3 +161,11 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
 .table.compact .input { padding: 7px 9px; }
 .route-box { margin-top: 10px; }
 .route-box summary { cursor: pointer; }
+/* Team performance */
+.team-table tr.clickable { cursor: pointer; }
+.team-table tr.clickable:hover td { background: #faf9fc; }
+.util { min-width: 150px; }
+.util-bar { height: 8px; border-radius: 99px; background: #eeecf3; overflow: hidden; margin-bottom: 4px; }
+.util-bar span { display: block; height: 100%; border-radius: 99px; }
+.resched-day + .resched-day { margin-top: 12px; }
+.resched-times { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }

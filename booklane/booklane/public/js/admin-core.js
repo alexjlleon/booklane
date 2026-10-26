@@ -103,6 +103,7 @@
     ['/leads', 'Leads', ICON('<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/>')],
     ['/bookings', 'Bookings', ICON('<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>')],
     ['/quotes', 'Quotes', ICON('<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M9 13h6M9 17h4"/>')],
+    ['/team-stats', 'Team performance', ICON('<path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/>'), 'admin'],
     ['/messages', 'Message queue', ICON('<path d="M4 4h16v12H5.2L4 17.2z"/><path d="M8 9h8M8 12h5"/>')],
     ['Setup', null],
     ['/event-types', 'Booking pages', ICON('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>')],
@@ -126,7 +127,7 @@
     <div class="layout"><nav class="sidebar" aria-label="Main">
       <div class="brand-row"><div class="logo-mark"></div>${esc((window.__BL__ || {}).appName || 'Booklane')}</div>
       <div class="biz-switch"><label class="sr-only" for="bizsel">Business</label><select id="bizsel">${me.businesses.map((b) => `<option value="${b.id}" ${biz && b.id === biz.id ? 'selected' : ''}>${esc(b.name)}</option>`).join('')}<option value="__new">+ Add a business</option></select></div>
-      <div class="nav">${NAV.map((n) => n[1] === null ? `<div class="nav-sec">${n[0]}</div>` : `<a href="#${n[0]}" class="${active === n[0] ? 'active' : ''}">${n[2]}<span>${n[1]}</span></a>`).join('')}</div>
+      <div class="nav">${NAV.filter((n) => n[3] !== 'admin' || ['owner', 'admin'].includes((A.me && A.me.business || {}).role)).map((n) => n[1] === null ? `<div class="nav-sec">${n[0]}</div>` : `<a href="#${n[0]}" class="${active === n[0] ? 'active' : ''}">${n[2]}<span>${n[1]}</span></a>`).join('')}</div>
       <div class="sidebar-foot">${biz ? `<a href="/b/${esc(biz.slug)}" target="_blank" rel="noopener">View booking page ↗</a>` : ''}<a href="#/account">${esc(me.user.name)} · Account</a><button type="button" data-logout>Log out</button></div>
     </nav><main class="main" id="view"></main></div>`;
   }

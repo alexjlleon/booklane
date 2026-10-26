@@ -114,4 +114,4 @@ function pickHost(et, hostIds) {
   return stats[0].id;
 }
 
-module.exports = { computeSlots, availableHostsAt, pickHost, hostsFor };
+module.exports = { computeSlots, availableHostsAt, pickHost, hostsFor, windowsFor };

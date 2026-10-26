@@ -1927,3 +1927,136 @@ test('an answer routes the booking to another page, decided on the server', asyn
   assert.equal(fallback.status, 200, JSON.stringify(fallback.data));
   assert.equal(db.get('SELECT event_type_id FROM bookings WHERE token = ?', fallback.data.token).event_type_id, sales.data.id);
 });
+
+// ---------------------------------------------------------------------------
+// Team management: per-person stats, no-shows, admin reschedule, the person
+// filter on Bookings, and who is allowed to do what.
+// ---------------------------------------------------------------------------
+test('team performance counts each person, and only admins can see it', async () => {
+  require('../src/lib/security').resetRateLimits();
+  const bizId = db.get('SELECT id FROM businesses WHERE slug = ?', bizSlug).id;
+  // A second person who has accepted their invite.
+  const inv = await req('POST', '/api/admin/team', { name: 'Planner Pat', email: 'pat.planner@test.dev', role: 'host' }, { cookie: ownerCookie });
+  assert.equal(inv.status, 200, JSON.stringify(inv.data));
+  const tok = db.get("SELECT invite_token FROM memberships WHERE user_id = (SELECT id FROM users WHERE email = 'pat.planner@test.dev')").invite_token;
+  const acc = await req('POST', '/api/admin/auth/accept', { token: tok, name: 'Planner Pat', password: 'password123' });
+  assert.equal(acc.status, 200, JSON.stringify(acc.data));
+  const patCookie = acc.cookie;
+  const pat = db.get("SELECT id FROM users WHERE email = 'pat.planner@test.dev'").id;
+  db.run('DELETE FROM availability_rules WHERE user_id = ?', pat);
+  for (const wd of [1, 2, 3, 4, 5]) db.run('INSERT INTO availability_rules (user_id, weekday, start_min, end_min) VALUES (?,?,?,?)', pat, wd, 9 * 60, 17 * 60);
+
+  const page = await req('POST', '/api/admin/event-types', { name: 'Team Stats Call', duration_min: 60, hosts: [pat] }, { cookie: ownerCookie });
+  assert.equal(page.status, 200, JSON.stringify(page.data));
+
+  // Three past calls for Pat, inserted directly because a booking cannot be made in the past.
+  const mk = (daysAgo, status, email) => {
+    const start = new Date(Date.now() - daysAgo * 86400000);
+    start.setUTCHours(16, 0, 0, 0);
+    return db.run(`INSERT INTO bookings (business_id, event_type_id, host_user_id, token, start_utc, end_utc, invitee_tz, name, email, status, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?, datetime(?, '-3 days'))`, bizId, page.data.id, pat, `tok-${email}`, start.toISOString(), new Date(start.getTime() + 3600000).toISOString(),
+    'America/Chicago', email, `${email}@example.com`, status, start.toISOString().replace('T', ' ').slice(0, 19)).lastId;
+  };
+  const showed = mk(2, 'confirmed', 'showed');
+  const missed = mk(3, 'confirmed', 'missed');
+  mk(4, 'cancelled', 'cancelled');
+
+  // Mark one as a no-show; a future call cannot be one.
+  const ns = await req('POST', `/api/admin/bookings/${missed}/no-show`, {}, { cookie: ownerCookie });
+  assert.equal(ns.status, 200, JSON.stringify(ns.data));
+  assert.equal(db.get('SELECT status FROM bookings WHERE id = ?', missed).status, 'no_show');
+
+  const stats = await req('GET', '/api/admin/team-stats?days=30', null, { cookie: ownerCookie });
+  assert.equal(stats.status, 200, JSON.stringify(stats.data));
+  const row = stats.data.people.find((r) => r.id === pat);
+  assert.ok(row, 'Pat has a row');
+  assert.equal(row.held, 2, 'a no-show still took the time; a cancellation did not');
+  assert.equal(row.completed, 1);
+  assert.equal(row.no_shows, 1);
+  assert.equal(row.cancelled, 1);
+  assert.equal(row.show_rate, 50);
+  assert.equal(row.booked_hours, 2);
+  assert.ok(row.available_hours > 100, 'weekday hours across 30 days');
+  assert.ok(row.utilization >= 1 && row.utilization < 10);
+  assert.equal(row.avg_lead_days, 3, 'booked three days ahead');
+  assert.ok(stats.data.totals.held >= 2);
+
+  // Clearing it puts the call back as one that happened.
+  await req('POST', `/api/admin/bookings/${missed}/no-show`, { no_show: false }, { cookie: ownerCookie });
+  assert.equal(db.get('SELECT status FROM bookings WHERE id = ?', missed).status, 'confirmed');
+  await req('POST', `/api/admin/bookings/${missed}/no-show`, {}, { cookie: ownerCookie });
+
+  // One person's page has their calls, split by booking page.
+  const detail = await req('GET', `/api/admin/team-stats/${pat}?days=30`, null, { cookie: ownerCookie });
+  assert.equal(detail.status, 200, JSON.stringify(detail.data));
+  assert.equal(detail.data.past.length, 3);
+  assert.equal(detail.data.by_page[0].page, 'Team Stats Call');
+  assert.equal(detail.data.by_page[0].no_shows, 1);
+
+  // The Bookings list can show just Pat's calls, no-shows included in Past.
+  const past = await req('GET', `/api/admin/bookings?scope=past&host=${pat}`, null, { cookie: ownerCookie });
+  assert.deepEqual(past.data.map((b) => b.id).sort(), [showed, missed].sort());
+  assert.ok(past.data.every((b) => b.host_user_id === pat));
+
+  // A host sees none of the team numbers, and cannot touch someone else's call.
+  assert.equal((await req('GET', '/api/admin/team-stats', null, { cookie: patCookie })).status, 403);
+  assert.equal((await req('GET', `/api/admin/team-stats/${pat}`, null, { cookie: patCookie })).status, 403);
+  const ownerCall = db.get("SELECT id FROM bookings WHERE business_id = ? AND host_user_id != ? AND status = 'confirmed' AND start_utc < ? LIMIT 1", bizId, pat, new Date().toISOString())
+    || { id: mk(5, 'confirmed', 'ownerscall') };
+  if (db.get('SELECT host_user_id FROM bookings WHERE id = ?', ownerCall.id).host_user_id === pat) db.run('UPDATE bookings SET host_user_id = (SELECT user_id FROM memberships WHERE business_id = ? AND role = \'owner\') WHERE id = ?', bizId, ownerCall.id);
+  assert.equal((await req('POST', `/api/admin/bookings/${ownerCall.id}/no-show`, {}, { cookie: patCookie })).status, 403);
+  // But they can mark their own.
+  assert.equal((await req('POST', `/api/admin/bookings/${showed}/no-show`, { no_show: false }, { cookie: patCookie })).status, 200);
+  // Unknown person, or someone from another business, is a 404.
+  assert.equal((await req('GET', '/api/admin/team-stats/999999', null, { cookie: ownerCookie })).status, 404);
+});
+
+test('an admin can move anyone\'s call to a real open time, and the reminders move too', async () => {
+  require('../src/lib/security').resetRateLimits();
+  const pat = db.get("SELECT id FROM users WHERE email = 'pat.planner@test.dev'").id;
+  const page = db.get("SELECT * FROM event_types WHERE name = 'Team Stats Call'");
+  const from = T.addDays(T.utcToZoned(Date.now(), 'America/Chicago').date, 3);
+  const open = await req('GET', `/api/public/b/${bizSlug}/e/${page.slug}/slots?from=${from}&to=${T.addDays(from, 10)}&tz=America/Chicago`);
+  const days = Object.keys(open.data.days).filter((d) => open.data.days[d].length).sort();
+  const first = open.data.days[days[0]][0];
+  const made = await req('POST', `/api/public/b/${bizSlug}/e/${page.slug}/book`,
+    { start: first, timezone: 'America/Chicago', contact: { first_name: 'Move', last_name: 'Me', email: 'move.me@example.com', phone: '7135550199' } });
+  assert.equal(made.status, 200, JSON.stringify(made.data));
+  const bk = db.get('SELECT * FROM bookings WHERE token = ?', made.data.token);
+  assert.equal(bk.host_user_id, pat);
+  const reminder = db.run("INSERT INTO scheduled_messages (business_id, booking_id, channel, to_addr, send_after, status) VALUES (?,?,?,?,?,'queued')", bk.business_id, bk.id, 'email', 'move.me@example.com', Date.parse(first) - 86400000).lastId;
+
+  // A future call cannot be marked a no-show.
+  assert.equal((await req('POST', `/api/admin/bookings/${bk.id}/no-show`, {}, { cookie: ownerCookie })).status, 422);
+
+  // The admin slot list offers times on that page, with this call's own time freed up.
+  const slots = await req('GET', `/api/admin/bookings/${bk.id}/slots?from=${from}&to=${T.addDays(from, 10)}&tz=America/Chicago`, null, { cookie: ownerCookie });
+  assert.equal(slots.status, 200, JSON.stringify(slots.data));
+  const all = Object.values(slots.data.days).flat();
+  assert.ok(all.some((s) => s.start === first), 'its own time is still offered');
+  // Far enough from the original that the two hours cannot overlap (start times are every 30 minutes).
+  const target = all.find((s) => Math.abs(Date.parse(s.start) - Date.parse(first)) >= 2 * 3600000 && s.same_host);
+  assert.ok(target, 'another time with the same person exists');
+
+  const moved = await req('POST', `/api/admin/bookings/${bk.id}/reschedule`, { start: target.start, timezone: 'America/Chicago' }, { cookie: ownerCookie });
+  assert.equal(moved.status, 200, JSON.stringify(moved.data));
+  const after = db.get('SELECT * FROM bookings WHERE id = ?', bk.id);
+  assert.equal(after.start_utc, target.start);
+  assert.equal(after.host_user_id, pat, 'kept with the same person');
+  // Moving a call clears the reminders for the old time and re-queues any automations for the new one.
+  assert.equal(db.get('SELECT 1 x FROM scheduled_messages WHERE id = ?', reminder), undefined, 'the reminder for the old time is gone');
+
+  // A time that is not open is refused rather than double-booking someone.
+  const other = await req('POST', `/api/public/b/${bizSlug}/e/${page.slug}/book`,
+    { start: first, timezone: 'America/Chicago', contact: { first_name: 'Other', last_name: 'One', email: 'other.one@example.com', phone: '7135550198' } });
+  assert.equal(other.status, 200, JSON.stringify(other.data));
+  const clash = await req('POST', `/api/admin/bookings/${bk.id}/reschedule`, { start: first, timezone: 'America/Chicago' }, { cookie: ownerCookie });
+  assert.equal(clash.status, 409);
+});
+
+test('the team screen is only in the menu for admins, and every new screen loads its script', async () => {
+  const html = (await req('GET', '/app')).data;
+  assert.match(html, /admin-team\.js/);
+  const core = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'admin-core.js'), 'utf8');
+  assert.match(core, /'\/team-stats', 'Team performance'.*'admin'\]/);
+});

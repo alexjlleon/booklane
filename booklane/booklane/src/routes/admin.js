@@ -11,6 +11,8 @@ const B = require('../services/business');
 const L = require('../services/leads');
 const Q = require('../services/quotes');
 const BK = require('../services/bookings');
+const S = require('../services/scheduling');
+const TEAM = require('../services/team');
 const calendars = require('../services/calendars');
 const { pushToBoothBook, sendWebhook, buildBoothBookPayload } = require('../services/integrations');
 const Importer = require('../services/catalog-import');
@@ -337,14 +339,83 @@ module.exports = function adminRoutes(app) {
     requireRole('host')(req);
     const now = new Date().toISOString();
     const scope = req.query.scope || 'upcoming';
-    const cond = scope === 'past' ? "b.status = 'confirmed' AND b.start_utc < ?" : scope === 'cancelled' ? "b.status = 'cancelled' AND ? IS NOT NULL" : "b.status = 'confirmed' AND b.start_utc >= ?";
+    // Past includes no-shows: they happened (or were due to), and hiding them would make a
+    // person's history look cleaner than it was.
+    const cond = scope === 'past' ? "b.status IN ('confirmed','no_show') AND b.start_utc < ?" : scope === 'cancelled' ? "b.status = 'cancelled' AND ? IS NOT NULL" : "b.status = 'confirmed' AND b.start_utc >= ?";
     const order = scope === 'upcoming' ? 'ASC' : 'DESC';
-    const mine = req.query.mine === '1' ? ' AND b.host_user_id = ' + Number(req.user.id) : '';
+    // One person's calls: your own with mine=1, or anyone's by id. Both are parameters, never
+    // pasted into the SQL, and an id from another business simply matches nothing.
+    const hostId = req.query.mine === '1' ? Number(req.user.id) : (req.query.host ? int(req.query.host, 0) : 0);
+    const mine = hostId ? ' AND b.host_user_id = ' + Number(hostId) : '';
     return db.all(`SELECT b.id, b.token, b.start_utc, b.end_utc, b.invitee_tz, b.name, b.email, b.phone, b.location, b.status, b.answers, b.cancel_reason, b.lead_id, b.external_events,
-        e.name event_name, e.color, u.name host FROM bookings b LEFT JOIN event_types e ON e.id = b.event_type_id LEFT JOIN users u ON u.id = b.host_user_id
-      WHERE b.business_id = ? AND ${cond}${mine} ORDER BY b.start_utc ${order} LIMIT 300`, bid(req), now)
+        b.host_user_id, b.start_utc < ? is_past, e.name event_name, e.color, u.name host FROM bookings b LEFT JOIN event_types e ON e.id = b.event_type_id LEFT JOIN users u ON u.id = b.host_user_id
+      WHERE b.business_id = ? AND ${cond}${mine} ORDER BY b.start_utc ${order} LIMIT 300`, now, bid(req), now)
       .map((r) => ({ ...r, answers: db.json(r.answers, {}), synced: db.json(r.external_events, []).length > 0, external_events: undefined }));
   });
+  // Admins manage everyone's calendar. A host can still manage their own calls.
+  const ownBooking = (req) => {
+    const bk = db.get('SELECT * FROM bookings WHERE id = ? AND business_id = ?', int(req.params.id), bid(req));
+    if (!bk) throw new HttpError(404, 'Booking not found');
+    if ((ROLE_RANK[req.membership.role] || 0) < ROLE_RANK.admin && bk.host_user_id !== req.user.id) throw new HttpError(403, 'Only an admin can change someone else\'s booking');
+    return bk;
+  };
+
+  // Mark whether the customer showed up. Only for calls that have already started, and reversible,
+  // because the button is one click from the meeting list and mistakes happen.
+  app.post('/api/admin/bookings/:id/no-show', (req) => {
+    requireRole('host')(req);
+    const bk = ownBooking(req);
+    if (Date.parse(bk.start_utc) > Date.now()) throw new HttpError(422, 'That call has not happened yet.');
+    if (!['confirmed', 'no_show'].includes(bk.status)) throw new HttpError(422, 'A cancelled call cannot be a no-show.');
+    const noShow = req.body?.no_show !== false;
+    db.run('UPDATE bookings SET status = ? WHERE id = ?', noShow ? 'no_show' : 'confirmed', bk.id);
+    // A follow-up thanking them for the call would be wrong for someone who never turned up.
+    if (noShow) { try { MSG.cancelQueued(bk.id, 'they did not show up for the call'); } catch (e) { console.error('[no-show]', e.message); } }
+    if (bk.lead_id) B.logActivity(bid(req), bk.lead_id, 'booking', noShow ? `Marked as a no-show by ${req.user.name}` : `No-show cleared by ${req.user.name}`, { booking_id: bk.id });
+    return { ok: true, status: noShow ? 'no_show' : 'confirmed' };
+  });
+
+  // Open times to move a call to: the same booking page's slots, with this booking's own time freed.
+  app.get('/api/admin/bookings/:id/slots', async (req) => {
+    requireRole('host')(req);
+    const bk = ownBooking(req);
+    const et = BK.hydrateEt(db.get('SELECT * FROM event_types WHERE id = ?', bk.event_type_id));
+    if (!et) throw new HttpError(409, 'The booking page for this call no longer exists.');
+    const b = B.byId(bid(req));
+    const tz = T.isValidTz(req.query.tz) ? req.query.tz : b.timezone;
+    const from = T.isDateStr(req.query.from) ? req.query.from : T.utcToZoned(Date.now(), tz).date;
+    let to = T.isDateStr(req.query.to) ? req.query.to : T.addDays(from, 13);
+    if (to < from) to = from;
+    if (Date.parse(to) - Date.parse(from) > 62 * 86400000) to = T.addDays(from, 62);
+    const slots = await S.computeSlots(et, from, to, tz, { excludeBookingId: bk.id });
+    const hostIds = new Set();
+    const days = {};
+    for (const [d, list] of Object.entries(slots)) days[d] = list.map((x) => { x.hosts.forEach((h) => hostIds.add(h)); return { start: x.start, same_host: x.hosts.includes(bk.host_user_id) }; });
+    return { timezone: tz, from, to, days, host_user_id: bk.host_user_id, event: { name: et.name, duration_min: et.duration_min } };
+  });
+
+  // Move a call for someone. The customer gets the same rescheduled email and invite as if they
+  // had moved it themselves, and queued reminders move with it.
+  app.post('/api/admin/bookings/:id/reschedule', async (req) => {
+    requireRole('host')(req);
+    const bk = ownBooking(req);
+    const updated = await BK.rescheduleBooking(bk, req.body?.start, req.body?.timezone || bk.invitee_tz);
+    if (bk.lead_id) B.logActivity(bid(req), bk.lead_id, 'booking', `Rescheduled by ${req.user.name}`, { booking_id: bk.id });
+    return { ok: true, start_utc: updated.start_utc, host_user_id: updated.host_user_id };
+  });
+
+  // ---------- Team performance ----------
+  app.get('/api/admin/team-stats', (req) => {
+    requireRole('admin')(req);
+    return TEAM.teamStats(B.byId(bid(req)), req.query || {});
+  });
+  app.get('/api/admin/team-stats/:userId', (req) => {
+    requireRole('admin')(req);
+    const out = TEAM.personDetail(B.byId(bid(req)), int(req.params.userId, 0), req.query || {});
+    if (!out) throw new HttpError(404, 'That person is not on this team');
+    return out;
+  });
+
   app.post('/api/admin/bookings/:id/cancel', async (req) => {
     requireRole('host')(req);
     const bk = db.get('SELECT * FROM bookings WHERE id = ? AND business_id = ?', int(req.params.id), bid(req));

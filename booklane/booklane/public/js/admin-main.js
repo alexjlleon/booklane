@@ -254,28 +254,46 @@
     title: 'Bookings',
     async render(p, q) {
       const scope = q.scope || 'upcoming';
-      const rows = await api('GET', `/bookings?scope=${scope}${q.mine ? '&mine=1' : ''}`);
+      const isAdminRole = ['owner', 'admin'].includes((A.me.business || {}).role);
+      const filter = q.mine ? '&mine=1' : q.host ? `&host=${encodeURIComponent(q.host)}` : '';
+      const [rows, team] = await Promise.all([
+        api('GET', `/bookings?scope=${scope}${filter}`),
+        isAdminRole ? api('GET', '/team').catch(() => []) : Promise.resolve([]),
+      ]);
+      const people = (team || []).filter((m) => m.status === 'active');
+      const who = q.mine ? 'mine' : q.host || '';
       let lastDay = '';
+      const action = (b) => {
+        if (scope === 'upcoming' && b.status === 'confirmed') return `<button class="btn btn-ghost btn-sm" data-resched="${b.id}">Reschedule</button> <button class="btn btn-ghost btn-sm" data-cancel="${b.id}">Cancel</button>`;
+        if (scope === 'past' && b.status === 'confirmed') return `<span class="pill booked">Showed</span> <button class="btn btn-link btn-sm" data-noshow="${b.id}">Mark no-show</button>`;
+        if (scope === 'past' && b.status === 'no_show') return `<span class="pill lost">No-show</span> <button class="btn btn-link btn-sm" data-showed="${b.id}">They showed up</button>`;
+        return A.pill(b.status);
+      };
       return `<div class="topbar"><div><h1>Bookings</h1><div class="sub">Calls booked through your pages.</div></div>
         <div class="tools"><div class="seg">${['upcoming', 'past', 'cancelled'].map((s) => `<button data-scope="${s}" class="${s === scope ? 'on' : ''}">${A.label(s)}</button>`).join('')}</div>
-        <label class="toggle small"><input type="checkbox" data-mine ${q.mine ? 'checked' : ''}><span class="sw"></span><span>Only mine</span></label></div></div>
+        ${people.length ? `<select class="select" data-who style="width:auto"><option value="">Everyone</option><option value="mine" ${who === 'mine' ? 'selected' : ''}>Only mine</option>${people.map((m) => `<option value="${m.id}" ${String(who) === String(m.id) ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>`
+    : `<label class="toggle small"><input type="checkbox" data-mine ${q.mine ? 'checked' : ''}><span class="sw"></span><span>Only mine</span></label>`}</div></div>
         <div class="panel">${rows.length ? `<div class="table-wrap"><table class="t"><tbody>${rows.map((b) => {
           const day = A.dt(b.start_utc, { weekday: 'long', month: 'long', day: 'numeric', hour: undefined, minute: undefined });
           const head = day !== lastDay ? `<tr><th colspan="5" style="background:#faf9f7">${esc(day)}</th></tr>` : ''; lastDay = day;
           return `${head}<tr><td style="width:120px"><b>${esc(A.dt(b.start_utc, { month: undefined, day: undefined }))}</b></td>
-            <td><span class="pill" style="background:${esc(b.color || '#eee')}22;color:${esc(b.color || '#444')}">${esc(b.event_name || 'Call')}</span><div class="small muted" style="margin-top:4px">with ${esc(b.host || '-')}${b.synced ? ' · on calendar' : ''}</div></td>
+            <td><span class="pill" style="background:${esc(b.color || '#eee')}22;color:${esc(b.color || '#444')}">${esc(b.event_name || 'Call')}</span><div class="small muted" style="margin-top:4px">with ${b.host_user_id && isAdminRole ? `<a href="#/team-stats/${b.host_user_id}">${esc(b.host || '-')}</a>` : esc(b.host || '-')}${b.synced ? ' · on calendar' : ''}</div></td>
             <td><b>${b.lead_id ? `<a href="#/leads/${b.lead_id}">${esc(b.name || b.email)}</a>` : esc(b.name || b.email)}</b><div class="small muted">${esc([b.email, b.phone].filter(Boolean).join(' · '))}</div></td>
             <td class="small">${esc(b.location || '')}${b.cancel_reason ? `<div class="muted">Reason: ${esc(b.cancel_reason)}</div>` : ''}</td>
-            <td class="num">${b.status === 'confirmed' && scope === 'upcoming' ? `<button class="btn btn-ghost btn-sm" data-cancel="${b.id}">Cancel</button>` : A.pill(b.status)}</td></tr>`;
+            <td class="num" style="white-space:nowrap">${action(b)}</td></tr>`;
         }).join('')}</tbody></table></div>` : `<div class="empty-state"><h3>No ${scope} bookings</h3><p>${scope === 'upcoming' ? 'Share your booking page to fill your calendar.' : ''}</p></div>`}</div>`;
     },
     mount(root, p, q) {
-      root.addEventListener('click', async (e) => {
-        const s = e.target.closest('[data-scope]'); if (s) A.go(`#/bookings?scope=${s.dataset.scope}${q.mine ? '&mine=1' : ''}`);
-        const c = e.target.closest('[data-cancel]');
-        if (c) { const reason = prompt('Reason for cancelling (sent to the customer)', ''); if (reason === null) return; await A.guard(() => api('POST', `/bookings/${c.dataset.cancel}/cancel`, { reason }), 'Booking cancelled'); A.render(); }
+      const filter = () => (q.mine ? '&mine=1' : q.host ? `&host=${q.host}` : '');
+      root.addEventListener('click', (e) => {
+        const s = e.target.closest('[data-scope]'); if (s) return A.go(`#/bookings?scope=${s.dataset.scope}${filter()}`);
+        A.bookingActions.handle(e, () => A.render());
       });
-      root.addEventListener('change', (e) => { if (e.target.matches('[data-mine]')) A.go(`#/bookings?scope=${q.scope || 'upcoming'}${e.target.checked ? '&mine=1' : ''}`); });
+      root.addEventListener('change', (e) => {
+        const scope = q.scope || 'upcoming';
+        if (e.target.matches('[data-mine]')) A.go(`#/bookings?scope=${scope}${e.target.checked ? '&mine=1' : ''}`);
+        if (e.target.matches('[data-who]')) { const v = e.target.value; A.go(`#/bookings?scope=${scope}${v === 'mine' ? '&mine=1' : v ? `&host=${v}` : ''}`); }
+      });
     },
   });
 
