@@ -2228,3 +2228,18 @@ test('a calendar sign-in started on a company domain is handed back there to fin
   await req('PUT', '/api/admin/business/domain', { custom_domain: '', email_from: '' }, { cookie: ownerCookie });
   assert.equal(db.get('SELECT custom_domain FROM businesses WHERE slug = ?', bizSlug).custom_domain, null);
 });
+
+// The admin core only ever calls render() and mount() on a screen. A screen that wires its buttons
+// under any other name renders fine but does nothing when clicked (the Forms screen did exactly
+// that), so every hook a screen defines must be one the core actually calls.
+test('admin screens only use the hooks the admin core calls', () => {
+  const dirJs = path.join(__dirname, '..', 'public', 'js');
+  const core = fs.readFileSync(path.join(dirJs, 'admin-core.js'), 'utf8');
+  assert.ok(core.includes('v.mount(root'), 'core calls mount');
+  for (const f of fs.readdirSync(dirJs).filter((n) => n.startsWith('admin-'))) {
+    const src = fs.readFileSync(path.join(dirJs, f), 'utf8');
+    for (const m of src.matchAll(/^ {4}(?:async )?([a-zA-Z]+)\((?:root|params)[^)]*\) \{/gm)) {
+      assert.ok(['render', 'mount'].includes(m[1]), `${f}: screen hook "${m[1]}" is never called by the admin core`);
+    }
+  }
+});

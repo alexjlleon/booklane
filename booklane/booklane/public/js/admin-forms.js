@@ -68,7 +68,9 @@
         </tr>`).join('')}</tbody></table>
       </div>`;
     },
-    events(root) {
+    // The admin core calls mount(); this was named events() and never ran, so no button on this
+    // screen did anything.
+    mount(root) {
       const data = A.cache.forms;
       root.addEventListener('click', async (e) => {
         if (e.target.closest('[data-new]')) return editForm(null, data);
@@ -95,7 +97,9 @@
     A.drawer(`<div class="drawer-head"><div><div class="small muted">Start from</div><h2>A ready-made shape</h2></div><button class="icon-x" data-close-drawer aria-label="Close">&times;</button></div>
       <p class="help">Each one is a starting point wired to your own booking pages. Everything is editable afterwards.</p>
       <div class="stack">${data.templates.map((t) => `<button type="button" class="opt" style="text-align:left;width:100%" data-tpl="${esc(t.id)}">
-        <span class="opt-stack"><span>${esc(t.name)}</span><span class="opt-hint">${esc(t.description)}</span></span></button>`).join('')}</div>`);
+        <span class="opt-stack"><span>${esc(t.name)}</span><span class="opt-hint">${esc(t.description)}</span></span></button>`).join('')}</div>`,
+    // The drawer sits outside the screen, so its buttons need their own handler.
+    (el) => el.addEventListener('click', (e) => { const t = e.target.closest('[data-tpl]'); if (t) fromTemplate(t.dataset.tpl); }));
   }
 
   function showEmbed(f) {
