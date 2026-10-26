@@ -123,7 +123,7 @@ module.exports = function adminRoutes(app) {
   // ---------- Auth ----------
   app.post('/api/admin/auth/signup', (req, res) => {
     // A company's own domain is that company's front door, not a place to open a new account.
-    if (req.hostBusiness) throw new HttpError(403, 'Sign up on the Booklane site, not on a company\'s own address.');
+    if (req.hostBusiness) throw new HttpError(403, 'Sign up on the Availvo site, not on a company\'s own address.');
     authLimit(req);
     const { name, email, password, business_name, timezone } = req.body || {};
     if (process.env.ALLOW_SIGNUP === 'false' && db.get('SELECT 1 FROM users LIMIT 1')) throw new HttpError(403, 'Sign ups are closed. Ask an admin to invite you.');
@@ -441,7 +441,7 @@ module.exports = function adminRoutes(app) {
       if (domain) {
         if (!B.isDomain(domain)) throw new HttpError(422, 'That does not look like a domain. Use something like book.yourcompany.com', { custom_domain: 'Not a domain' });
         const taken = db.get('SELECT id FROM businesses WHERE custom_domain = ? AND id != ?', domain, b.id);
-        if (taken) throw new HttpError(409, 'Another company on Booklane already uses that domain', { custom_domain: 'Already in use' });
+        if (taken) throw new HttpError(409, 'Another company on Availvo already uses that domain', { custom_domain: 'Already in use' });
       }
     }
     if (body.email_from !== undefined) {
@@ -1313,10 +1313,10 @@ module.exports = function adminRoutes(app) {
       const cfg = business.settings.integrations.webhook;
       if (!cfg.url) throw new HttpError(422, 'Add a webhook URL first');
       business.settings.integrations.webhook = { ...cfg, enabled: true, events: ['test'] };
-      return { result: await sendWebhook(business, 'test', { message: 'Hello from Booklane', lead: L.leadPayload(sample) }) };
+      return { result: await sendWebhook(business, 'test', { message: 'Hello from Availvo', lead: L.leadPayload(sample) }) };
     }
     if (req.body?.type === 'email') {
-      return { result: await sendEmail({ to: req.user.email, businessId: business.id, subject: 'Test email from Booklane', html: layout(business, { heading: 'Email is working', body: '<p>This is a test message.</p>' }) }) };
+      return { result: await sendEmail({ to: req.user.email, businessId: business.id, subject: 'Test email from Availvo', html: layout(business, { heading: 'Email is working', body: '<p>This is a test message.</p>' }) }) };
     }
     throw new HttpError(422, 'Unknown test type');
   });

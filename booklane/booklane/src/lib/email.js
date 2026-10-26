@@ -5,7 +5,7 @@ const config = require('./config');
 
 // Read at send time, not at load time, so a key saved in the admin screen takes effect immediately.
 // A company's own send-from address wins; otherwise the platform's. Read at send time, like the key.
-const from = (businessId) => config.get('EMAIL_FROM', businessId) || 'Booklane <onboarding@resend.dev>';
+const from = (businessId) => config.get('EMAIL_FROM', businessId) || 'Availvo <onboarding@resend.dev>';
 const apiKey = () => (config.get('RESEND_API_KEY') || '').trim();
 
 async function sendEmail({ to, subject, html, text, attachments, replyTo, businessId, fromName }) {
@@ -45,7 +45,7 @@ function layout(business, { heading, body, cta, footer }) {
   return `<!doctype html><html><body style="margin:0;background:#f4f3f8;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1d1b26">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:32px 12px">
 <table role="presentation" width="100%" style="max-width:560px;background:#fff;border-radius:14px;overflow:hidden" cellpadding="0" cellspacing="0">
-<tr><td style="background:${esc(color)};padding:18px 28px;color:#fff;font-weight:700;font-size:16px">${esc(business?.name || 'Booklane')}</td></tr>
+<tr><td style="background:${esc(color)};padding:18px 28px;color:#fff;font-weight:700;font-size:16px">${esc(business?.name || 'Availvo')}</td></tr>
 <tr><td style="padding:28px">
 <h1 style="margin:0 0 14px;font-size:22px;line-height:1.3">${esc(heading)}</h1>
 <div style="font-size:15px;line-height:1.6;color:#3b3848">${body}</div>

@@ -111,7 +111,7 @@
   }
 
   BL.logo = (b) => b.logo_url ? `<div class="biz-logo"><img src="${BL.esc(b.logo_url)}" alt=""></div>` : `<div class="biz-logo">${BL.esc((b.name || '?').trim().charAt(0).toUpperCase())}</div>`;
-  BL.powered = () => BL.data.embed ? '' : `<div class="powered">Scheduling by ${BL.esc(BL.data.appName || 'Booklane')}</div>`;
+  BL.powered = () => BL.data.embed ? '' : `<div class="powered">Scheduling by ${BL.esc(BL.data.appName || 'Availvo')}</div>`;
 
   BL.fieldErrors = (root, details) => {
     BL.$$('.field.has-error', root).forEach((f) => { f.classList.remove('has-error'); const e = BL.$('.field-error', f); if (e) e.remove(); });

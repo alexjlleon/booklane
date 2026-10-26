@@ -1,6 +1,6 @@
-# Booklane
+# Availvo (formerly Booklane)
 
-Booklane is a scheduling and quote platform that can host many businesses, similar to Calendly or TidyCal. It is built around two goals:
+Availvo is a scheduling and quote platform that can host many businesses, similar to Calendly or TidyCal. It is built around two goals:
 
 1. **Book a call quickly.** Customers go through a step-by-step flow: pick a time, give contact info, then answer your custom questions. Each step and field saves as they go. If someone leaves partway, you still get everything they entered, which step they reached, and the time they wanted. You can also get an alert, and the customer can get a "finish where you left off" email.
 2. **Build your own quote.** Customers choose services, packages and add-ons and see a live total with bundle discounts, tax and deposit. From there they can **request a contract**, **book a call**, or ask you to **call them back**. A contract request is saved to the lead, emailed to your team, pushed to BoothBook and sent to your webhook (for example Zapier).

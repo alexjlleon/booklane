@@ -476,7 +476,7 @@ f.addEventListener('submit',function(e){e.preventDefault();
 });
 el.appendChild(f)}
 function ctas(){var els=document.querySelectorAll('[data-booklane-cta]');for(var i=0;i<els.length;i++)cta(els[i])}
-window.Booklane={popup:popup,inline:inline,ctas:ctas};
+window.Availvo=window.Booklane={popup:popup,inline:inline,ctas:ctas};
 document.addEventListener('click',function(e){var t=e.target.closest&&e.target.closest('[data-booklane-popup]');if(t){e.preventDefault();popup(t.getAttribute('data-booklane-popup'))}});
 function init(){inline();ctas()}
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();})();`, 'application/javascript; charset=utf-8');

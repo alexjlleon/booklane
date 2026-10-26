@@ -5,7 +5,7 @@ function fold(line) { const out = []; while (line.length > 74) { out.push(line.s
 
 function buildIcs({ uid, start, end, summary, description, location, organizerName, organizerEmail, attendeeName, attendeeEmail, method = 'REQUEST', sequence = 0, cancelled = false, url }) {
   const lines = [
-    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Booklane//Scheduling//EN', 'CALSCALE:GREGORIAN', `METHOD:${cancelled ? 'CANCEL' : method}`,
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Availvo//Scheduling//EN', 'CALSCALE:GREGORIAN', `METHOD:${cancelled ? 'CANCEL' : method}`,
     'BEGIN:VEVENT', `UID:${uid}`, `DTSTAMP:${fmt(Date.now())}`, `DTSTART:${fmt(start)}`, `DTEND:${fmt(end)}`, `SEQUENCE:${sequence}`,
     `SUMMARY:${escTxt(summary)}`, `DESCRIPTION:${escTxt(description)}`, location ? `LOCATION:${escTxt(location)}` : null,
     url ? `URL:${escTxt(url)}` : null,

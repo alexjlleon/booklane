@@ -1,6 +1,6 @@
 'use strict';
 const { esc } = require('./lib/util');
-const APP_NAME = process.env.APP_NAME || 'Booklane';
+const APP_NAME = process.env.APP_NAME || 'Availvo';
 
 /**
  * The query string that lets a browser know its copy of our CSS and JS is out of date.

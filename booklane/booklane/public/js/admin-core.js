@@ -123,9 +123,9 @@
   function shell(active) {
     const me = A.me;
     const biz = me.business;
-    return `<div class="mobile-bar"><button type="button" data-menu aria-label="Menu">☰</button><span>${esc(biz ? biz.name : 'Booklane')}</span><a href="${biz ? '/b/' + esc(biz.slug) : '#'}" target="_blank" style="color:#fff;font-size:13px">View page ↗</a></div>
+    return `<div class="mobile-bar"><button type="button" data-menu aria-label="Menu">☰</button><span>${esc(biz ? biz.name : 'Availvo')}</span><a href="${biz ? '/b/' + esc(biz.slug) : '#'}" target="_blank" style="color:#fff;font-size:13px">View page ↗</a></div>
     <div class="layout"><nav class="sidebar" aria-label="Main">
-      <div class="brand-row"><div class="logo-mark"></div>${esc((window.__BL__ || {}).appName || 'Booklane')}</div>
+      <div class="brand-row"><div class="logo-mark"></div>${esc((window.__BL__ || {}).appName || 'Availvo')}</div>
       <div class="biz-switch"><label class="sr-only" for="bizsel">Business</label><select id="bizsel">${me.businesses.map((b) => `<option value="${b.id}" ${biz && b.id === biz.id ? 'selected' : ''}>${esc(b.name)}</option>`).join('')}<option value="__new">+ Add a business</option></select></div>
       <div class="nav">${NAV.filter((n) => n[3] !== 'admin' || ['owner', 'admin'].includes((A.me && A.me.business || {}).role)).map((n) => n[1] === null ? `<div class="nav-sec">${n[0]}</div>` : `<a href="#${n[0]}" class="${active === n[0] ? 'active' : ''}">${n[2]}<span>${n[1]}</span></a>`).join('')}</div>
       <div class="sidebar-foot">${biz ? `<a href="/b/${esc(biz.slug)}" target="_blank" rel="noopener">View booking page ↗</a>` : ''}<a href="#/account">${esc(me.user.name)} · Account</a><button type="button" data-logout>Log out</button></div>
@@ -149,7 +149,7 @@
       app.innerHTML = shell(section === '/' ? '/' : section);
     }
     const root = document.getElementById('view');
-    document.title = `${v.title ? (typeof v.title === 'function' ? v.title(params) : v.title) + ' · ' : ''}${(window.__BL__ || {}).appName || 'Booklane'}`;
+    document.title = `${v.title ? (typeof v.title === 'function' ? v.title(params) : v.title) + ' · ' : ''}${(window.__BL__ || {}).appName || 'Availvo'}`;
     root.innerHTML = '<div class="empty-state"><span class="spinner"></span></div>';
     try {
       const html = await v.render(params, query, root);

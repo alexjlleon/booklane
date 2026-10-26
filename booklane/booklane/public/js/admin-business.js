@@ -309,12 +309,12 @@
     const st = d.email_domain ? (STATUS_WORDS[d.email_domain.status] || ['partial', d.email_domain.status]) : null;
     const recs = (d.email_domain && d.email_domain.records) || [];
     return `<div class="cols-even"><div class="panel stack"><h2>Your domain</h2>
-        <p class="desc" style="margin:0">Your booking pages live here, and every link Booklane sends for ${esc(A.me.business.name)} points here: confirmations, reminders, quotes and staff invites. Your team can also log in at this address.</p>
-        ${A.field('Domain', `<input class="input" data-dom="custom_domain" value="${esc(d.custom_domain || '')}" placeholder="book.yourcompany.com" ${owner ? '' : 'disabled'} spellcheck="false" autocomplete="off">`, 'A subdomain works best, like book.yourcompany.com. Leave blank to use the Booklane address.')}
+        <p class="desc" style="margin:0">Your booking pages live here, and every link Availvo sends for ${esc(A.me.business.name)} points here: confirmations, reminders, quotes and staff invites. Your team can also log in at this address.</p>
+        ${A.field('Domain', `<input class="input" data-dom="custom_domain" value="${esc(d.custom_domain || '')}" placeholder="book.yourcompany.com" ${owner ? '' : 'disabled'} spellcheck="false" autocomplete="off">`, 'A subdomain works best, like book.yourcompany.com. Leave blank to use the Availvo address.')}
         <div class="small">Your pages are at <a href="${esc(d.page_url)}" target="_blank" rel="noopener"><b>${esc(d.page_url)}</b></a></div>
         <div class="ok-box small"><b>To connect a domain</b><ol style="margin:6px 0 0 18px;padding:0">
           <li>Save it here first.</li>
-          <li>In Railway, open the Booklane service, go to <b>Settings, Networking, Custom domain</b>, and add the same domain.</li>
+          <li>In Railway, open the booklane service, go to <b>Settings, Networking, Custom domain</b>, and add the same domain.</li>
           <li>Railway shows two DNS records: a <b>CNAME</b> for the domain and a <b>TXT</b> record starting <code>_railway-verify</code>. Add both where the domain's DNS lives.</li>
           <li>Wait for Railway to show the certificate as active, usually a few minutes, then open the address.</li></ol></div>
       </div>
