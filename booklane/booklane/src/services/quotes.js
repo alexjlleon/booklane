@@ -99,9 +99,9 @@ function requireContact(lead) {
   if (Object.keys(errors).length) throw new HttpError(422, 'We need your name and email first', errors);
 }
 
-async function notifyTeam(business, q, lead, subject, heading, extraPairs = []) {
+async function notifyTeam(business, q, lead, subject, heading, extraPairs = [], to = null) {
   await sendEmail({
-    to: B.teamEmails(business), businessId: business.id, subject,
+    to: to || B.teamEmails(business), businessId: business.id, subject,
     html: layout(business, {
       heading,
       body: rows([['Name', L.leadName(lead)], ['Email', lead.email], ['Phone', lead.phone], ...extraPairs]) + quoteSummaryHtml(q, business),
@@ -153,7 +153,7 @@ async function requestContract(business, q, lead, body) {
   });
   if (business.settings.notifications.notify_on_contract) {
     await notifyTeam(business, fresh, lead, `Contract requested: ${L.leadName(lead)} · ${money(fresh.total, business.settings.quote.currency)}`, 'Send this customer a contract',
-      [['Legal name', req.legal_name], ['Billing address', req.billing_address], ['Venue address', req.venue_address], ['Event time', [req.event_start_time, req.event_end_time].filter(Boolean).join(' – ')], ['Planner', req.planner_name], ['Notes', req.notes]]);
+      [['Legal name', req.legal_name], ['Billing address', req.billing_address], ['Venue address', req.venue_address], ['Event time', [req.event_start_time, req.event_end_time].filter(Boolean).join(' – ')], ['Planner', req.planner_name], ['Notes', req.notes]], B.contractEmails(business));
   }
   const leadNow = db.get('SELECT * FROM leads WHERE id = ?', lead.id);
   const bb = (business.settings.integrations.boothbook.push_on || []).includes('contract.requested') ? await pushToBoothBook(business, leadNow, fresh) : { skipped: true };

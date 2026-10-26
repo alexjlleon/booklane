@@ -231,6 +231,8 @@
         ${A.field('Send that email after (minutes idle)', A.input('settings.leads.recovery_delay_min', L.recovery_delay_min, 'type="number" min="10" data-type="number"'))}</div></div>
         <div class="panel"><h2>Notifications</h2>
         ${A.field('Team emails (one per line)', `<textarea class="textarea" rows="3" data-bind="settings.notifications.team_emails" data-type="lines">${esc(lines(N.team_emails))}</textarea>`, 'Leave blank to use the business email and owners.')}
+        ${A.field('Contract requests go to (one per line)', `<textarea class="textarea" rows="2" data-bind="settings.notifications.contract_emails" data-type="lines">${esc(lines(N.contract_emails))}</textarea>`, 'When someone builds a quote and requests a contract. Leave blank to use the team emails.')}
+        ${A.field('Unfinished leads go to (one per line)', `<textarea class="textarea" rows="2" data-bind="settings.notifications.partial_emails" data-type="lines">${esc(lines(N.partial_emails))}</textarea>`, 'Someone who started a booking, quote or form and left. Leave blank to use the team emails.')}
         <div class="stack">${A.toggle('settings.notifications.notify_on_booking', N.notify_on_booking, 'New bookings')}${A.toggle('settings.notifications.notify_on_quote', N.notify_on_quote, 'New quotes')}
         ${A.toggle('settings.notifications.notify_on_contract', N.notify_on_contract, 'Contract requests')}${A.toggle('settings.notifications.notify_on_callback', N.notify_on_callback, 'Call back requests')}</div></div></div>`;
     } else if (tab === 'quote') {

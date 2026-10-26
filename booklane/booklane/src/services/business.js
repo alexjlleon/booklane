@@ -72,6 +72,14 @@ function teamEmails(b) {
   return db.all("SELECT u.email FROM users u JOIN memberships m ON m.user_id = u.id WHERE m.business_id = ? AND m.status = 'active' AND m.role IN ('owner','admin')", b.id).map((r) => r.email);
 }
 
+// Contract requests and unfinished leads can each go to their own list; blank means the team.
+function listOrTeam(b, key) {
+  const list = (b.settings.notifications[key] || []).filter(Boolean);
+  return list.length ? list : teamEmails(b);
+}
+const contractEmails = (b) => listOrTeam(b, 'contract_emails');
+const partialEmails = (b) => listOrTeam(b, 'partial_emails');
+
 function logActivity(businessId, leadId, type, message, meta = {}) {
   db.run('INSERT INTO activity (business_id, lead_id, type, message, meta) VALUES (?,?,?,?,?)', businessId, leadId || null, type, message, JSON.stringify(meta));
 }
@@ -124,5 +132,5 @@ function pageUrl(business, rest = '') {
 /** A link that is not under /b/ (a booking's manage page, a quote, the admin), on this company's domain. */
 const linkFor = (business, path) => `${baseFor(business)}${path.startsWith('/') ? path : `/${path}`}`;
 
-module.exports = { conform, hydrate, bySlug, byId, teamEmails, logActivity, publicSettings,
+module.exports = { conform, hydrate, bySlug, byId, teamEmails, contractEmails, partialEmails, logActivity, publicSettings,
   normalizeDomain, isDomain, platformHost, byDomain, baseFor, pageUrl, linkFor };

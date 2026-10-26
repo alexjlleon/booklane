@@ -15,7 +15,7 @@ const BUSINESS_SETTINGS = {
     send_recovery_email: false,
     recovery_delay_min: 60,
   },
-  notifications: { team_emails: [], notify_on_booking: true, notify_on_contract: true, notify_on_callback: true, notify_on_quote: true },
+  notifications: { team_emails: [], contract_emails: [], partial_emails: [], notify_on_booking: true, notify_on_contract: true, notify_on_callback: true, notify_on_quote: true },
   quote: {
     enabled: true,
     title: 'Build your quote',

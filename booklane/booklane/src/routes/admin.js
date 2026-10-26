@@ -211,6 +211,7 @@ module.exports = function adminRoutes(app) {
       if (incoming.integrations?.boothbook?.secret === SECRET_MASK) delete incoming.integrations.boothbook.secret;
       if (incoming.integrations?.webhook?.secret === SECRET_MASK) delete incoming.integrations.webhook.secret;
       if (incoming.notifications?.team_emails) incoming.notifications.team_emails = [].concat(incoming.notifications.team_emails).map((e) => String(e).trim()).filter(isEmail);
+      for (const k of ['contract_emails', 'partial_emails']) if (incoming.notifications?.[k]) incoming.notifications[k] = [].concat(incoming.notifications[k]).map((e) => String(e).trim()).filter(isEmail);
       for (const [name, cfg] of [['BoothBook', incoming.integrations?.boothbook], ['Webhook', incoming.integrations?.webhook]]) {
         if (cfg?.url) { try { const u = new URL(cfg.url); if (!['https:', 'http:'].includes(u.protocol)) throw new Error(); } catch { throw new HttpError(422, `${name} URL must be a valid https:// address`); } }
       }

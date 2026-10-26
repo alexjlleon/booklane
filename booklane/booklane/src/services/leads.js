@@ -119,7 +119,7 @@ async function processAbandoned() {
       if (s.notify_team_on_partial) {
         const et = lead.event_type_id ? db.get('SELECT name FROM event_types WHERE id = ?', lead.event_type_id) : null;
         await sendEmail({
-          to: B.teamEmails(business), businessId: business.id,
+          to: B.partialEmails(business), businessId: business.id,
           subject: `Partial lead: ${leadName(lead)} (${lead.source === 'quote' ? 'quote builder' : et?.name || 'booking'})`,
           html: layout(business, {
             heading: 'Someone started but did not finish',

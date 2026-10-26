@@ -1552,6 +1552,44 @@ test('a quote orphaned by an earlier delete asks for contact details rather than
   assert.equal(contract.data.quote.status, 'contract_requested');
 });
 
+test('contract requests go to their own address when one is set, and to the team when it is not', async () => {
+  const B = require('../src/services/business');
+  const set = await req('PATCH', '/api/admin/business', { settings: { notifications: { contract_emails: ['sales@example.com', 'not an email'] } } }, { cookie: ownerCookie });
+  assert.equal(set.status, 200, JSON.stringify(set.data));
+  const created = await req('POST', `/api/public/b/${bizSlug}/quotes`, {});
+  const qt = created.data.token;
+  await req('PATCH', `/api/public/quotes/${qt}`, { details: { event_type: 'Wedding', event_date: '2027-09-09' }, contact: { first_name: 'Lee', last_name: 'Contracto', email: 'lee@example.com', phone: '2815550133' } });
+  const anyService = db.get('SELECT id FROM services WHERE active = 1 ORDER BY id LIMIT 1').id;
+  await req('PATCH', `/api/public/quotes/${qt}`, { selections: [{ service_id: anyService }] });
+  const sent = await req('POST', `/api/public/quotes/${qt}/contract`, { legal_name: 'Lee Contracto', agreed_terms: true });
+  assert.equal(sent.status, 200, JSON.stringify(sent.data));
+  const alert = db.get("SELECT to_addr FROM email_log WHERE subject LIKE 'Contract requested: Lee Contracto%' ORDER BY id DESC LIMIT 1");
+  assert.equal(alert.to_addr, 'sales@example.com', 'only the valid address is kept, and the team list is not used');
+
+  await req('PATCH', '/api/admin/business', { settings: { notifications: { contract_emails: [] } } }, { cookie: ownerCookie });
+  const b = B.bySlug(bizSlug);
+  assert.deepEqual(B.contractEmails(b), B.teamEmails(b), 'blank falls back to the team');
+});
+
+test('an unfinished lead is emailed to its own address when one is set', async () => {
+  const B = require('../src/services/business');
+  const set = await req('PATCH', '/api/admin/business', { settings: { notifications: { partial_emails: ['sales@example.com'] } } }, { cookie: ownerCookie });
+  assert.equal(set.status, 200, JSON.stringify(set.data));
+  const c = await req('POST', `/api/public/b/${bizSlug}/quotes`, {});
+  await req('PATCH', `/api/public/quotes/${c.data.token}`, { contact: { first_name: 'Quinn', last_name: 'Bouncer', email: 'quinn@example.com', phone: '2815550144' } });
+  const leadId = db.get('SELECT lead_id FROM quotes WHERE token = ?', c.data.token).lead_id;
+  assert.equal(db.get('SELECT status FROM leads WHERE id = ?', leadId).status, 'partial', 'a quote left half built is a lead already');
+  db.run("UPDATE leads SET last_activity_at = datetime('now', '-45 minutes') WHERE id = ?", leadId);
+  await runJobs();
+  const alert = db.get("SELECT to_addr FROM email_log WHERE subject LIKE 'Partial lead: Quinn%' ORDER BY id DESC LIMIT 1");
+  assert.ok(alert, 'the unfinished quote was emailed');
+  assert.equal(alert.to_addr, 'sales@example.com');
+
+  await req('PATCH', '/api/admin/business', { settings: { notifications: { partial_emails: [] } } }, { cookie: ownerCookie });
+  const b = B.bySlug(bizSlug);
+  assert.deepEqual(B.partialEmails(b), B.teamEmails(b), 'blank falls back to the team');
+});
+
 // --- Teams and booking types ------------------------------------------------------------------
 
 test('a booking page is filed under a type and a team, and the public page groups by type', async () => {
