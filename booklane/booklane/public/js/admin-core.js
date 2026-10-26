@@ -178,5 +178,12 @@
     A.me = await A.api('GET', '/auth/me'); A.go('#/');
   });
   addEventListener('hashchange', A.render);
-  A.start = () => A.render();
+  // Start only once every admin script has run. A.start() is called from one of the earlier
+  // scripts, and the login check can come back before the later ones have loaded, which sent a
+  // direct link to a later screen (team performance, forms, automations) back to the dashboard.
+  // DOMContentLoaded fires after all the page's scripts have executed.
+  A.start = () => {
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => A.render(), { once: true });
+    else A.render();
+  };
 })();
