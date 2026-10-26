@@ -2066,3 +2066,129 @@ test('the team screen is only in the menu for admins, and every new screen loads
   const core = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'admin-core.js'), 'utf8');
   assert.match(core, /'\/team-stats', 'Team performance'.*'admin'\]/);
 });
+
+// ---------------------------------------------------------------------------
+// Company domains: each company's pages on its own address, links that point
+// there, its own send-from address, and calendar sign-in handed back to it.
+// ---------------------------------------------------------------------------
+function hostReq(host, method, urlPath, body, { cookie } = {}) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(base);
+    const data = body ? JSON.stringify(body) : null;
+    const r = http.request({ host: u.hostname, port: u.port, method, path: urlPath,
+      headers: { Host: host, ...(data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {}), ...(cookie ? { Cookie: cookie } : {}) } }, (res) => {
+      let t = ''; res.on('data', (c) => (t += c)); res.on('end', () => { let j; try { j = JSON.parse(t); } catch { j = t; } resolve({ status: res.statusCode, headers: res.headers, data: j, cookie: (res.headers['set-cookie'] || [''])[0].split(';')[0] }); });
+    });
+    r.on('error', reject);
+    if (data) r.write(data);
+    r.end();
+  });
+}
+
+test('a company can claim its own domain, and only one company can have it', async () => {
+  const bad = await req('PUT', '/api/admin/business/domain', { custom_domain: 'not a domain' }, { cookie: ownerCookie });
+  assert.equal(bad.status, 422);
+  const ok = await req('PUT', '/api/admin/business/domain', { custom_domain: 'https://Book.Example.TEST/' }, { cookie: ownerCookie });
+  assert.equal(ok.status, 200, JSON.stringify(ok.data));
+  assert.equal(ok.data.custom_domain, 'book.example.test', 'stored as a bare lowercase hostname');
+  assert.equal(ok.data.page_url, 'https://book.example.test');
+  const me = await req('GET', '/api/admin/auth/me', null, { cookie: ownerCookie });
+  assert.equal(me.data.business.page_url, 'https://book.example.test');
+
+  const otherCookie = await signup('second.company@test.dev', 'Second Company');
+  const clash = await req('PUT', '/api/admin/business/domain', { custom_domain: 'book.example.test' }, { cookie: otherCookie });
+  assert.equal(clash.status, 409, 'two companies cannot share a domain');
+  // A host on the team cannot change it.
+  const hostCookie = (await req('POST', '/api/admin/auth/login', { email: 'pat.planner@test.dev', password: 'password123' })).cookie;
+  assert.equal((await req('PUT', '/api/admin/business/domain', { custom_domain: 'x.example.test' }, { cookie: hostCookie })).status, 403);
+});
+
+test('the company domain serves its own pages at clean addresses, and nobody else\'s', async () => {
+  const H = 'book.example.test';
+  const home = await hostReq(H, 'GET', '/');
+  assert.equal(home.status, 200);
+  assert.match(home.data, /profile\.js/, 'the domain\'s home page is the company\'s booking page');
+  const callPage = await hostReq(H, 'GET', '/discovery-call');
+  assert.equal(callPage.status, 200);
+  assert.match(callPage.data, /booking\.js/);
+  const second = db.get("SELECT slug FROM businesses WHERE name = 'Second Company'").slug;
+  assert.equal((await hostReq(H, 'GET', `/b/${second}`)).status, 404, 'another company is not served under this one\'s name');
+  assert.equal((await hostReq(H, 'GET', `/b/${bizSlug}`)).status, 200, 'its own /b/ path still works, so old embeds keep loading');
+  // The platform address forwards the company's old links to its domain.
+  const fwd = await fetch(`${base}/b/${bizSlug}/discovery-call?utm_source=x`, { redirect: 'manual' });
+  assert.equal(fwd.status, 301);
+  assert.equal(fwd.headers.get('location'), 'https://book.example.test/discovery-call?utm_source=x');
+  // The platform's own home page names no company.
+  const platform = await (await fetch(`${base}/`)).text();
+  assert.ok(!platform.includes(bizSlug), 'the Booklane home page does not point at any company');
+  // The embed script on the company's domain loads frames from that domain.
+  assert.match((await hostReq(H, 'GET', '/embed.js')).data, /var base="https:\/\/book\.example\.test"/);
+});
+
+test('the admin works on the company domain too, opens that company, and does not offer sign-up', async () => {
+  const H = 'book.example.test';
+  const page = await hostReq(H, 'GET', '/app');
+  assert.equal(page.status, 200);
+  const payload = JSON.parse(/window\.__BL__=(\{.*?\});<\/script>/s.exec(page.data)[1]);
+  assert.equal(payload.allowSignup, false);
+  assert.ok(payload.companyDomain && payload.companyDomain.name);
+  const blocked = await hostReq(H, 'POST', '/api/admin/auth/signup', { name: 'X', email: 'x.on.domain@test.dev', password: 'password123', business_name: 'Sneaky' });
+  assert.equal(blocked.status, 403);
+  const login = await hostReq(H, 'POST', '/api/admin/auth/login', { email: 'second.company@test.dev', password: 'password123' });
+  assert.equal(login.status, 200, JSON.stringify(login.data));
+  // Someone with no role in this company logs in fine, but lands in their own company.
+  const me = await hostReq(H, 'GET', '/api/admin/auth/me', null, { cookie: login.cookie });
+  assert.equal(me.data.business.name, 'Second Company');
+});
+
+test('every link sent for the company points at its domain, and it emails from its own address', async () => {
+  require('../src/lib/security').resetRateLimits();
+  const bizId = db.get('SELECT id FROM businesses WHERE slug = ?', bizSlug).id;
+  const set = await req('PUT', '/api/admin/business/domain', { email_from: 'Example Co <bookings@example.test>' }, { cookie: ownerCookie });
+  assert.equal(set.status, 200, JSON.stringify(set.data));
+  assert.equal(set.data.email_from_is_own, true);
+  const config = require('../src/lib/config');
+  assert.equal(config.get('EMAIL_FROM', bizId), 'Example Co <bookings@example.test>');
+  const other = db.get("SELECT id FROM businesses WHERE name = 'Second Company'").id;
+  assert.notEqual(config.get('EMAIL_FROM', other), 'Example Co <bookings@example.test>', 'another company does not inherit it');
+  assert.equal((await req('PUT', '/api/admin/business/domain', { email_from: 'nope' }, { cookie: ownerCookie })).status, 422);
+
+  const et = db.get("SELECT * FROM event_types WHERE business_id = ? AND slug = 'discovery-call'", bizId);
+  const from = T.addDays(T.utcToZoned(Date.now(), 'America/Chicago').date, 3);
+  const open = await req('GET', `/api/public/b/${bizSlug}/e/${et.slug}/slots?from=${from}&to=${T.addDays(from, 14)}&tz=America/Chicago`);
+  const day = Object.keys(open.data.days).sort().find((d) => open.data.days[d].length);
+  const made = await req('POST', `/api/public/b/${bizSlug}/e/${et.slug}/book`, { start: open.data.days[day].slice(-1)[0], timezone: 'America/Chicago',
+    contact: { first_name: 'Domain', last_name: 'Test', email: 'domain.test@example.com', phone: '7135550111' } });
+  assert.equal(made.status, 200, JSON.stringify(made.data));
+  await new Promise((r) => setTimeout(r, 50));
+  const mail = db.get("SELECT html FROM email_log WHERE to_addr = 'domain.test@example.com' ORDER BY id DESC LIMIT 1");
+  assert.ok(mail, 'a confirmation was sent');
+  assert.match(mail.html, /https:\/\/book\.example\.test\/booking\//, 'the manage link is on the company domain');
+  assert.ok(!mail.html.includes(`${base}/booking/`), 'and not on the platform address');
+  const BK = require('../src/services/bookings');
+  assert.match(BK.bookingPayload(db.get('SELECT * FROM bookings WHERE token = ?', made.data.token)).manage_url, /^https:\/\/book\.example\.test\/booking\//);
+
+  // A staff invite links to the company's domain.
+  const inv = await req('POST', '/api/admin/team', { name: 'Domain Invitee', email: 'domain.invitee@test.dev', role: 'host' }, { cookie: ownerCookie });
+  assert.equal(inv.status, 200, JSON.stringify(inv.data));
+  const invite = db.get("SELECT html FROM email_log WHERE to_addr = 'domain.invitee@test.dev' ORDER BY id DESC LIMIT 1");
+  assert.match(invite.html, /https:\/\/book\.example\.test\/app#\/accept\//);
+});
+
+test('a calendar sign-in started on a company domain is handed back there to finish', async () => {
+  const uid = db.get("SELECT id FROM users WHERE email = (SELECT email FROM users ORDER BY id LIMIT 1)").id;
+  db.run('INSERT INTO oauth_states (state, user_id, provider, return_origin, created_at) VALUES (?,?,?,?,?)', 'state-domain-1', uid, 'google', 'https://book.example.test', Date.now());
+  const r = await fetch(`${base}/oauth/google/callback?code=abc123&state=state-domain-1`, { redirect: 'manual' });
+  assert.equal(r.status, 302);
+  assert.equal(r.headers.get('location'), 'https://book.example.test/oauth/google/finish?code=abc123&state=state-domain-1');
+  // The state is still there for the company domain to redeem; it is not consumed by the hop.
+  assert.ok(db.get("SELECT 1 x FROM oauth_states WHERE state = 'state-domain-1'"));
+  // Finishing still needs the session of the person who started it.
+  const anon = await hostReq('book.example.test', 'GET', '/oauth/google/finish?code=abc123&state=state-domain-1');
+  assert.equal(anon.status, 302);
+  assert.match(anon.headers.location, /error=/);
+
+  // Clean up so nothing later sees this company on a test domain.
+  await req('PUT', '/api/admin/business/domain', { custom_domain: '', email_from: '' }, { cookie: ownerCookie });
+  assert.equal(db.get('SELECT custom_domain FROM businesses WHERE slug = ?', bizSlug).custom_domain, null);
+});

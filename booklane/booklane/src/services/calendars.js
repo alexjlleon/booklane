@@ -33,11 +33,11 @@ const redirectUri = (p) => `${baseUrl()}/oauth/${p}/callback`;
  * account and attaches one of its calendars to Houston. The person who started it is still recorded
  * separately, because that is what the callback checks before trusting the code it is handed.
  */
-function startAuth(provider, userId, targetUserId) {
+function startAuth(provider, userId, targetUserId, returnOrigin) {
   const P = PROVIDERS[provider];
   const state = token(18);
   db.run('DELETE FROM oauth_states WHERE created_at < ?', Date.now() - 15 * 60000);
-  db.run('INSERT INTO oauth_states (state, user_id, provider, target_user_id, created_at) VALUES (?,?,?,?,?)', state, userId, provider, targetUserId || null, Date.now());
+  db.run('INSERT INTO oauth_states (state, user_id, provider, target_user_id, return_origin, created_at) VALUES (?,?,?,?,?,?)', state, userId, provider, targetUserId || null, returnOrigin || null, Date.now());
   const params = new URLSearchParams({ client_id: P.clientId(), redirect_uri: redirectUri(provider), response_type: 'code', scope: P.scopes, state, ...P.extraAuth });
   return `${P.authUrl}?${params}`;
 }
@@ -53,6 +53,8 @@ async function tokenRequest(provider, params) {
   if (!r.ok) throw new Error(data.error_description || data.error || `Token request failed (${r.status})`);
   return data;
 }
+
+const stateRow = (state, provider) => db.get('SELECT * FROM oauth_states WHERE state = ? AND provider = ?', String(state), String(provider));
 
 async function finishAuth(provider, code, state, sessionUserId) {
   const row = db.get('SELECT * FROM oauth_states WHERE state = ? AND provider = ?', state, provider);
@@ -234,4 +236,4 @@ async function deleteEvent(ext) {
   } catch (e) { markError(conn, e); }
 }
 
-module.exports = { explainBusy, ignoredReason, PROVIDERS, isConfigured, startAuth, finishAuth, getBusy, createEvent, deleteEvent, clearBusyCache };
+module.exports = { explainBusy, ignoredReason, PROVIDERS, isConfigured, startAuth, finishAuth, stateRow, getBusy, createEvent, deleteEvent, clearBusyCache };

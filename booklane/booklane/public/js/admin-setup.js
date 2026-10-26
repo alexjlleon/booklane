@@ -4,6 +4,9 @@
   const { esc, api, $, $$ } = A;
   const isAdmin = () => ['owner', 'admin'].includes(A.me.business.role);
   const base = () => A.me.app.base_url;
+  // Where this company's pages live: its own domain when it has one, otherwise <platform>/b/<slug>.
+  const pageUrl = (rest) => `${A.me.business.page_url}${rest ? `/${rest}` : ''}`;
+  const embedBase = () => A.me.business.public_base || base();
 
   // ---------- Event types list ----------
   A.route('/event-types', {
@@ -24,7 +27,7 @@
     .filter(Boolean).map((t) => `<span class="pill">${esc(t.name)}</span>`).join(' ') || '<span class="pill partial">Not filed</span>'}</div>
           <div class="small">${esc(et.hosts.map((h) => (d.members.find((m) => m.id === h) || {}).name).filter(Boolean).join(', '))}${et.hosts.length > 1 ? ` · ${et.assignment === 'round_robin' ? 'round robin' : 'first available'}` : ''}</div>
           <div class="small muted" style="margin-top:6px">${et.bookings_30d} booked in 30 days</div></div>
-          <div class="foot"><button class="btn btn-link btn-sm" data-copy="${esc(base())}/b/${esc(slug)}/${esc(et.slug)}">Copy link</button>
+          <div class="foot"><button class="btn btn-link btn-sm" data-copy="${esc(pageUrl(et.slug))}">Copy link</button>
           <div class="row" style="gap:4px"><a class="btn btn-ghost btn-sm" href="/b/${esc(slug)}/${esc(et.slug)}" target="_blank">Preview</a>${isAdmin() ? `<a class="btn btn-ghost btn-sm" href="#/event-types/${et.id}">Edit</a>` : ''}</div></div></div>`).join('')}</div>`
         : '<div class="panel"><div class="empty-state"><h3>No call types yet</h3><a class="btn btn-primary" href="#/event-types/new">Create one</a></div></div>'}`;
     },
@@ -369,8 +372,8 @@
     async render(p, q) {
       const [d, team, services] = await Promise.all([api('GET', '/event-types'), api('GET', '/team'), api('GET', '/services')]);
       const me = team.find((m) => m.id === A.me.user.id) || {};
-      const b = A.me.business, url = base();
-      const link = (label, path) => `<div class="field"><label>${esc(label)}</label><div class="copy-row"><input class="input" readonly value="${esc(url + path)}"><button class="btn btn-ghost btn-sm" data-copy="${esc(url + path)}">Copy</button><a class="btn btn-ghost btn-sm" href="${esc(path)}" target="_blank">Open</a></div></div>`;
+      const b = A.me.business, url = embedBase();
+      const link = (label, path) => `<div class="field"><label>${esc(label)}</label><div class="copy-row"><input class="input" readonly value="${esc(pageUrl(path))}"><button class="btn btn-ghost btn-sm" data-copy="${esc(pageUrl(path))}">Copy</button><a class="btn btn-ghost btn-sm" href="${esc(path)}" target="_blank">Open</a></div></div>`;
       const inline = `<div data-booklane="b/${b.slug}"></div>\n<script src="${url}/embed.js" async></script>`;
       const popup = `<button data-booklane-popup="b/${b.slug}/quote">Build your quote</button>\n<script src="${url}/embed.js" async></script>`;
       const shortEt = d.event_types.find((e) => e.active && (e.steps || []).some((x) => x.type === 'availability')) || d.event_types.find((e) => e.active) || {};
@@ -384,7 +387,7 @@
       return `<div class="topbar"><div><h1>${q.welcome ? 'You are live!' : 'Share & embed'}</h1><div class="sub">Send these links anywhere, or drop the booking flow into your website.</div></div></div>
         ${q.welcome || checklist.some((c) => !c[0]) ? `<div class="panel"><h2>Finish setting up</h2><div class="stack" style="gap:8px;margin-top:12px">${checklist.map(([done, label, href]) => `<a href="${href}" class="row" style="text-decoration:none;color:inherit"><span class="pill ${done ? 'booked' : 'partial'}">${done ? 'Done' : 'To do'}</span><b>${esc(label)}</b></a>`).join('')}</div></div>` : ''}
         <div class="cols-even"><div class="panel"><h2>Links</h2><p class="desc">Your main page lets people choose between booking a call and building a quote.</p>
-          ${link('Main page', `/b/${b.slug}`)}${link('Quote builder', `/b/${b.slug}/quote`)}${d.event_types.filter((e) => e.active).map((e) => link(e.name, `/b/${b.slug}/${e.slug}`)).join('')}
+          ${link('Main page', '')}${link('Quote builder', 'quote')}${d.event_types.filter((e) => e.active).map((e) => link(e.name, e.slug)).join('')}
           <p class="help">Tip: add <code>?utm_source=instagram</code> to any link and it shows on the lead.</p></div>
         <div class="panel"><h2>Embed on your website</h2><p class="desc">Paste into a Custom HTML / code block (WordPress, Avada, Squarespace, Wix). The frame resizes itself.</p>
           <div class="field"><label>Inline (main page)</label><div class="code">${esc(inline)}</div><button class="btn btn-ghost btn-sm" style="align-self:flex-start" data-copy="${esc(inline)}">Copy code</button></div>

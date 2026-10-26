@@ -93,4 +93,36 @@ function publicSettings(b) {
   };
 }
 
-module.exports = { conform, hydrate, bySlug, byId, teamEmails, logActivity, publicSettings };
+// ---------- domains ----------
+// The platform lives at BASE_URL. A company with a custom domain gets its pages there instead, at
+// clean paths: book.weddingsunlimited.com/discovery-call rather than <platform>/b/weddings-unlimited/discovery-call.
+const { baseUrl } = require('../lib/util');
+
+/** A hostname as people type it: lowercase, no scheme, port, path or trailing dot. */
+function normalizeDomain(v) {
+  let s = String(v || '').trim().toLowerCase();
+  s = s.replace(/^[a-z]+:\/\//, '').split('/')[0].split('?')[0].replace(/:\d+$/, '').replace(/\.$/, '');
+  return s;
+}
+const DOMAIN_RE = /^(?=.{4,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+const isDomain = (s) => DOMAIN_RE.test(s);
+const platformHost = () => { try { return new URL(baseUrl()).hostname.toLowerCase(); } catch { return ''; } };
+
+const byDomain = (host) => (host ? hydrate(db.get('SELECT * FROM businesses WHERE custom_domain = ?', normalizeDomain(host))) : null);
+
+/** Where this company's pages and links live. */
+function baseFor(business) {
+  if (business && business.custom_domain) return `https://${business.custom_domain}`;
+  return baseUrl();
+}
+/** A link to one of this company's public pages: '' for its home page, 'discovery-call', 'quote'. */
+function pageUrl(business, rest = '') {
+  const tail = String(rest || '').replace(/^\/+/, '');
+  if (business && business.custom_domain) return `https://${business.custom_domain}${tail ? `/${tail}` : ''}`;
+  return `${baseUrl()}/b/${business.slug}${tail ? `/${tail}` : ''}`;
+}
+/** A link that is not under /b/ (a booking's manage page, a quote, the admin), on this company's domain. */
+const linkFor = (business, path) => `${baseFor(business)}${path.startsWith('/') ? path : `/${path}`}`;
+
+module.exports = { conform, hydrate, bySlug, byId, teamEmails, logActivity, publicSettings,
+  normalizeDomain, isDomain, platformHost, byDomain, baseFor, pageUrl, linkFor };

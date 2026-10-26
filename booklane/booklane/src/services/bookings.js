@@ -56,7 +56,7 @@ async function sendBookingEmails(kind, booking) {
   const tz = b.invitee_tz || business.timezone;
   const start = Date.parse(b.start_utc), end = Date.parse(b.end_utc);
   const when = T.formatDateTime(start, tz);
-  const manage = `${baseUrl()}/booking/${b.token}`;
+  const manage = B.linkFor(business, `/booking/${b.token}`);
   const summary = `${et?.name || 'Call'} with ${business.name}`;
   const answers = db.json(b.answers, {});
   const ics = buildIcs({ uid: `booking-${b.id}-${b.token.slice(0, 8)}@booklane`, start, end, summary, description: `Manage: ${manage}`, location: b.location,
@@ -69,7 +69,7 @@ async function sendBookingEmails(kind, booking) {
       heading: headings[kind],
       body: rows([['What', summary], ['When', when], ['Where', b.location], ['With', host?.name]]) +
         (kind !== 'cancelled' ? `<p>Need to make a change? <a href="${manage}">Reschedule or cancel</a>. <a href="${googleCalendarLink({ start, end, summary, location: b.location, description: manage })}">Add to Google Calendar</a>.</p>` : ''),
-      cta: kind === 'cancelled' ? { label: 'Book a new time', url: `${baseUrl()}/b/${business.slug}/${et?.slug || ''}` } : null,
+      cta: kind === 'cancelled' ? { label: 'Book a new time', url: B.pageUrl(business, et?.slug || '') } : null,
     }),
     attachments: [{ filename: 'invite.ics', content: ics }],
   });
@@ -83,7 +83,7 @@ async function sendBookingEmails(kind, booking) {
         heading: kind === 'created' ? 'New call booked' : kind === 'rescheduled' ? 'A call was rescheduled' : 'A call was cancelled',
         body: rows([['Event', et?.name], ['When', T.formatDateTime(start, business.timezone)], ['Host', host?.name], ['Name', b.name], ['Email', b.email], ['Phone', b.phone], ['Location', b.location],
           ['Reason', b.cancel_reason], ...L.answersToPairs(answers)]),
-        cta: { label: 'Open in dashboard', url: `${baseUrl()}/app#/bookings` },
+        cta: { label: 'Open in dashboard', url: B.linkFor(business, '/app#/bookings') },
       }),
       attachments: [{ filename: 'invite.ics', content: ics }],
     });
@@ -136,7 +136,7 @@ async function createBooking({ business, et, startIso, tz, contact = {}, answers
     summary: `${et.name}: ${name || contact.email}`, start: startMs, end: endMs, attendeeEmail: contact.email, attendeeName: name, timezone: tz,
     location: PLACES.placeText(place, contact), locationType: place.type,
     description: [`Booked via ${business.name}`, contact.phone ? `Phone: ${contact.phone}` : '', ...L.answersToPairs(cleanAnswers).map(([k, v]) => `${k}: ${v}`),
-      quote ? `Quote: ${baseUrl()}/q/${quote.token}` : '', `Manage: ${baseUrl()}/app#/bookings`].filter(Boolean).join('\n'),
+      quote ? `Quote: ${B.linkFor(business, `/q/${quote.token}`)}` : '', `Manage: ${B.linkFor(business, '/app#/bookings')}`].filter(Boolean).join('\n'),
   });
   if (ext) db.run('UPDATE bookings SET external_events = ?, location = ? WHERE id = ?', JSON.stringify([ext]), PLACES.placeText(place, contact, ext.join_url), bookingId);
 
@@ -159,7 +159,7 @@ async function createBooking({ business, et, startIso, tz, contact = {}, answers
 
 function bookingPayload(b) {
   return { id: b.id, token: b.token, status: b.status, start: b.start_utc, end: b.end_utc, timezone: b.invitee_tz, name: b.name, email: b.email, phone: b.phone,
-    location: b.location, answers: db.json(b.answers, {}), event_type_id: b.event_type_id, host_user_id: b.host_user_id, manage_url: `${baseUrl()}/booking/${b.token}` };
+    location: b.location, answers: db.json(b.answers, {}), event_type_id: b.event_type_id, host_user_id: b.host_user_id, manage_url: B.linkFor(B.byId(b.business_id), `/booking/${b.token}`) };
 }
 
 async function cancelBooking(booking, reason, by = 'invitee') {
@@ -199,7 +199,7 @@ async function rescheduleBooking(booking, startIso, tz) {
   for (const ext of oldExternal) await calendars.deleteEvent(ext);
   const b = db.get('SELECT * FROM bookings WHERE id = ?', booking.id);
   const ext = await calendars.createEvent(hostId, { summary: `${et.name}: ${b.name || b.email}`, start: startMs, end: endMs, attendeeEmail: b.email, attendeeName: b.name,
-    timezone: b.invitee_tz, location: b.location, locationType: PLACES.placeFor(et, b.place_id).type, description: `Rescheduled booking. Manage: ${baseUrl()}/app#/bookings` });
+    timezone: b.invitee_tz, location: b.location, locationType: PLACES.placeFor(et, b.place_id).type, description: `Rescheduled booking. Manage: ${B.linkFor(B.byId(b.business_id), '/app#/bookings')}` });
   if (ext) db.run('UPDATE bookings SET external_events = ?, location = CASE WHEN ? IS NOT NULL THEN ? ELSE location END WHERE id = ?', JSON.stringify([ext]), ext.join_url, ext.join_url, b.id);
   const business = B.byId(b.business_id);
   if (b.lead_id) B.logActivity(business.id, b.lead_id, 'booking', `Call rescheduled to ${T.formatDateTime(startMs, business.timezone)}`);
@@ -223,7 +223,7 @@ async function sendReminders() {
     await sendEmail({
       to: b.email, businessId: business.id, fromName: business.name, replyTo: business.email,
       subject: `Reminder: ${et?.name || 'your call'} with ${business.name}`,
-      html: layout(business, { heading: 'See you soon!', body: rows([['When', T.formatDateTime(Date.parse(b.start_utc), b.invitee_tz || business.timezone)], ['Where', b.location]]), cta: { label: 'Reschedule or cancel', url: `${baseUrl()}/booking/${b.token}` } }),
+      html: layout(business, { heading: 'See you soon!', body: rows([['When', T.formatDateTime(Date.parse(b.start_utc), b.invitee_tz || business.timezone)], ['Where', b.location]]), cta: { label: 'Reschedule or cancel', url: B.linkFor(business, `/booking/${b.token}`) } }),
     });
   }
 }

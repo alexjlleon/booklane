@@ -5,12 +5,15 @@
   const STATUSES = ['partial', 'booked', 'quoted', 'contract_requested', 'callback_requested', 'contacted', 'won', 'lost'];
 
   // ---------- Auth ----------
+  // On a company's own domain this is that company's login: no sign-up, and its name on the page.
+  const company = () => (window.__BL__ || {}).companyDomain || null;
+  const signupOpen = () => (window.__BL__ || {}).allowSignup !== false;
   function authView(mode) {
     return {
       public: true, title: mode === 'login' ? 'Log in' : 'Sign up',
       render: () => `<div class="auth"><div class="panel"><div class="logo-mark" style="margin:0;width:44px;height:44px;border-radius:12px"></div>
         <h1>${mode === 'login' ? 'Welcome back' : 'Create your booking page'}</h1>
-        <p class="muted" style="margin-top:0">${mode === 'login' ? 'Log in to your dashboard.' : 'Takes about a minute. You can add more businesses later.'}</p>
+        <p class="muted" style="margin-top:0">${mode === 'login' ? (company() ? `Log in to the ${esc(company().name)} dashboard.` : 'Log in to your dashboard.') : 'Takes about a minute. You can add more businesses later.'}</p>
         <div id="auth-err"></div>
         <form id="auth-form" novalidate>
           ${mode === 'signup' ? A.field('Your name', '<input class="input" name="name" autocomplete="name">') + A.field('Business name', '<input class="input" name="business_name" autocomplete="organization">') : ''}
@@ -18,7 +21,7 @@
           ${A.field('Password', `<input class="input" name="password" type="password" autocomplete="${mode === 'login' ? 'current-password' : 'new-password'}">`)}
           <button class="btn btn-primary btn-lg btn-block" type="submit">${mode === 'login' ? 'Log in' : 'Create account'}</button>
         </form>
-        <p class="small muted" style="text-align:center;margin-top:18px">${mode === 'login' ? 'New here? <a href="#/signup">Create an account</a>' : 'Already have an account? <a href="#/login">Log in</a>'}</p></div></div>`,
+        <p class="small muted" style="text-align:center;margin-top:18px">${mode === 'login' ? (signupOpen() ? 'New here? <a href="#/signup">Create an account</a>' : '') : 'Already have an account? <a href="#/login">Log in</a>'}</p></div></div>`,
       mount(root) {
         $('#auth-form', root).addEventListener('submit', async (e) => {
           e.preventDefault();

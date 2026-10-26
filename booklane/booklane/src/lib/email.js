@@ -4,7 +4,8 @@ const { esc } = require('./util');
 const config = require('./config');
 
 // Read at send time, not at load time, so a key saved in the admin screen takes effect immediately.
-const from = () => config.get('EMAIL_FROM') || 'Booklane <onboarding@resend.dev>';
+// A company's own send-from address wins; otherwise the platform's. Read at send time, like the key.
+const from = (businessId) => config.get('EMAIL_FROM', businessId) || 'Booklane <onboarding@resend.dev>';
 const apiKey = () => (config.get('RESEND_API_KEY') || '').trim();
 
 async function sendEmail({ to, subject, html, text, attachments, replyTo, businessId, fromName }) {
@@ -15,7 +16,7 @@ async function sendEmail({ to, subject, html, text, attachments, replyTo, busine
   if (key) {
     provider = 'resend';
     try {
-      const base = from();
+      const base = from(businessId);
       let sender = base;
       if (fromName) { const addr = (base.match(/<([^>]+)>/) || [null, base])[1]; sender = `${fromName.replace(/[<>"]/g, '')} <${addr}>`; }
       const r = await fetch('https://api.resend.com/emails', {

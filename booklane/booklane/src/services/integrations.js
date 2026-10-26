@@ -52,7 +52,7 @@ function buildBoothBookPayload(business, lead, quote) {
   const lines = db.json(quote?.line_items, []);
   const contract = db.json(quote?.contract_request, null);
   const summary = [
-    quote ? `Quote ${baseUrl()}/q/${quote.token}` : null,
+    quote ? `Quote ${require('./business').linkFor(business, `/q/${quote.token}`)}` : null,
     ...lines.map((l) => `- ${l.name}${l.options.length ? ' (' + l.options.map((o) => o.name).join(', ') + ')' : ''}${l.pricing_type !== 'flat' ? ` x${l.qty} ${l.unit_label || ''}` : ''}: $${l.amount}`),
     quote ? `Total: $${quote.total}${quote.discount ? ` (incl. $${quote.discount} discount)` : ''}` : null,
     contract?.notes ? `Notes: ${contract.notes}` : null,
@@ -62,7 +62,7 @@ function buildBoothBookPayload(business, lead, quote) {
     first_name: lead?.first_name, last_name: lead?.last_name, email: lead?.email, phone: lead?.phone,
     event_date: details.event_date || answers.event_date, event_type: details.event_type || answers.event_type,
     venue: details.venue || answers.venue, guests: details.guests, notes: summary,
-    quote_total: quote?.total, quote_url: quote ? `${baseUrl()}/q/${quote.token}` : null, source: 'Booklane',
+    quote_total: quote?.total, quote_url: quote ? `${require('./business').linkFor(business, `/q/${quote.token}`)}` : null, source: 'Booklane',
     event_start_time: contract?.event_start_time, event_end_time: contract?.event_end_time,
     venue_address: contract?.venue_address, billing_address: contract?.billing_address,
   };

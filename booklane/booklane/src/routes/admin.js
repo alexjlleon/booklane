@@ -32,7 +32,8 @@ const bid = (req) => req.membership.id;
 const isAdmin = (req) => ROLE_RANK[req.membership?.role] >= ROLE_RANK.admin;
 
 function meResponse(req) {
-  return { user: req.user, business: req.membership ? { ...req.membership } : null, businesses: req.memberships || [],
+  const cur = req.membership ? B.byId(req.membership.id) : null;
+  return { user: req.user, business: req.membership ? { ...req.membership, custom_domain: cur.custom_domain || null, public_base: B.baseFor(cur), page_url: B.pageUrl(cur, '') } : null, businesses: req.memberships || [],
     app: { base_url: baseUrl(), calendars: Object.fromEntries(Object.entries(calendars.PROVIDERS).map(([k, p]) => [k, { label: p.label, configured: calendars.isConfigured(k) }])), email_provider: appConfig.get('RESEND_API_KEY') ? 'resend' : 'log' } };
 }
 
@@ -121,6 +122,8 @@ function maskBusiness(b, req) {
 module.exports = function adminRoutes(app) {
   // ---------- Auth ----------
   app.post('/api/admin/auth/signup', (req, res) => {
+    // A company's own domain is that company's front door, not a place to open a new account.
+    if (req.hostBusiness) throw new HttpError(403, 'Sign up on the Booklane site, not on a company\'s own address.');
     authLimit(req);
     const { name, email, password, business_name, timezone } = req.body || {};
     if (process.env.ALLOW_SIGNUP === 'false' && db.get('SELECT 1 FROM users LIMIT 1')) throw new HttpError(403, 'Sign ups are closed. Ask an admin to invite you.');
@@ -404,6 +407,57 @@ module.exports = function adminRoutes(app) {
     return { ok: true, start_utc: updated.start_utc, host_user_id: updated.host_user_id };
   });
 
+  // ---------- This company's domain and email ----------
+  // The domain decides where its pages live and where every link it sends points. The send-from
+  // address is stored against this company only, so each company emails as itself.
+  const domainOut = async (b) => {
+    const own = appConfig.get('EMAIL_FROM', b.id);
+    const shared = appConfig.get('EMAIL_FROM');
+    const stored = db.get("SELECT 1 x FROM business_credentials WHERE business_id = ? AND key = 'EMAIL_FROM'", b.id);
+    const effective = own || shared || '';
+    const sendDomain = (effective.match(/@([^>\s]+)/) || [])[1] || null;
+    return {
+      custom_domain: b.custom_domain || null,
+      platform_host: B.platformHost(),
+      page_url: B.pageUrl(b, ''),
+      email_from: stored ? own : '',
+      email_from_effective: effective,
+      email_from_is_own: !!stored,
+      email_domain: sendDomain ? await providers.resendDomainStatus(sendDomain) : null,
+    };
+  };
+  app.get('/api/admin/business/domain', async (req) => {
+    requireRole('admin')(req);
+    return domainOut(B.byId(bid(req)));
+  });
+  app.put('/api/admin/business/domain', async (req) => {
+    requireRole('owner')(req);
+    const b = B.byId(bid(req));
+    const body = req.body || {};
+    if (body.custom_domain !== undefined) {
+      const d = B.normalizeDomain(body.custom_domain);
+      if (d) {
+        if (!B.isDomain(d)) throw new HttpError(422, 'That does not look like a domain. Use something like book.yourcompany.com', { custom_domain: 'Not a domain' });
+        const taken = db.get('SELECT id FROM businesses WHERE custom_domain = ? AND id != ?', d, b.id);
+        if (taken) throw new HttpError(409, 'Another company on Booklane already uses that domain', { custom_domain: 'Already in use' });
+      }
+      db.run('UPDATE businesses SET custom_domain = ? WHERE id = ?', d || null, b.id);
+      B.logActivity(b.id, null, 'settings', d ? `Domain set to ${d} by ${req.user.email}` : `Domain removed by ${req.user.email}`);
+    }
+    if (body.email_from !== undefined) {
+      const v = clampStr(String(body.email_from || '').trim(), 200);
+      if (v) {
+        const addr = (v.match(/<([^>]+)>/) || [null, v])[1].trim();
+        if (!isEmail(addr)) throw new HttpError(422, 'Use an address like Your Company <hello@yourcompany.com>', { email_from: 'Not an email address' });
+        appConfig.set('EMAIL_FROM', v, req.user.id, b.id);
+      } else {
+        appConfig.clear('EMAIL_FROM', b.id);
+      }
+      B.logActivity(b.id, null, 'settings', v ? `Send-from address set to ${v} by ${req.user.email}` : `Send-from address cleared by ${req.user.email}`);
+    }
+    return domainOut(B.byId(b.id));
+  });
+
   // ---------- Team performance ----------
   app.get('/api/admin/team-stats', (req) => {
     requireRole('admin')(req);
@@ -648,7 +702,7 @@ module.exports = function adminRoutes(app) {
       max_days_ahead: et.max_days_ahead, slot_interval_min: et.slot_interval_min, location_type: et.location_type, location_value: et.location_value,
       session: s.session, steps: s.steps,
       calendar_ids: SESS.calendarsForProduct(et).map((c) => c.id),
-      public_url: `${baseUrl()}/b/${B.byId(et.business_id).slug}/s/${et.slug}`,
+      public_url: B.pageUrl(B.byId(et.business_id), `s/${et.slug}`),
       booked: db.get("SELECT COUNT(*) c FROM bookings WHERE event_type_id = ? AND status = 'confirmed'", et.id).c,
     };
   }
@@ -783,7 +837,7 @@ module.exports = function adminRoutes(app) {
       id: x.id, slug: x.slug, name: x.name, description: x.description || '',
       steps: x.steps, settings: x.settings, copy: x.copy, shape: FORMS.shapeOf(x.steps),
       active: !!x.active, sort: x.sort, submissions: x.submissions,
-      url: `${baseUrl()}/b/${B.byId(x.business_id).slug}/f/${x.slug}`,
+      url: B.pageUrl(B.byId(x.business_id), `f/${x.slug}`),
       leads: db.get('SELECT COUNT(*) c FROM leads WHERE form_id = ?', x.id).c,
     };
   };
@@ -1185,7 +1239,7 @@ module.exports = function adminRoutes(app) {
     if (existing) db.run('UPDATE memberships SET role = ?, invite_token = ? WHERE user_id = ? AND business_id = ?', r, inviteToken, u.id, bid(req));
     else db.run("INSERT INTO memberships (user_id, business_id, role, status, invite_token) VALUES (?,?,?,'invited',?)", u.id, bid(req), r, inviteToken);
     const business = B.byId(bid(req));
-    const url = `${baseUrl()}/app#/accept/${inviteToken}`;
+    const url = B.linkFor(business, `/app#/accept/${inviteToken}`);
     const sent = await sendEmail({ to: u.email, businessId: business.id, subject: `${req.user.name} invited you to ${business.name}`,
       html: layout(business, { heading: `Join ${business.name}`, body: `<p>${req.user.name.replace(/[<>&]/g, '')} invited you to take calls and manage leads for ${business.name.replace(/[<>&]/g, '')}.</p>`, cta: { label: 'Accept invite', url } }) });
     B.logActivity(business.id, null, 'team', `${req.user.name} invited ${u.email} as ${r}`);

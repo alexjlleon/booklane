@@ -29,7 +29,9 @@ function loadSession(req) {
   req.user = user;
   const memberships = db.all("SELECT m.role, b.id, b.name, b.slug FROM memberships m JOIN businesses b ON b.id = m.business_id WHERE m.user_id = ? AND m.status = 'active' ORDER BY b.name", user.id);
   req.memberships = memberships;
-  let m = memberships.find((x) => x.id === s.business_id) || memberships[0];
+  // On a company's own domain, the admin is that company's admin, whatever was open last.
+  const onDomain = req.hostBusiness ? memberships.find((x) => x.id === req.hostBusiness.id) : null;
+  let m = onDomain || memberships.find((x) => x.id === s.business_id) || memberships[0];
   if (m && m.id !== s.business_id) db.run('UPDATE sessions SET business_id = ? WHERE token = ?', m.id, t);
   req.membership = m || null;
 }

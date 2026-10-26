@@ -268,7 +268,7 @@ module.exports = function publicRoutes(app) {
     const summary = `${et?.name || 'Call'} with ${business.name}`;
     return { token: bk.token, status: bk.status, start: bk.start_utc, end: bk.end_utc, timezone: bk.invitee_tz, name: bk.name, email: bk.email, location: bk.location,
       host: host?.name, event_name: et?.name, duration_min: et?.duration_min, cancel_reason: bk.cancel_reason,
-      google_link: googleCalendarLink({ start, end, summary, location: bk.location, description: `${baseUrl()}/booking/${bk.token}` }), ics_url: `/api/public/bookings/${bk.token}/ics` };
+      google_link: googleCalendarLink({ start, end, summary, location: bk.location, description: B.linkFor(business, `/booking/${bk.token}`) }), ics_url: `/api/public/bookings/${bk.token}/ics` };
   }
 
   // ---------- Booking API ----------
@@ -341,7 +341,7 @@ module.exports = function publicRoutes(app) {
     const { et, business, host } = BK.bookingView(bk);
     res.set('Content-Disposition', 'attachment; filename="booking.ics"');
     res.text(buildIcs({ uid: `booking-${bk.id}-${bk.token.slice(0, 8)}@booklane`, start: Date.parse(bk.start_utc), end: Date.parse(bk.end_utc), summary: `${et?.name || 'Call'} with ${business.name}`,
-      description: `${baseUrl()}/booking/${bk.token}`, location: bk.location, organizerName: business.name, organizerEmail: host?.email, attendeeName: bk.name, attendeeEmail: bk.email, method: 'PUBLISH', cancelled: bk.status === 'cancelled' }), 'text/calendar; charset=utf-8');
+      description: B.linkFor(business, `/booking/${bk.token}`), location: bk.location, organizerName: business.name, organizerEmail: host?.email, attendeeName: bk.name, attendeeEmail: bk.email, method: 'PUBLISH', cancelled: bk.status === 'cancelled' }), 'text/calendar; charset=utf-8');
   });
 
   app.post('/api/public/bookings/:token/cancel', async (req) => {
@@ -440,7 +440,8 @@ module.exports = function publicRoutes(app) {
   // ---------- Embed script ----------
   app.get('/embed.js', (req, res) => {
     res.set('Cache-Control', 'public, max-age=300');
-    res.text(`(function(){var base=${JSON.stringify(baseUrl())};
+    // Served from a company's domain, the frames it opens come from that domain too.
+    res.text(`(function(){var base=${JSON.stringify(req.hostBusiness ? B.baseFor(req.hostBusiness) : baseUrl())};
 function src(){try{return encodeURIComponent(location.href.slice(0,500))}catch(e){return ''}}
 function stitle(){try{return encodeURIComponent((document.title||'').slice(0,120))}catch(e){return ''}}
 function frame(url,el){var f=document.createElement('iframe');f.src=url+(url.indexOf('?')>-1?'&':'?')+'embed=1&src='+src()+'&stitle='+stitle();f.style.cssText='width:100%;border:0;min-height:640px;display:block;color-scheme:normal';f.setAttribute('title','${APP_NAME} booking');f.setAttribute('loading','lazy');el.appendChild(f);return f}

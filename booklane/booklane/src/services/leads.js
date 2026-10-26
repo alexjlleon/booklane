@@ -68,16 +68,16 @@ function publicLead(l) {
 function leadPayload(l) {
   return { id: l.id, token: l.token, source: l.source, status: l.status, first_name: l.first_name, last_name: l.last_name, email: l.email, phone: l.phone,
     sms_consent: !!l.sms_consent, step_key: l.step_key, step_index: l.step_index, step_total: l.step_total, answers: db.json(l.answers, {}), meta: db.json(l.meta, {}),
-    created_at: l.created_at, last_activity_at: l.last_activity_at, admin_url: `${baseUrl()}/app#/leads/${l.id}` };
+    created_at: l.created_at, last_activity_at: l.last_activity_at, admin_url: B.linkFor(B.byId(l.business_id), `/app#/leads/${l.id}`) };
 }
 
 function resumeUrl(business, lead) {
   if (lead.source === 'quote') {
     const q = db.get('SELECT token FROM quotes WHERE lead_id = ? ORDER BY id DESC LIMIT 1', lead.id);
-    return `${baseUrl()}/b/${business.slug}/quote?resume=${q ? q.token : ''}`;
+    return B.pageUrl(business, `quote?resume=${q ? q.token : ''}`);
   }
   const et = lead.event_type_id ? db.get('SELECT slug FROM event_types WHERE id = ?', lead.event_type_id) : null;
-  return `${baseUrl()}/b/${business.slug}/${et ? et.slug : ''}?resume=${lead.token}`;
+  return B.pageUrl(business, `${et ? et.slug : ''}?resume=${lead.token}`);
 }
 
 function answersToPairs(answers) {
@@ -125,7 +125,7 @@ async function processAbandoned() {
             heading: 'Someone started but did not finish',
             body: `<p>They made it to step <b>${lead.max_step_index + 1}</b> of ${lead.step_total || '?'} before leaving. Here is everything they entered:</p>` +
               rows([['Name', leadName(lead)], ['Email', lead.email], ['Phone', lead.phone], ['Form', lead.source === 'quote' ? 'Quote builder' : et?.name], ...answersToPairs(db.json(lead.answers, {}))]),
-            cta: { label: 'Open lead', url: `${baseUrl()}/app#/leads/${lead.id}` },
+            cta: { label: 'Open lead', url: B.linkFor(business, `/app#/leads/${lead.id}`) },
           }),
         });
       }

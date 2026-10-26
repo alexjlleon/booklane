@@ -42,6 +42,27 @@ function twilioShape() {
   };
 }
 
+/**
+ * Is this domain set up to send in Resend? Returns { domain, status, records } where status is
+ * Resend's own word ('verified', 'pending', 'failed', 'not_added'), or 'unknown' when the key in
+ * use is not allowed to read domains.
+ */
+async function resendDomainStatus(domain) {
+  if (!domain) return null;
+  if (!config.get('RESEND_API_KEY')) return { domain, status: 'no_key' };
+  try {
+    const list = (await resendRequest('/domains')).data || [];
+    const hit = list.find((d) => String(d.name || '').toLowerCase() === domain.toLowerCase());
+    if (!hit) return { domain, status: 'not_added' };
+    let records = [];
+    try { records = ((await resendRequest(`/domains/${encodeURIComponent(hit.id)}`)).records || []).map((r) => ({ type: r.type, name: r.name, value: r.value, status: r.status, priority: r.priority })); } catch { /* list status is enough */ }
+    return { domain, status: String(hit.status || 'unknown').toLowerCase(), records };
+  } catch (e) {
+    if (e.status === 401 || e.status === 403) return { domain, status: 'unknown' };
+    return { domain, status: 'error', message: e.message };
+  }
+}
+
 function resendShape() {
   const from = config.get('EMAIL_FROM');
   const missing = [];
@@ -177,5 +198,5 @@ async function sendTestSms(business, to) {
 
 module.exports = {
   status, check, checkTwilio, checkResend,
-  sendTestEmail, sendTestSms,
+  sendTestEmail, sendTestSms, resendDomainStatus,
 };

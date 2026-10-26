@@ -100,8 +100,8 @@ function contextFor(booking) {
     host: host && !host.is_resource ? host.name : (cal ? cal.name : ''),
     services: serviceList.join(', '),
     booking_number: answers.booking_number ? String(answers.booking_number) : '',
-    manage_url: `${baseUrl()}/booking/${booking.token}`,
-    quote_url: quote ? `${baseUrl()}/q/${quote.token}` : '',
+    manage_url: B.linkFor(business, `/booking/${booking.token}`),
+    quote_url: quote ? B.linkFor(business, `/q/${quote.token}`) : '',
     business_name: business.name,
     business_phone: business.phone || '',
     business_email: business.email || '',
@@ -336,7 +336,7 @@ function sampleContext(business) {
     time: T.formatTime(start, tz), weekday: new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'long' }).format(new Date(start)), timezone: tz,
     market: 'Houston', location: 'Hermann Park, Houston', host: 'Houston', services: 'Photography, Photo Booth',
     booking_number: 'WU-10432',
-    manage_url: `${baseUrl()}/booking/sample`, quote_url: '',
+    manage_url: B.linkFor(business, '/booking/sample'), quote_url: '',
     business_name: business.name, business_phone: business.phone || '', business_email: business.email || '', website: business.website || '',
   };
 }

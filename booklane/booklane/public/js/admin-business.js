@@ -196,7 +196,7 @@
   });
 
   // ---------- Settings ----------
-  const TABS = { general: 'Branding & page', leads: 'Leads & alerts', quote: 'Quotes', integrations: 'Integrations', emails: 'Email log' };
+  const TABS = { general: 'Branding & page', domain: 'Domain & email', leads: 'Leads & alerts', quote: 'Quotes', integrations: 'Integrations', emails: 'Email log' };
   const lines = (arr) => (arr || []).join('\n');
 
   async function settingsView(p) {
@@ -280,13 +280,54 @@
           <button type="button" class="btn btn-ghost btn-sm" data-test="webhook">Send test webhook</button><div id="wh-out" style="margin-top:10px"></div></div>
         <div class="panel"><h2>Email delivery</h2>${A.me.app.email_provider === 'resend' ? '<div class="ok-box">Sending through Resend.</div>' : '<div class="warn-box">No email provider set, so emails are only logged. Add RESEND_API_KEY and EMAIL_FROM to your server environment to send real emails.</div>'}
           <button type="button" class="btn btn-ghost btn-sm" style="margin-top:10px" data-test="email">Send me a test email</button></div></div></div>`;
+    } else if (tab === 'domain') {
+      body = await domainTab();
     } else if (tab === 'emails') {
       const rows = await api('GET', '/emails');
       body = `<div class="panel">${rows.length ? `<div class="table-wrap"><table class="t"><thead><tr><th>Sent</th><th>To</th><th>Subject</th><th>Status</th></tr></thead><tbody>${rows.map((e) => `<tr class="click" data-email="${e.id}"><td class="small muted">${esc(A.dt(e.created_at))}</td><td class="small">${esc(e.to_addr)}</td><td>${esc(e.subject)}${e.error ? `<div class="small" style="color:var(--err)">${esc(e.error.slice(0, 160))}</div>` : ''}</td><td>${A.pill(e.status === 'sent' ? 'booked' : e.status === 'failed' ? 'failed' : 'partial').replace(/>[^<]+</, `>${esc(e.status)}<`)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-state">No emails yet.</div>'}</div>`;
     }
-    const savable = !['emails'].includes(tab);
+    const savable = !['emails', 'domain'].includes(tab);
     return `<div class="topbar"><div><h1>Settings</h1><div class="sub">${esc(b.name)}</div></div>${savable && isAdmin() ? '<div class="tools"><button class="btn btn-primary" data-save-settings>Save changes</button></div>' : ''}</div>${tabs}<form id="settings-form" onsubmit="return false">${body}</form>`;
   }
+  // ---------- Domain & email ----------
+  // Saved on its own, not with the settings form: the domain changes where every link points, so it
+  // gets its own button and its own confirmation of what will happen.
+  const STATUS_WORDS = {
+    verified: ['booked', 'Verified in Resend. Emails send from this address.'],
+    pending: ['partial', 'Waiting on DNS. Add the records below, then Resend checks again on its own.'],
+    not_started: ['partial', 'Added to Resend but not checked yet. Add the records below.'],
+    failed: ['lost', 'Resend could not verify it. Check the records below match exactly.'],
+    not_added: ['lost', 'This domain is not in your Resend account yet, so emails from it will be refused. Add it in Resend first.'],
+    unknown: ['partial', 'The Resend key cannot read domains, so this cannot be checked here. Send a test email to be sure.'],
+    no_key: ['lost', 'No Resend key is saved yet (Settings, Integrations), so nothing sends.'],
+    error: ['lost', 'Could not reach Resend to check.'],
+  };
+  async function domainTab() {
+    const d = await api('GET', '/business/domain');
+    A.cache.domain = d;
+    const owner = A.me.business.role === 'owner';
+    const st = d.email_domain ? (STATUS_WORDS[d.email_domain.status] || ['partial', d.email_domain.status]) : null;
+    const recs = (d.email_domain && d.email_domain.records) || [];
+    return `<div class="cols-even"><div class="panel stack"><h2>Your domain</h2>
+        <p class="desc" style="margin:0">Your booking pages live here, and every link Booklane sends for ${esc(A.me.business.name)} points here: confirmations, reminders, quotes and staff invites. Your team can also log in at this address.</p>
+        ${A.field('Domain', `<input class="input" data-dom="custom_domain" value="${esc(d.custom_domain || '')}" placeholder="book.yourcompany.com" ${owner ? '' : 'disabled'} spellcheck="false" autocomplete="off">`, 'A subdomain works best, like book.yourcompany.com. Leave blank to use the Booklane address.')}
+        <div class="small">Your pages are at <a href="${esc(d.page_url)}" target="_blank" rel="noopener"><b>${esc(d.page_url)}</b></a></div>
+        <div class="ok-box small"><b>To connect a domain</b><ol style="margin:6px 0 0 18px;padding:0">
+          <li>Save it here first.</li>
+          <li>In Railway, open the Booklane service, go to <b>Settings, Networking, Custom domain</b>, and add the same domain.</li>
+          <li>Railway shows two DNS records: a <b>CNAME</b> for the domain and a <b>TXT</b> record starting <code>_railway-verify</code>. Add both where the domain's DNS lives.</li>
+          <li>Wait for Railway to show the certificate as active, usually a few minutes, then open the address.</li></ol></div>
+      </div>
+      <div class="panel stack"><h2>Emails come from</h2>
+        <p class="desc" style="margin:0">The address customers see on confirmations, reminders and automations for ${esc(A.me.business.name)}. Replies go to the business email on the Branding tab.</p>
+        ${A.field('Send from', `<input class="input" data-dom="email_from" value="${esc(d.email_from || '')}" placeholder="${esc(A.me.business.name)} &lt;bookings@yourcompany.com&gt;" ${owner ? '' : 'disabled'} spellcheck="false" autocomplete="off">`, d.email_from_is_own ? 'This company\'s own address.' : `Blank uses the platform address: ${d.email_from_effective || 'none set'}`)}
+        ${st ? `<div><span class="pill ${st[0]}">${esc(d.email_domain.domain)}</span> <span class="small">${esc(st[1])}</span></div>` : ''}
+        ${recs.length ? `<div class="table-wrap"><table class="t"><thead><tr><th>Type</th><th>Name</th><th>Value</th><th>Status</th></tr></thead><tbody>${recs.map((r) => `<tr><td>${esc(r.type)}</td><td class="small"><code>${esc(r.name)}</code></td><td class="small" style="max-width:260px;word-break:break-all"><code>${esc(r.value)}</code>${r.priority ? ` <span class="muted">(priority ${esc(String(r.priority))})</span>` : ''}</td><td>${A.pill(String(r.status || '').toLowerCase())}</td></tr>`).join('')}</tbody></table></div>` : ''}
+        <p class="help" style="margin:0">To send from a new domain, add it in Resend (Domains, Add domain), put the records it gives you in that domain's DNS, and it shows as verified here.</p>
+      </div></div>
+      ${owner ? '<div class="row" style="justify-content:flex-end"><button class="btn btn-primary" data-save-domain>Save domain and email</button></div>' : '<p class="muted small">Only the owner can change these.</p>'}`;
+  }
+
   const QFIELD_TYPES = { text: 'Short text', textarea: 'Paragraph', choice: 'Choose one (cards)', choice_select: 'Choose one (dropdown)', multi: 'Choose several', date: 'Date', number: 'Number', email: 'Email', phone: 'Phone' };
 
   function qfieldRow(f) {
@@ -340,6 +381,22 @@
     // The provider cards manage global credentials with their own endpoints, so they are painted
     // separately and never travel with this form's PATCH.
     if (tab === 'integrations' && A.renderProviders) A.renderProviders($('#provider-cards', root));
+    if (tab === 'domain') {
+      root.addEventListener('click', async (e) => {
+        const btn = e.target.closest('[data-save-domain]');
+        if (!btn) return;
+        const body = {};
+        $$('[data-dom]', root).forEach((x) => { body[x.dataset.dom] = x.value.trim(); });
+        const before = (A.cache.domain || {}).custom_domain || '';
+        btn.disabled = true;
+        try {
+          const r = await A.guard(() => api('PUT', '/business/domain', body), 'Saved');
+          // The admin's own links now use the new address; refresh what the rest of the app reads.
+          if ((r.custom_domain || '') !== before) A.me = await api('GET', '/auth/me');
+          A.render();
+        } catch (err) { if (err.details) A.showErrors(root, err.details); } finally { btn.disabled = false; }
+      });
+    }
     root.addEventListener('change', (e) => {
       if (e.target.dataset.qf === 'type') {
         const card = e.target.closest('[data-qfield]');

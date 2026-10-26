@@ -66,7 +66,7 @@ function publicQuote(q, business) {
     token: q.token, status: q.status, details: db.json(q.details, {}), selections: db.json(q.selections, []), ...calc,
     discount_label: fresh.discount_label, tax_rate: fresh.tax_rate, next_bundle: fresh.next_bundle,
     next_step: q.next_step, contract_request: db.json(q.contract_request, null), callback_request: db.json(q.callback_request, null),
-    expires_at: q.expires_at, created_at: q.created_at, updated_at: q.updated_at, lead: lead ? L.publicLead(lead) : null, url: `${baseUrl()}/q/${q.token}`,
+    expires_at: q.expires_at, created_at: q.created_at, updated_at: q.updated_at, lead: lead ? L.publicLead(lead) : null, url: `${B.baseFor(business)}/q/${q.token}`,
   };
 }
 
@@ -105,7 +105,7 @@ async function notifyTeam(business, q, lead, subject, heading, extraPairs = []) 
     html: layout(business, {
       heading,
       body: rows([['Name', L.leadName(lead)], ['Email', lead.email], ['Phone', lead.phone], ...extraPairs]) + quoteSummaryHtml(q, business),
-      cta: { label: 'Open lead', url: `${baseUrl()}/app#/leads/${lead.id}` },
+      cta: { label: 'Open lead', url: `${B.baseFor(business)}/app#/leads/${lead.id}` },
     }),
   });
 }
@@ -119,7 +119,7 @@ async function submitQuote(business, q, lead) {
   await sendEmail({
     to: lead.email, businessId: business.id, fromName: business.name, replyTo: business.email,
     subject: `Your ${business.name} quote: ${money(fresh.total, business.settings.quote.currency)}`,
-    html: layout(business, { heading: `Here's your quote, ${esc(lead.first_name)}`, body: quoteSummaryHtml(fresh, business) + `<p style="color:#8a8697;font-size:13px">${esc(business.settings.quote.terms)}</p>`, cta: { label: 'View or update your quote', url: `${baseUrl()}/q/${q.token}` } }),
+    html: layout(business, { heading: `Here's your quote, ${esc(lead.first_name)}`, body: quoteSummaryHtml(fresh, business) + `<p style="color:#8a8697;font-size:13px">${esc(business.settings.quote.terms)}</p>`, cta: { label: 'View or update your quote', url: `${B.baseFor(business)}/q/${q.token}` } }),
   });
   if (business.settings.notifications.notify_on_quote) await notifyTeam(business, fresh, lead, `New quote: ${L.leadName(lead)} · ${money(fresh.total, business.settings.quote.currency)}`, 'A customer built a quote');
   await sendWebhook(business, 'quote.submitted', { quote: quotePayload(fresh, business), lead: L.leadPayload(db.get('SELECT * FROM leads WHERE id = ?', lead.id)) }, lead.id);
@@ -149,7 +149,7 @@ async function requestContract(business, q, lead, body) {
   await sendEmail({
     to: lead.email, businessId: business.id, fromName: business.name, replyTo: business.email,
     subject: `We got your contract request, ${lead.first_name}!`,
-    html: layout(business, { heading: 'Contract request received', body: `<p>Thanks! Our team is checking availability for your date and will send your contract shortly. Here's what you requested:</p>${quoteSummaryHtml(fresh, business)}`, cta: { label: 'View your quote', url: `${baseUrl()}/q/${q.token}` } }),
+    html: layout(business, { heading: 'Contract request received', body: `<p>Thanks! Our team is checking availability for your date and will send your contract shortly. Here's what you requested:</p>${quoteSummaryHtml(fresh, business)}`, cta: { label: 'View your quote', url: `${B.baseFor(business)}/q/${q.token}` } }),
   });
   if (business.settings.notifications.notify_on_contract) {
     await notifyTeam(business, fresh, lead, `Contract requested: ${L.leadName(lead)} · ${money(fresh.total, business.settings.quote.currency)}`, 'Send this customer a contract',
@@ -178,7 +178,7 @@ async function requestCallback(business, q, lead, body) {
   await sendEmail({
     to: lead.email, businessId: business.id, fromName: business.name, replyTo: business.email,
     subject: `We'll call you soon, ${lead.first_name}`,
-    html: layout(business, { heading: 'Talk soon!', body: `<p>We'll call you at <b>${esc(lead.phone)}</b>${req.preferred_time ? ` (${esc([req.preferred_day, req.preferred_time].filter(Boolean).join(', '))})` : ''} to go over your quote.</p>`, cta: { label: 'View your quote', url: `${baseUrl()}/q/${q.token}` } }),
+    html: layout(business, { heading: 'Talk soon!', body: `<p>We'll call you at <b>${esc(lead.phone)}</b>${req.preferred_time ? ` (${esc([req.preferred_day, req.preferred_time].filter(Boolean).join(', '))})` : ''} to go over your quote.</p>`, cta: { label: 'View your quote', url: `${B.baseFor(business)}/q/${q.token}` } }),
   });
   await sendWebhook(business, 'callback.requested', { quote: quotePayload(fresh, business), lead: L.leadPayload(db.get('SELECT * FROM leads WHERE id = ?', lead.id)), callback: req }, lead.id);
   return fresh;

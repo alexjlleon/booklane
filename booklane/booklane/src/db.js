@@ -275,6 +275,12 @@ for (const sql of [
   // Which of those the customer picked, so a reschedule keeps their choice rather than quietly
   // moving a Zoom call onto the phone.
   'ALTER TABLE bookings ADD COLUMN place_id TEXT',
+  // Each company can have its own address (book.weddingsunlimited.com). Its pages are served there
+  // at clean paths, and every link Booklane sends for it points there.
+  'ALTER TABLE businesses ADD COLUMN custom_domain TEXT',
+  'CREATE UNIQUE INDEX IF NOT EXISTS idx_businesses_domain ON businesses (custom_domain)',
+  // Where a calendar sign-in started, so the platform-wide callback can hand it back to that domain.
+  'ALTER TABLE oauth_states ADD COLUMN return_origin TEXT',
 ]) { try { raw.exec(sql); } catch { /* column already exists */ } }
 
 // Booklane no longer takes payments. Drop what the shop, the paid sessions and the card providers

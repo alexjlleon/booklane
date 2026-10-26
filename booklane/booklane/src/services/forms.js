@@ -225,7 +225,7 @@ async function notifyTeam(business, form, lead, contact, answers) {
     businessId: business.id,
     to,
     subject: `${form.name}: ${[contact.first_name, contact.last_name].filter(Boolean).join(' ') || 'new submission'}`,
-    html: layout(business, { heading: `New ${form.name} submission`, body: rows(pairs), cta: { label: 'Open the lead', url: `${baseUrl()}/app#/leads/${lead.token}` } }),
+    html: layout(business, { heading: `New ${form.name} submission`, body: rows(pairs), cta: { label: 'Open the lead', url: B.linkFor(business, `/app#/leads/${lead.token}`) } }),
   });
 }
 

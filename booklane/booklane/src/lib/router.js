@@ -38,9 +38,12 @@ function compile(pattern) {
 function createRouter() {
   const routes = [];
   const middleware = [];
+  const preMatch = [];
   const add = (method) => (pattern, ...handlers) => routes.push({ method, pattern, ...compile(pattern), handlers });
   const app = {
     use: (fn) => middleware.push(fn),
+    // Runs before a route is chosen, so it can rewrite req.path (serving a company's domain).
+    pre: (fn) => preMatch.push(fn),
     get: add('GET'), post: add('POST'), put: add('PUT'), patch: add('PATCH'), delete: add('DELETE'),
     routes,
     handler: null,
@@ -95,6 +98,7 @@ function createRouter() {
       enhance(req, res);
       // Spreadsheet uploads arrive as base64 JSON, so that one route gets more room.
       req.body = await readBody(req, /\/import$/.test((req.url || '').split('?')[0]) ? 8_000_000 : 1_000_000);
+      for (const fn of preMatch) { await fn(req, res); if (res.writableEnded) return; }
       const stack = [...middleware];
       let matched = null;
       for (const r of routes) {

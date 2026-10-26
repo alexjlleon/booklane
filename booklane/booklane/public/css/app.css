@@ -263,3 +263,5 @@ h1, h2, h3 { line-height: 1.2; margin: 0; letter-spacing: -0.01em; }
 .q-custom { margin-top: 12px; padding: 13px; border: 1.5px dashed var(--line-2); border-radius: var(--radius-sm); background: var(--surface-2); }
 .q-custom b { display: block; margin-bottom: 4px; }
 .q-custom p { margin: 0 0 10px; color: var(--ink-2); }
+.home-points { list-style: none; padding: 0; margin: 0 0 22px; color: var(--ink-2, #555); line-height: 1.9; }
+.home-points li::before { content: "\2713  "; color: var(--brand, #5b3df5); font-weight: 700; }
