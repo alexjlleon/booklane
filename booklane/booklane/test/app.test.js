@@ -1980,6 +1980,9 @@ test('team performance counts each person, and only admins can see it', async ()
   assert.ok(row.utilization >= 1 && row.utilization < 10);
   assert.equal(row.avg_lead_days, 3, 'booked three days ahead');
   assert.ok(stats.data.totals.held >= 2);
+  // Shares are of the people's calls only, so they add up to 100 (give or take rounding).
+  const shares = stats.data.people.filter((r) => r.held).reduce((n, r) => n + r.share, 0);
+  assert.ok(shares >= 98 && shares <= 102, `shares add to ${shares}`);
 
   // Clearing it puts the call back as one that happened.
   await req('POST', `/api/admin/bookings/${missed}/no-show`, { no_show: false }, { cookie: ownerCookie });
@@ -2024,6 +2027,9 @@ test('an admin can move anyone\'s call to a real open time, and the reminders mo
   assert.equal(made.status, 200, JSON.stringify(made.data));
   const bk = db.get('SELECT * FROM bookings WHERE token = ?', made.data.token);
   assert.equal(bk.host_user_id, pat);
+  // A call next week is upcoming even when the range ends today.
+  const pr = (await req('GET', '/api/admin/team-stats?days=7', null, { cookie: ownerCookie })).data.people.find((r) => r.id === pat);
+  assert.ok(pr.upcoming >= 1, 'upcoming is not limited to the range');
   const reminder = db.run("INSERT INTO scheduled_messages (business_id, booking_id, channel, to_addr, send_after, status) VALUES (?,?,?,?,?,'queued')", bk.business_id, bk.id, 'email', 'move.me@example.com', Date.parse(first) - 86400000).lastId;
 
   // A future call cannot be marked a no-show.

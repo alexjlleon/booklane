@@ -53,7 +53,9 @@ function rowFor(user, bookings, range, teamTotal) {
   const held = mine.filter((b) => b.status !== 'cancelled');
   const completed = mine.filter((b) => b.status === 'confirmed' && Date.parse(b.end_utc) <= now);
   const noShows = mine.filter((b) => b.status === 'no_show');
-  const upcoming = mine.filter((b) => b.status === 'confirmed' && Date.parse(b.start_utc) > now);
+  // Upcoming is everything still to come, not just what falls inside the range: a range ending
+  // today would otherwise always say nothing is coming up.
+  const upcomingCount = db.get("SELECT COUNT(*) c FROM bookings WHERE host_user_id = ? AND status = 'confirmed' AND start_utc > ?", user.id, new Date(now).toISOString()).c;
   const cancelled = mine.filter((b) => b.status === 'cancelled');
   const bookedMin = held.reduce((n, b) => n + minutesOf(b), 0);
   const availMin = availableMinutes(user, range);
@@ -75,7 +77,7 @@ function rowFor(user, bookings, range, teamTotal) {
     meetings: mine.length,
     held: held.length,
     completed: completed.length,
-    upcoming: upcoming.length,
+    upcoming: upcomingCount,
     cancelled: cancelled.length,
     no_shows: noShows.length,
     show_rate: decided ? Math.round((completed.length / decided) * 100) : null,
@@ -94,6 +96,10 @@ function rowFor(user, bookings, range, teamTotal) {
   };
 }
 
+// Share is a slice of the calls the PEOPLE held. Market and designer calendars are not people, so
+// their sessions must not shrink everyone's slice.
+const heldByTeam = (all, team) => { const ids = new Set(team.map((u) => u.id)); return all.filter((b) => b.status !== 'cancelled' && ids.has(b.host_user_id)).length; };
+
 function bookingsIn(businessId, range, userId) {
   return db.all(`SELECT b.*, e.name event_name, e.color FROM bookings b LEFT JOIN event_types e ON e.id = b.event_type_id
     WHERE b.business_id = ? AND b.start_utc >= ? AND b.start_utc < ?${userId ? ' AND b.host_user_id = ?' : ''}`,
@@ -103,8 +109,9 @@ function bookingsIn(businessId, range, userId) {
 function teamStats(business, query = {}) {
   const range = rangeFrom(business, query);
   const all = bookingsIn(business.id, range);
-  const teamTotal = all.filter((b) => b.status !== 'cancelled').length;
-  const rows = people(business.id).map((u) => rowFor(u, all, range, teamTotal));
+  const team = people(business.id);
+  const teamTotal = heldByTeam(all, team);
+  const rows = team.map((u) => rowFor(u, all, range, teamTotal));
   const sum = (k) => rows.reduce((n, r) => n + (r[k] || 0), 0);
   const decided = sum('completed') + sum('no_shows');
   const booked = sum('booked_hours'), avail = sum('available_hours');
@@ -134,7 +141,7 @@ function personDetail(business, userId, query = {}) {
   if (!user) return null;
   const range = rangeFrom(business, query);
   const all = bookingsIn(business.id, range);
-  const teamTotal = all.filter((b) => b.status !== 'cancelled').length;
+  const teamTotal = heldByTeam(all, people(business.id));
   const mine = all.filter((b) => b.host_user_id === user.id);
   const byPage = {};
   for (const b of mine) {
