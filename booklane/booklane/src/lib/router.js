@@ -96,8 +96,8 @@ function createRouter() {
   app.handler = async (req, res) => {
     try {
       enhance(req, res);
-      // Spreadsheet uploads arrive as base64 JSON, so that one route gets more room.
-      req.body = await readBody(req, /\/import$/.test((req.url || '').split('?')[0]) ? 8_000_000 : 1_000_000);
+      // Spreadsheets and images arrive as base64 JSON, so those routes get more room.
+      req.body = await readBody(req, /\/(import|uploads)$/.test((req.url || '').split('?')[0]) ? 8_000_000 : 1_000_000);
       for (const fn of preMatch) { await fn(req, res); if (res.writableEnded) return; }
       const stack = [...middleware];
       let matched = null;

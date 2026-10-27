@@ -9,6 +9,7 @@ const assert = require('node:assert/strict');
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booklane-test-'));
 process.env.DB_FILE = path.join(dir, 'test.db');
+process.env.DATA_DIR = dir;
 process.env.NODE_ENV = 'test';
 process.env.ALLOW_PRIVATE_URLS = 'true';
 
@@ -2295,4 +2296,129 @@ test('admin screens only use the hooks the admin core calls', () => {
       assert.ok(['render', 'mount'].includes(m[1]), `${f}: screen hook "${m[1]}" is never called by the admin core`);
     }
   }
+});
+
+
+// ---------- Form looks: layouts, style overrides, question display options, uploads ----------
+test('form style: each layout fills its own defaults and bad values fall back', () => {
+  const FS = require('../src/services/form-style');
+  const thin = FS.sanitizeStyle({ layout: 'thin' });
+  assert.equal(thin.progress, 'none');
+  assert.equal(thin.show_sidebar, false);
+  assert.equal(thin.density, 'compact');
+  const vis = FS.sanitizeStyle({ layout: 'visual', progress: 'bar', accent: '#FF00AA' });
+  assert.equal(vis.option_style, 'images');
+  assert.equal(vis.progress, 'bar', 'an explicit choice beats the layout default');
+  assert.equal(vis.accent, '#ff00aa');
+  const junk = FS.sanitizeStyle({ layout: 'nope', accent: 'red', width: 99999, font: 'Comic Sans', option_columns: '9',
+    header_image: 'javascript:alert(1)', background_image: "https://x.test/a.jpg')", logo_url: '/u/1/../../etc/passwd', custom_css: '</style><script>x</script>@import url(x);' });
+  assert.equal(junk.layout, 'full');
+  assert.equal(junk.accent, '');
+  assert.equal(junk.width, 1400);
+  assert.equal(junk.font, 'Plus Jakarta Sans');
+  assert.equal(junk.option_columns, 4);
+  assert.equal(junk.header_image, '');
+  assert.equal(junk.background_image, '');
+  assert.equal(junk.logo_url, '');
+  assert.ok(!/<|@import/i.test(junk.custom_css));
+  assert.equal(FS.sanitizeStyle({ show_progress: 1, progress: 'none' }).progress, 'none', 'the progress bar can be switched off');
+  assert.equal(FS.fontHref({ font: 'Great Vibes', heading_font: 'Lora' }).includes('Great+Vibes:wght@400&'), true);
+});
+
+let styledFormId;
+test('a form saves its look and question display options, and the public page carries them', async () => {
+  const made = await req('POST', '/api/admin/forms', {
+    name: 'Styled enquiry',
+    steps: [
+      { type: 'questions', title: 'The basics', image: 'https://cdn.example.test/top.jpg', questions: [
+        { label: 'Wedding date', id: 'event_date', type: 'date', date_display: 'typed', required: true, width: 'half' },
+        { label: 'Guests', type: 'number', number_display: 'slider', min: 10, max: 400, suffix: 'guests' },
+        { label: 'Style', type: 'choice', display: 'images', options: ['Classic', 'Boho'],
+          option_images: { Classic: 'https://cdn.example.test/c.jpg', Boho: 'data:image/png;base64,AAA', Gone: 'https://cdn.example.test/g.jpg' },
+          option_notes: { Boho: 'Relaxed and natural' } },
+      ] },
+      { type: 'contact', fields: { first_name: 'required', last_name: 'hidden', email: 'required', phone: 'optional', sms_consent: 'hidden' } },
+    ],
+    settings: { style: { layout: 'minimal', progress: 'dots', accent: '#123456', date_display: 'calendar', font: 'Lora' } },
+  }, { cookie: ownerCookie });
+  assert.equal(made.status, 200, JSON.stringify(made.data));
+  styledFormId = made.data.id;
+  assert.equal(made.data.style.layout, 'minimal');
+  assert.equal(made.data.style.progress, 'dots');
+  assert.equal(made.data.style.width, 520, 'gaps come from the layout');
+  const [q1, q2, q3] = made.data.steps[0].questions;
+  assert.equal(made.data.steps[0].image, 'https://cdn.example.test/top.jpg');
+  assert.equal(q1.date_display, 'typed');
+  assert.equal(q1.width, 'half');
+  assert.equal(q2.number_display, 'slider');
+  assert.equal(q2.min, 10);
+  assert.deepEqual(q3.option_images, { Classic: 'https://cdn.example.test/c.jpg' }, 'unsafe addresses and unknown choices are dropped');
+  assert.deepEqual(q3.option_notes, { Boho: 'Relaxed and natural' });
+
+  // Switching layout replaces the style whole; nothing from the old layout lingers.
+  const resaved = await req('PATCH', `/api/admin/forms/${styledFormId}`, { name: 'Styled enquiry', settings: { style: { layout: 'thin' } } }, { cookie: ownerCookie });
+  assert.equal(resaved.data.style.layout, 'thin');
+  assert.equal(resaved.data.style.progress, 'none');
+  assert.equal(resaved.data.style.accent, '');
+  // Saving other settings without a style keeps the one there.
+  const kept = await req('PATCH', `/api/admin/forms/${styledFormId}`, { name: 'Styled enquiry', settings: { submit_cta: 'Send it' } }, { cookie: ownerCookie });
+  assert.equal(kept.data.style.layout, 'thin');
+
+  const pub = await req('GET', `/api/public/b/${bizSlug}/f/${made.data.slug}`);
+  assert.equal(pub.data.form.style.layout, 'thin');
+  const page = await fetch(`${base}/b/${bizSlug}/f/${made.data.slug}`).then((r) => r.text());
+  assert.match(page, /class="form-page layout-thin/);
+
+  // Numbers out of range are refused by the server too.
+  const out = await req('POST', `/api/public/b/${bizSlug}/f/${made.data.slug}/submit`, { contact: { first_name: 'A', email: 'a@b.test' }, answers: { event_date: '2031-01-01', guests: 9000 } });
+  assert.equal(out.status, 422);
+  assert.ok(out.data.details['answers.guests']);
+});
+
+test('forms list offers the layouts, fonts and options the editor shows', async () => {
+  const list = await req('GET', '/api/admin/forms', null, { cookie: ownerCookie });
+  assert.deepEqual(list.data.styles.layouts.map((l) => l.id), ['full', 'minimal', 'thin', 'visual']);
+  assert.ok(list.data.styles.fonts.includes('Playfair Display'));
+  assert.ok(list.data.styles.date_displays.includes('typed'));
+  assert.equal(list.data.forms.find((f) => f.id === styledFormId).style.layout, 'thin');
+});
+
+test('images upload for forms, are served back, and only real images are accepted', async () => {
+  const png = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082', 'hex');
+  const up = await req('POST', '/api/admin/uploads', { data: 'data:image/png;base64,' + png.toString('base64') }, { cookie: ownerCookie });
+  assert.equal(up.status, 200, JSON.stringify(up.data));
+  assert.match(up.data.url, /^\/u\/\d+\/[0-9a-f]{24}\.png$/);
+  const got = await fetch(base + up.data.url);
+  assert.equal(got.status, 200);
+  assert.equal(got.headers.get('content-type'), 'image/png');
+  assert.deepEqual(Buffer.from(await got.arrayBuffer()), png);
+  // The same picture twice is one file.
+  const again = await req('POST', '/api/admin/uploads', { data: png.toString('base64') }, { cookie: ownerCookie });
+  assert.equal(again.data.url, up.data.url);
+  const svg = await req('POST', '/api/admin/uploads', { data: Buffer.from('<svg onload="alert(1)"/>').toString('base64') }, { cookie: ownerCookie });
+  assert.equal(svg.status, 415);
+  const anon = await req('POST', '/api/admin/uploads', { data: png.toString('base64') });
+  assert.equal(anon.status, 401);
+  assert.equal((await fetch(base + '/u/1/../../test.db')).status, 404);
+  // An uploaded address is accepted as a form image.
+  const saved = await req('PATCH', `/api/admin/forms/${styledFormId}`, { name: 'Styled enquiry', settings: { style: { layout: 'visual', header_image: up.data.url } } }, { cookie: ownerCookie });
+  assert.equal(saved.data.style.header_image, up.data.url);
+});
+
+test('cloning a form copies its steps and look, switched off', async () => {
+  const c = await req('POST', `/api/admin/forms/${styledFormId}/clone`, {}, { cookie: ownerCookie });
+  assert.equal(c.status, 200, JSON.stringify(c.data));
+  assert.equal(c.data.active, false);
+  assert.equal(c.data.name, 'Styled enquiry (copy)');
+  assert.equal(c.data.style.layout, 'visual');
+  assert.equal(c.data.steps[0].questions.length, 3);
+  assert.notEqual(c.data.slug, (await req('GET', '/api/admin/forms', null, { cookie: ownerCookie })).data.forms.find((f) => f.id === styledFormId).slug);
+});
+
+test('the builder preview page needs a login and loads the form script', async () => {
+  const anon = await fetch(`${base}/app/form-preview`, { headers: { Accept: 'application/json' } });
+  assert.equal(anon.status, 401);
+  const page = await fetch(`${base}/app/form-preview`, { headers: { Cookie: ownerCookie } }).then((r) => r.text());
+  assert.match(page, /"preview":true/);
+  assert.match(page, /form\.js/);
 });

@@ -15,6 +15,9 @@ const Q = require('../services/quotes');
 const BK = require('../services/bookings');
 const SESS = require('../services/sessions');
 const FORMS = require('../services/forms');
+const FSTYLE = require('../services/form-style');
+const UP = require('../services/uploads');
+const fs = require('fs');
 const MSG = require('../services/messaging');
 const sms = require('../lib/sms');
 const { LOCATION_TYPES } = require('../defaults');
@@ -144,11 +147,27 @@ module.exports = function publicRoutes(app) {
   });
 
 
+  // ---------- Images uploaded for forms ----------
+  app.get('/u/:id/:name', (req, res) => {
+    const hit = UP.resolve(req.params.id, req.params.name);
+    if (!hit) throw new HttpError(404, 'Not found');
+    res.setHeader('Content-Type', hit.type);
+    // Names are content hashes, so a file at an address never changes.
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('Content-Security-Policy', "default-src 'none'");
+    if (req.method === 'HEAD') return res.end();
+    res.end(fs.readFileSync(hit.file));
+  });
+
   // ---------- Custom forms ----------
   app.get('/b/:slug/f/:form', (req, res) => {
     const b = getBusiness(req.params.slug);
     const f = FORMS.bySlug(b, req.params.form);
+    const style = FORMS.styleOf(f);
+    const fonts = FSTYLE.fontHref(style);
     res.html(page({ title: `${f.name} · ${b.name}`, description: f.description || b.settings.tagline, business: b, embed: bool(req.query.embed),
+      head: fonts ? `<link href="${fonts}" rel="stylesheet">` : '',
+      bodyClass: `form-page layout-${style.layout}`,
       scripts: ['common.js', 'scheduler.js', 'form.js'],
       data: { business: publicBusiness(b), form: FORMS.publicForm(b, f) } }));
   });
@@ -444,7 +463,7 @@ module.exports = function publicRoutes(app) {
     res.text(`(function(){var base=${JSON.stringify(req.hostBusiness ? B.baseFor(req.hostBusiness) : baseUrl())};
 function src(){try{return encodeURIComponent(location.href.slice(0,500))}catch(e){return ''}}
 function stitle(){try{return encodeURIComponent((document.title||'').slice(0,120))}catch(e){return ''}}
-function frame(url,el){var f=document.createElement('iframe');f.src=url+(url.indexOf('?')>-1?'&':'?')+'embed=1&src='+src()+'&stitle='+stitle();f.style.cssText='width:100%;border:0;min-height:640px;display:block;color-scheme:normal';f.setAttribute('title','${APP_NAME} booking');f.setAttribute('loading','lazy');el.appendChild(f);return f}
+function frame(url,el){var f=document.createElement('iframe');f.src=url+(url.indexOf('?')>-1?'&':'?')+'embed=1&src='+src()+'&stitle='+stitle();f.style.cssText='width:100%;border:0;height:640px;display:block;color-scheme:normal';f.setAttribute('title','${APP_NAME} booking');f.setAttribute('loading','lazy');el.appendChild(f);return f}
 window.addEventListener('message',function(e){if(e.origin!==base||!e.data||e.data.type!=='booklane:height')return;var fs=document.querySelectorAll('iframe');for(var i=0;i<fs.length;i++){if(fs[i].contentWindow===e.source){fs[i].style.height=e.data.height+'px'}}});
 function inline(){var els=document.querySelectorAll('[data-booklane]');for(var i=0;i<els.length;i++){var el=els[i];if(el.__bl)continue;el.__bl=1;frame(base+'/'+el.getAttribute('data-booklane').replace(/^\\//,''),el)}}
 function popup(path){var o=document.createElement('div');o.style.cssText='position:fixed;inset:0;background:rgba(15,12,30,.6);z-index:2147483646;display:flex;align-items:center;justify-content:center;padding:16px';var box=document.createElement('div');box.style.cssText='background:#fff;border-radius:16px;width:100%;max-width:980px;max-height:92vh;overflow:auto;position:relative';var x=document.createElement('button');x.innerHTML='&times;';x.setAttribute('aria-label','Close');x.style.cssText='position:absolute;top:8px;right:12px;font-size:28px;background:none;border:0;cursor:pointer;z-index:2';x.onclick=function(){o.remove()};o.onclick=function(e){if(e.target===o)o.remove()};box.appendChild(x);o.appendChild(box);document.body.appendChild(o);frame(base+'/'+path.replace(/^\\//,''),box)}

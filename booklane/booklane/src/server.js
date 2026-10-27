@@ -21,7 +21,7 @@ const app = createRouter();
 // A request for book.weddingsunlimited.com is that company's site: its home page at /, its booking
 // pages at /<page>, and its admin at /app. Paths that belong to the platform itself keep working
 // there, so a booking's manage link or a quote link opens on the company's own domain.
-const PLATFORM_PATHS = new Set(['api', 'app', 'static', 'b', 'q', 'booking', 'oauth', 'healthz', 'embed.js', 'favicon.ico', 'robots.txt', 'session']);
+const PLATFORM_PATHS = new Set(['api', 'app', 'static', 'b', 'q', 'booking', 'oauth', 'healthz', 'embed.js', 'favicon.ico', 'robots.txt', 'session', 'u']);
 const requestHost = (req) => String(req.headers.host || '').split(',')[0].trim();
 app.pre((req, res) => {
   const host = B.normalizeDomain(requestHost(req));
@@ -93,6 +93,24 @@ app.get('/app', (req, res) => res.html(page({ title: `${req.hostBusiness ? `${re
   // On a company's own domain the login screen is that company's, so it does not offer sign-up.
   data: { companyDomain: req.hostBusiness ? { name: req.hostBusiness.name } : null, allowSignup: process.env.ALLOW_SIGNUP !== 'false' && !req.hostBusiness },
   scripts: ['pricing.js', 'admin-core.js', 'admin-main.js', 'admin-setup.js', 'admin-business.js', 'admin-org.js', 'admin-sessions.js', 'admin-forms.js', 'admin-messaging.js', 'admin-integrations.js', 'admin-team.js'], styles: ['app.css', 'admin.css'], bodyClass: 'admin' })));
+
+// The form builder's live preview. Same page and script as a real form, but fed the unsaved form
+// by the builder over postMessage, so new and switched-off forms preview too. Nothing it does is
+// saved: no lead is created and submitting just shows the thank-you screen.
+app.get('/app/form-preview', (req, res) => {
+  requireAuth(req);
+  if (!req.membership) throw new HttpError(403, 'Create or join a business first');
+  const FORMS = require('./services/forms');
+  const FSTYLE = require('./services/form-style');
+  const b = B.byId(req.membership.id);
+  res.html(page({ title: 'Form preview', business: b, bodyClass: 'form-page',
+    scripts: ['common.js', 'scheduler.js', 'form.js'],
+    data: {
+      preview: true,
+      business: { id: b.id, slug: b.slug, name: b.name, logo_url: b.logo_url, brand_color: b.brand_color, timezone: b.timezone, phone: b.phone, email: b.email, website: b.website, settings: B.publicSettings(b) },
+      form: { slug: 'preview', name: '', description: '', steps: [], copy: FORMS.FORM_SETTINGS, shape: {}, style: FSTYLE.defaultsFor('full') },
+    } }));
+});
 
 app.get('/oauth/:provider/start', (req, res) => {
   requireAuth(req);

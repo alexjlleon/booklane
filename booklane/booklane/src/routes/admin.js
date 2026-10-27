@@ -20,6 +20,8 @@ const ORG = require('../services/org');
 const PLACES = require('../services/places');
 const SESS = require('../services/sessions');
 const FORMS = require('../services/forms');
+const FSTYLE = require('../services/form-style');
+const UP = require('../services/uploads');
 const MSG = require('../services/messaging');
 const sms = require('../lib/sms');
 const appConfig = require('../lib/config');
@@ -856,7 +858,7 @@ module.exports = function adminRoutes(app) {
     const x = FORMS.hydrate({ ...f });
     return {
       id: x.id, slug: x.slug, name: x.name, description: x.description || '',
-      steps: x.steps, settings: x.settings, copy: x.copy, shape: FORMS.shapeOf(x.steps),
+      steps: x.steps, settings: x.settings, copy: x.copy, style: x.style, shape: FORMS.shapeOf(x.steps),
       active: !!x.active, sort: x.sort, submissions: x.submissions,
       url: B.pageUrl(B.byId(x.business_id), `f/${x.slug}`),
       leads: db.get('SELECT COUNT(*) c FROM leads WHERE form_id = ?', x.id).c,
@@ -873,6 +875,15 @@ module.exports = function adminRoutes(app) {
       question_types: FORMS.Q_TYPES,
       templates: FORMS.templateList(),
       defaults: FORMS.FORM_SETTINGS,
+      // Everything the style editor needs to offer, so the browser never guesses at a list.
+      styles: {
+        layouts: FSTYLE.LAYOUTS.map((id) => Object.assign({ id }, FSTYLE.LAYOUT_INFO[id], { defaults: FSTYLE.defaultsFor(id) })),
+        fonts: Object.keys(FSTYLE.FONTS),
+        progress: FSTYLE.PROGRESS,
+        date_displays: FSTYLE.DATE_DISPLAYS,
+      },
+      brand_color: b.brand_color || '',
+      logo_url: b.logo_url || '',
     };
   });
 
@@ -882,7 +893,11 @@ module.exports = function adminRoutes(app) {
     const name = clampStr(String(body.name || '').trim(), 120);
     if (!name) throw new HttpError(422, 'Give the form a name', { name: 'Required' });
     const steps = body.steps !== undefined ? FORMS.sanitizeSteps(body.steps, b) : (existing ? db.json(existing.steps, []) : []);
-    const settings = deepMerge(existing ? db.json(existing.settings, {}) : {}, (body.settings && typeof body.settings === 'object') ? body.settings : {});
+    const incoming = (body.settings && typeof body.settings === 'object') ? body.settings : {};
+    const settings = deepMerge(existing ? db.json(existing.settings, {}) : {}, incoming);
+    // A style is saved whole, not merged, so switching layout cannot leave the old one's leftovers.
+    if (incoming.style !== undefined) settings.style = FSTYLE.sanitizeStyle(incoming.style);
+    else if (settings.style) settings.style = FSTYLE.sanitizeStyle(settings.style);
     const active = body.active !== undefined ? (bool(body.active) ? 1 : 0) : (existing ? existing.active : 1);
     const description = clampStr(body.description !== undefined ? body.description : (existing ? existing.description : '') || '', 1000);
 
@@ -931,6 +946,27 @@ module.exports = function adminRoutes(app) {
     const { lastId } = db.run('INSERT INTO forms (business_id, slug, name, description, steps, settings, active, sort) VALUES (?,?,?,?,?,?,1,?)',
       b.id, sl, built.name, built.description || '', JSON.stringify(steps), JSON.stringify(built.settings || {}), sort + 1);
     return Object.assign({ warnings: built.warnings || [] }, { form: formOut(db.get('SELECT * FROM forms WHERE id = ?', lastId)) });
+  });
+
+  /** An image for a form: a logo, banner, background or a photo on a choice. Returns its address. */
+  app.post('/api/admin/uploads', (req) => {
+    requireRole('admin')(req);
+    return UP.save(bid(req), (req.body || {}).data);
+  });
+
+  /** Copy a form, switched off, so a variation can be tried without touching the live one. */
+  app.post('/api/admin/forms/:id/clone', (req) => {
+    requireRole('admin')(req);
+    const b = B.byId(bid(req));
+    const f = db.get('SELECT * FROM forms WHERE id = ? AND business_id = ?', int(req.params.id), b.id);
+    if (!f) throw new HttpError(404, 'Not found');
+    const base = slugify(`${f.slug}-copy`) || 'form-copy';
+    let sl = base; let i = 2;
+    while (db.get('SELECT 1 FROM forms WHERE business_id = ? AND slug = ?', b.id, sl)) sl = `${base}-${i++}`;
+    const sort = (db.get('SELECT MAX(sort) m FROM forms WHERE business_id = ?', b.id) || {}).m || 0;
+    const { lastId } = db.run('INSERT INTO forms (business_id, slug, name, description, steps, settings, active, sort) VALUES (?,?,?,?,?,?,0,?)',
+      b.id, sl, clampStr(`${f.name} (copy)`, 120), f.description || '', f.steps, f.settings, sort + 1);
+    return formOut(db.get('SELECT * FROM forms WHERE id = ?', lastId));
   });
 
   app.post('/api/admin/forms/reorder', (req) => {

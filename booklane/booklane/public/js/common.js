@@ -105,7 +105,9 @@
 
   // ---- Embed auto-height ----
   if (BL.data.embed && window.parent !== window) {
-    const post = () => window.parent.postMessage({ type: 'booklane:height', height: Math.ceil(document.documentElement.scrollHeight) }, '*');
+    // The content's own height, not the document's: the document is never shorter than the frame,
+    // so measuring it would let a frame grow but never shrink back to fit a short (Thin) form.
+    const post = () => window.parent.postMessage({ type: 'booklane:height', height: Math.ceil(Math.max(document.body.getBoundingClientRect().height, 80)) }, '*');
     try { new ResizeObserver(post).observe(document.body); } catch (e) { setInterval(post, 800); }
     addEventListener('load', post);
   }

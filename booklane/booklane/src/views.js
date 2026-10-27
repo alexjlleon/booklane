@@ -23,7 +23,7 @@ function hexToRgb(hex) {
   return `${(n >> 16) & 255},${(n >> 8) & 255},${n & 255}`;
 }
 
-function page({ title, description = '', business, scripts = [], styles = ['app.css'], data = {}, body = '<div id="app"></div>', bodyClass = '', embed = false }) {
+function page({ title, description = '', business, scripts = [], styles = ['app.css'], data = {}, body = '<div id="app"></div>', bodyClass = '', embed = false, head = '' }) {
   const brand = business?.brand_color && /^#[0-9a-f]{6}$/i.test(business.brand_color) ? business.brand_color : '#6d4aff';
   const v = ASSET_VERSION;
   return `<!doctype html>
@@ -41,6 +41,7 @@ function page({ title, description = '', business, scripts = [], styles = ['app.
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 ${styles.map((s) => `<link rel="stylesheet" href="/static/css/${s}?v=${v}">`).join('\n')}
 <style>:root{--brand:${brand};--brand-rgb:${hexToRgb(brand)}}</style>
+${head}
 </head>
 <body class="${esc(bodyClass)}${embed ? ' is-embed' : ''}">
 ${body}

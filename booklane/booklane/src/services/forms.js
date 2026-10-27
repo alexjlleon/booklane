@@ -10,6 +10,7 @@
 const db = require('../db');
 const { HttpError } = require('../lib/router');
 const { slugify, clampStr, int, deepMerge, isEmail, baseUrl } = require('../lib/util');
+const FSTYLE = require('./form-style');
 
 const STEP_TYPES = ['questions', 'contact', 'availability', 'schedule', 'message'];
 // Step types from when forms could sell. A saved form that still has one simply loses it.
@@ -33,7 +34,25 @@ function hydrate(f) {
   f.steps = liveSteps(parse(f.steps, []));
   f.settings = parse(f.settings, {});
   f.copy = formSettings(f);
+  f.style = FSTYLE.sanitizeStyle(f.settings.style);
   return f;
+}
+
+/** The finished look of a form: its saved style, gaps filled from its layout. */
+const styleOf = (f) => FSTYLE.sanitizeStyle(((typeof f.settings === 'string' ? db.json(f.settings, {}) : f.settings) || {}).style);
+
+// Per-choice pictures and notes are keyed by the choice's own text, so reordering or editing the
+// list of choices never puts the wrong photo on the wrong answer.
+function choiceMap(m, options, max) {
+  const out = {};
+  if (!m || typeof m !== 'object') return out;
+  for (const o of options) {
+    const v = m[o];
+    if (v === undefined || v === null || v === '') continue;
+    const clean = max ? clampStr(String(v), max) : FSTYLE.cleanUrl(v);
+    if (clean) out[o] = clean;
+  }
+  return out;
 }
 
 /**
@@ -50,6 +69,9 @@ function sanitizeSteps(steps, business) {
       title: clampStr(s.title || '', 160),
       subtitle: clampStr(s.subtitle || '', 300),
     };
+    // A picture at the top of this one step. Optional on every layout.
+    const img = FSTYLE.cleanUrl(s.image);
+    if (img) step.image = img;
     if (type === 'message') step.body = clampStr(s.body || '', 2000);
     if (type === 'contact') {
       const f = s.fields || {};
@@ -71,15 +93,37 @@ function sanitizeSteps(steps, business) {
       if (business && step.event_type_id && !db.get('SELECT 1 FROM event_types WHERE id = ? AND business_id = ?', step.event_type_id, business.id)) step.event_type_id = null;
     }
     if (type === 'questions') {
-      step.questions = (Array.isArray(s.questions) ? s.questions : []).slice(0, 20).map((q, j) => ({
-        id: (slugify(q.id || q.label || `q${j + 1}`) || `q${j + 1}`).replace(/-/g, '_'),
-        label: clampStr(q.label || 'Question', 200),
-        type: Q_TYPES.includes(q.type) ? q.type : 'text',
-        options: Array.isArray(q.options) ? q.options.map((o) => clampStr(String(o), 140)).filter(Boolean).slice(0, 40) : [],
-        required: !!q.required,
-        placeholder: clampStr(q.placeholder || '', 140),
-        display: q.display === 'cards' ? 'cards' : 'list',
-      }));
+      step.questions = (Array.isArray(s.questions) ? s.questions : []).slice(0, 20).map((q, j) => {
+        const type = Q_TYPES.includes(q.type) ? q.type : 'text';
+        const options = Array.isArray(q.options) ? q.options.map((o) => clampStr(String(o), 140)).filter(Boolean).slice(0, 40) : [];
+        const out = {
+          id: (slugify(q.id || q.label || `q${j + 1}`) || `q${j + 1}`).replace(/-/g, '_'),
+          label: clampStr(q.label || 'Question', 200),
+          type,
+          options,
+          required: !!q.required,
+          placeholder: clampStr(q.placeholder || '', 140),
+          // '' means "as the form's style says". Kept for old forms that only knew cards and list.
+          display: ['cards', 'list', 'images', 'pills', 'dropdown'].includes(q.display) ? q.display : '',
+          help: clampStr(q.help || '', 300),
+          width: q.width === 'half' ? 'half' : 'full',
+        };
+        if (type === 'date') {
+          out.date_display = FSTYLE.DATE_DISPLAYS.includes(q.date_display) ? q.date_display : '';
+          out.allow_past = !!q.allow_past;
+        }
+        if (type === 'number') {
+          const n = (v) => (v === '' || v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v));
+          out.min = n(q.min); out.max = n(q.max);
+          out.number_display = ['input', 'stepper', 'slider'].includes(q.number_display) ? q.number_display : 'input';
+          out.suffix = clampStr(q.suffix || '', 30);
+        }
+        if (['choice', 'multi', 'select'].includes(type)) {
+          out.option_images = choiceMap(q.option_images, options);
+          out.option_notes = choiceMap(q.option_notes, options, 160);
+        }
+        return out;
+      });
     }
     return step;
   });
@@ -131,7 +175,7 @@ function publicForm(business, form) {
   });
   return {
     slug: f.slug, name: f.name, description: f.description || '',
-    steps, copy: f.copy, shape: shapeOf(f.steps),
+    steps, copy: f.copy, shape: shapeOf(f.steps), style: f.style,
   };
 }
 
@@ -147,6 +191,15 @@ function validateAnswers(steps, body) {
         const v = answers[q.id];
         const empty = v === undefined || v === null || v === '' || (Array.isArray(v) && !v.length);
         if (empty) errs[`answers.${q.id}`] = 'Required';
+      }
+      for (const q of s.questions || []) {
+        if (q.type !== 'number') continue;
+        const v = answers[q.id];
+        if (v === undefined || v === null || v === '') continue;
+        const n = Number(v);
+        if (!Number.isFinite(n)) errs[`answers.${q.id}`] = 'Enter a number';
+        else if (q.min !== null && q.min !== undefined && n < q.min) errs[`answers.${q.id}`] = `At least ${q.min}`;
+        else if (q.max !== null && q.max !== undefined && n > q.max) errs[`answers.${q.id}`] = `At most ${q.max}`;
       }
     }
     if (s.type === 'contact') {
@@ -318,6 +371,6 @@ function buildTemplate(business, id) {
 
 module.exports = {
   STEP_TYPES, RETIRED_STEP_TYPES, Q_TYPES, FORM_SETTINGS, hydrate, sanitizeSteps, shapeOf,
-  listAll, byId, bySlug, publicForm, validateAnswers, formSettings, submit,
+  listAll, byId, bySlug, publicForm, validateAnswers, formSettings, submit, styleOf,
   templateList, buildTemplate, TEMPLATES,
 };
