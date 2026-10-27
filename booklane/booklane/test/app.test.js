@@ -2422,3 +2422,82 @@ test('the builder preview page needs a login and loads the form script', async (
   assert.match(page, /"preview":true/);
   assert.match(page, /form\.js/);
 });
+
+// ---------- Public pages Google reviews, and keeping calendars connected ----------
+test('home page explains calendar use and links the privacy policy; policy and terms are served everywhere', async () => {
+  const home = await fetch(base + '/').then((r) => r.text());
+  assert.match(home, /How Availvo uses your calendar/);
+  assert.match(home, /href="\/privacy"/);
+  const priv = await fetch(base + '/privacy');
+  assert.equal(priv.status, 200);
+  const text = await priv.text();
+  for (const s of ['calendar.freebusy', 'calendar.events', 'Limited Use', 'myaccount.google.com/permissions', 'not used to train']) assert.ok(text.includes(s), `privacy policy mentions ${s}`);
+  assert.equal((await fetch(base + '/terms')).status, 200);
+});
+
+test('a calendar whose sign-in is revoked is flagged, emailed about, shown in the admin, and clears on reconnect', async () => {
+  const CH = require('../src/services/calendar-health');
+  const { encrypt } = require('../src/lib/security');
+  const me = await req('GET', '/api/admin/auth/me', null, { cookie: ownerCookie });
+  const uid = me.data.user.id;
+  const { lastId } = db.run('INSERT INTO calendar_connections (user_id, provider, account_email, access_token, refresh_token, expires_at) VALUES (?,?,?,?,?,?)',
+    uid, 'google', 'owner@gmail.test', encrypt('old-access'), encrypt('dead-refresh'), Date.now() - 1000);
+
+  const realFetch = global.fetch;
+  process.env.GOOGLE_CLIENT_ID = 'cid'; process.env.GOOGLE_CLIENT_SECRET = 'secret';
+  let tokenCalls = 0, revoked = 0, mode = 'revoked';
+  global.fetch = async (url, opts) => {
+    const u = String(url);
+    if (u.startsWith('https://oauth2.googleapis.com/token')) {
+      tokenCalls += 1;
+      if (mode === 'revoked') return new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'Token has been expired or revoked.' }), { status: 400 });
+      return new Response(JSON.stringify({ access_token: 'fresh', expires_in: 3600 }), { status: 200 });
+    }
+    if (u.startsWith('https://oauth2.googleapis.com/revoke')) { revoked += 1; return new Response('{}', { status: 200 }); }
+    return realFetch(url, opts);
+  };
+  try {
+    CH._reset();
+    const r = await CH.sweep({ force: true });
+    assert.ok(r.broken >= 1);
+    assert.equal(db.get('SELECT needs_reconnect FROM calendar_connections WHERE id = ?', lastId).needs_reconnect, 1);
+    // A broken connection is not retried on every sweep; it waits for the person to reconnect.
+    const before = tokenCalls;
+    await CH.sweep({ force: true });
+    assert.equal(tokenCalls, before);
+
+    assert.equal(await CH.alertPending(), 1);
+    const mail = db.get("SELECT * FROM email_log WHERE subject LIKE 'Action needed: reconnect%' ORDER BY id DESC");
+    assert.ok(mail, 'an alert email went out');
+    assert.match(mail.recipients || mail.to_addr || JSON.stringify(mail), /owner@test\.dev/);
+    assert.equal(await CH.alertPending(), 0, 'not repeated straight away');
+    assert.equal(await CH.alertPending(Date.now() + CH.REMIND_EVERY_MS + 1000), 1, 'reminded after a few days');
+
+    const me2 = await req('GET', '/api/admin/auth/me', null, { cookie: ownerCookie });
+    assert.equal(me2.data.calendar_alerts.length, 1);
+    assert.equal(me2.data.calendar_alerts[0].account_email, 'owner@gmail.test');
+
+    // A network hiccup is recorded but never treated as "reconnect".
+    const calendars = require('../src/services/calendars');
+    assert.equal(calendars.needsReconnect('fetch failed: ETIMEDOUT'), false);
+    assert.equal(calendars.needsReconnect('AADSTS700082: The refresh token has expired'), true);
+
+    // Signing in again (here: a refresh that works) clears the flag and the banner.
+    mode = 'ok';
+    db.run('UPDATE calendar_connections SET needs_reconnect = 0 WHERE id = ?', lastId); // what the reconnect flow does
+    const ok = await calendars.checkConnection(db.get('SELECT * FROM calendar_connections WHERE id = ?', lastId));
+    assert.equal(ok.ok, true);
+    const row = db.get('SELECT needs_reconnect, alerted_at, last_error FROM calendar_connections WHERE id = ?', lastId);
+    assert.equal(row.needs_reconnect, 0); assert.equal(row.alerted_at, null); assert.equal(row.last_error, null);
+    assert.equal((await req('GET', '/api/admin/auth/me', null, { cookie: ownerCookie })).data.calendar_alerts.length, 0);
+
+    // Disconnecting also revokes the access with Google.
+    const del = await req('DELETE', `/api/admin/calendars/${lastId}`, null, { cookie: ownerCookie });
+    assert.equal(del.status, 200);
+    await new Promise((r2) => setTimeout(r2, 50));
+    assert.equal(revoked, 1);
+  } finally {
+    global.fetch = realFetch;
+    delete process.env.GOOGLE_CLIENT_ID; delete process.env.GOOGLE_CLIENT_SECRET;
+  }
+});

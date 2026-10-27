@@ -11,6 +11,7 @@ const L = require('./services/leads');
 const BK = require('./services/bookings');
 const MSG = require('./services/messaging');
 const CATALOG_REPAIR = require('./services/catalog-repair');
+const CAL_HEALTH = require('./services/calendar-health');
 const db = require('./db');
 
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -21,7 +22,7 @@ const app = createRouter();
 // A request for book.weddingsunlimited.com is that company's site: its home page at /, its booking
 // pages at /<page>, and its admin at /app. Paths that belong to the platform itself keep working
 // there, so a booking's manage link or a quote link opens on the company's own domain.
-const PLATFORM_PATHS = new Set(['api', 'app', 'static', 'b', 'q', 'booking', 'oauth', 'healthz', 'embed.js', 'favicon.ico', 'robots.txt', 'session', 'u']);
+const PLATFORM_PATHS = new Set(['api', 'app', 'static', 'b', 'q', 'booking', 'oauth', 'healthz', 'embed.js', 'favicon.ico', 'robots.txt', 'session', 'u', 'privacy', 'terms']);
 const requestHost = (req) => String(req.headers.host || '').split(',')[0].trim();
 app.pre((req, res) => {
   const host = B.normalizeDomain(requestHost(req));
@@ -76,18 +77,8 @@ app.use((req) => {
 
 app.get('/healthz', () => ({ ok: true, db: !!db.get('SELECT 1 x') }));
 
-// The platform's own home page. Neutral on purpose: it is the front door for every company on
-// Booklane, so it names none of them. A company's domain never reaches here; it is rewritten above.
-app.get('/', (req, res) => {
-  const first = db.get('SELECT slug FROM businesses ORDER BY id LIMIT 1');
-  if (process.env.HOME_REDIRECT === 'business' && first) return res.redirect(`/b/${first.slug}`);
-  const signup = process.env.ALLOW_SIGNUP !== 'false';
-  res.html(page({ title: `${APP_NAME} · Booking pages and quotes for service businesses`, description: 'Booking pages that capture every lead, round robin for your team, and a quote builder customers finish.', scripts: [], styles: ['app.css'],
-    body: `<main class="home"><div class="home-card"><div class="logo-mark"></div><h1>${APP_NAME}</h1>
-    <p>Booking pages that capture every lead, round robin across your team, and a quote builder customers actually finish.</p>
-    <ul class="home-points"><li>Your own domain and branding</li><li>Google and Outlook calendars, with busy times respected</li><li>Email and text reminders, and team performance at a glance</li></ul>
-    <div class="home-actions">${signup ? '<a class="btn btn-primary btn-lg" href="/app#/signup">Create your booking page</a>' : ''}<a class="btn ${signup ? 'btn-ghost' : 'btn-primary'} btn-lg" href="/app#/login">Log in</a></div></div></main>` }));
-});
+// The platform's home page, privacy policy and terms live in routes/site.js.
+require('./routes/site')(app);
 
 app.get('/app', (req, res) => res.html(page({ title: `${req.hostBusiness ? `${req.hostBusiness.name} · ` : ''}${APP_NAME} dashboard`,
   // On a company's own domain the login screen is that company's, so it does not offer sign-up.
@@ -170,6 +161,8 @@ async function runJobs() {
     await L.processAbandoned();
     await BK.sendReminders();
     await MSG.processDue();
+    // Refreshes every calendar sign-in every few hours and emails about any that need reconnecting.
+    await CAL_HEALTH.run();
     db.run('DELETE FROM sessions WHERE expires_at < ?', Date.now());
   } catch (e) { console.error('[jobs]', e); } finally { jobRunning = false; }
 }

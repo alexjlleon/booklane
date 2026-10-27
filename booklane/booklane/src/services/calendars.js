@@ -78,7 +78,7 @@ async function finishAuth(provider, code, state, sessionUserId) {
   const existing = db.get('SELECT id FROM calendar_connections WHERE user_id = ? AND provider = ? AND account_email IS ?', owner, provider, email);
   const expires = Date.now() + (Number(t.expires_in) || 3600) * 1000;
   if (existing) {
-    db.run('UPDATE calendar_connections SET access_token=?, refresh_token=COALESCE(?, refresh_token), expires_at=?, last_error=NULL WHERE id=?',
+    db.run('UPDATE calendar_connections SET access_token=?, refresh_token=COALESCE(?, refresh_token), expires_at=?, last_error=NULL, needs_reconnect=0, alerted_at=NULL WHERE id=?',
       encrypt(t.access_token), t.refresh_token ? encrypt(t.refresh_token) : null, expires, existing.id);
   } else {
     const hasWriter = db.get('SELECT 1 FROM calendar_connections WHERE user_id = ? AND write_events = 1', owner);
@@ -94,13 +94,52 @@ async function accessToken(conn) {
   if (!refresh) throw new Error('Calendar needs to be reconnected');
   const t = await tokenRequest(conn.provider, { grant_type: 'refresh_token', refresh_token: refresh });
   const expires = Date.now() + (Number(t.expires_in) || 3600) * 1000;
-  db.run('UPDATE calendar_connections SET access_token=?, refresh_token=COALESCE(?, refresh_token), expires_at=?, last_error=NULL WHERE id=?',
+  db.run('UPDATE calendar_connections SET access_token=?, refresh_token=COALESCE(?, refresh_token), expires_at=?, last_error=NULL, needs_reconnect=0, alerted_at=NULL WHERE id=?',
     encrypt(t.access_token), t.refresh_token ? encrypt(t.refresh_token) : null, expires, conn.id);
   conn.expires_at = expires;
   return t.access_token;
 }
 
-function markError(conn, e) { db.run('UPDATE calendar_connections SET last_error = ? WHERE id = ?', String(e.message || e).slice(0, 300), conn.id); }
+/**
+ * Errors that only the person can fix by signing in again: access revoked, the sign-in expired, or
+ * the stored token can no longer be read. Anything else (a timeout, Google having a bad minute) is
+ * recorded but is not a reason to tell anyone to reconnect.
+ */
+const RECONNECT_RE = /invalid_grant|expired or revoked|been revoked|needs to be reconnected|AADSTS(700082|50173|65001|50076|70043)|interaction_required|consent_required/i;
+const needsReconnect = (msg) => RECONNECT_RE.test(String(msg || ''));
+
+function markError(conn, e) {
+  const msg = String(e.message || e).slice(0, 300);
+  db.run('UPDATE calendar_connections SET last_error = ?, needs_reconnect = CASE WHEN ? THEN 1 ELSE needs_reconnect END WHERE id = ?', msg, needsReconnect(msg) ? 1 : 0, conn.id);
+}
+
+/**
+ * Refresh a connection's sign-in now, whether or not its access has run out. Used by the health
+ * check: it finds a revoked or expired calendar before a customer meets it, and using the sign-in
+ * regularly stops Google retiring it for being idle.
+ */
+async function checkConnection(conn) {
+  try {
+    conn.expires_at = 0;
+    await accessToken(conn);
+    db.run('UPDATE calendar_connections SET checked_at = ? WHERE id = ?', Date.now(), conn.id);
+    return { ok: true };
+  } catch (e) {
+    markError(conn, e);
+    db.run('UPDATE calendar_connections SET checked_at = ? WHERE id = ?', Date.now(), conn.id);
+    return { ok: false, reconnect: needsReconnect(e.message), error: e.message };
+  }
+}
+
+/** Tell Google to forget a connection when it is removed here, so no access is left behind. */
+async function revoke(conn) {
+  if (!conn || conn.provider !== 'google') return;
+  const t = decrypt(conn.refresh_token) || decrypt(conn.access_token);
+  if (!t) return;
+  try {
+    await fetch('https://oauth2.googleapis.com/revoke', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token: t }).toString(), signal: AbortSignal.timeout(8000) });
+  } catch { /* best effort: the connection is gone from here either way */ }
+}
 
 const busyCache = new Map();
 /**
@@ -236,4 +275,4 @@ async function deleteEvent(ext) {
   } catch (e) { markError(conn, e); }
 }
 
-module.exports = { explainBusy, ignoredReason, PROVIDERS, isConfigured, startAuth, finishAuth, stateRow, getBusy, createEvent, deleteEvent, clearBusyCache };
+module.exports = { needsReconnect, checkConnection, revoke, explainBusy, ignoredReason, PROVIDERS, isConfigured, startAuth, finishAuth, stateRow, getBusy, createEvent, deleteEvent, clearBusyCache };

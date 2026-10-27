@@ -257,3 +257,9 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
   .opt-row { grid-template-columns: 38px 1fr auto; }
   .opt-row .input-sm { grid-column: 1 / -1; }
 }
+
+/* A calendar that needs reconnecting, shown above every screen */
+.cal-alert { display: flex; align-items: center; justify-content: space-between; gap: 14px; background: #fdecec; color: #8a1f1f; border: 1px solid #f3c4c4; border-radius: 12px; padding: 12px 16px; margin-bottom: 18px; }
+.cal-alert span { display: block; font-size: 13px; color: #9a3a3a; }
+.cal-alert .cal-alert-list { margin-top: 2px; }
+.cal-alert .btn { flex: none; }

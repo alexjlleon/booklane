@@ -120,6 +120,20 @@
     ['/settings', 'Settings', ICON('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>')],
   ];
 
+  // A calendar whose sign-in stopped working means bookings can no longer see its busy times, so it
+  // is shown on every screen until it is reconnected.
+  function calendarBanner(me) {
+    const list = me.calendar_alerts || [];
+    if (!list.length) return '';
+    const NAME = { google: 'Google Calendar', microsoft: 'Outlook calendar' };
+    const line = (c) => `${c.whose === 'yours' ? 'Your' : `${esc(c.whose)}'s`} ${NAME[c.provider] || 'calendar'}${c.account_email ? ` (${esc(c.account_email)})` : ''}`;
+    const first = list[0];
+    return `<div class="cal-alert" role="alert"><div><b>${list.length === 1 ? `${line(first)} needs reconnecting.` : `${list.length} calendars need reconnecting.`}</b>
+      <span>Bookings cannot see busy times on ${list.length === 1 ? 'it' : 'them'} until ${list.length === 1 ? 'it is' : 'they are'} reconnected.</span>
+      ${list.length > 1 ? `<span class="cal-alert-list">${list.map(line).join(' · ')}</span>` : ''}</div>
+      <a class="btn btn-sm btn-primary" href="${esc(first.screen)}">Reconnect</a></div>`;
+  }
+
   function shell(active) {
     const me = A.me;
     const biz = me.business;
@@ -129,7 +143,7 @@
       <div class="biz-switch"><label class="sr-only" for="bizsel">Business</label><select id="bizsel">${me.businesses.map((b) => `<option value="${b.id}" ${biz && b.id === biz.id ? 'selected' : ''}>${esc(b.name)}</option>`).join('')}<option value="__new">+ Add a business</option></select></div>
       <div class="nav">${NAV.filter((n) => n[3] !== 'admin' || ['owner', 'admin'].includes((A.me && A.me.business || {}).role)).map((n) => n[1] === null ? `<div class="nav-sec">${n[0]}</div>` : `<a href="#${n[0]}" class="${active === n[0] ? 'active' : ''}">${n[2]}<span>${n[1]}</span></a>`).join('')}</div>
       <div class="sidebar-foot">${biz ? `<a href="/b/${esc(biz.slug)}" target="_blank" rel="noopener">View booking page ↗</a>` : ''}<a href="#/account">${esc(me.user.name)} · Account</a><button type="button" data-logout>Log out</button></div>
-    </nav><main class="main" id="view"></main></div>`;
+    </nav><main class="main">${calendarBanner(me)}<div id="view"></div></main></div>`;
   }
 
   A.render = async () => {

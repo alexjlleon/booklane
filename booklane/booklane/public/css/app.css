@@ -438,3 +438,27 @@ body.form-page.is-embed.has-custom-bg { background-color: var(--bg); }
   .datecal { max-width: none; }
   .form-page.btn-full .step-nav { margin-left: -16px; margin-right: -16px; }
 }
+
+/* Platform home page sections, privacy policy and terms */
+.home { align-content: start; }
+.home-card { margin: 8vh auto 0; }
+.home-more { max-width: 760px; margin: 40px auto 0; padding: 0 4px 40px; }
+.home-more h2 { font-size: 24px; font-weight: 800; margin: 34px 0 10px; }
+.home-more p, .home-list { color: var(--ink-2); font-size: 16px; line-height: 1.65; }
+.home-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 18px; }
+.home-grid > div { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
+.home-grid h3 { font-size: 16px; margin-bottom: 6px; }
+.home-grid p { font-size: 14.5px; margin: 0; }
+.home-list { padding-left: 20px; }
+.home-list li { margin-bottom: 8px; }
+.legal { max-width: 760px; margin: 0 auto; padding: 40px 22px 30px; line-height: 1.65; color: var(--ink-2); }
+.legal h1 { font-size: 34px; font-weight: 800; color: var(--ink); margin: 26px 0 4px; }
+.legal h2 { font-size: 19px; font-weight: 800; color: var(--ink); margin: 30px 0 8px; }
+.legal ul { padding-left: 20px; } .legal li { margin-bottom: 6px; }
+.legal code { font-size: 13px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
+.legal-home { display: inline-flex; align-items: center; gap: 10px; font-weight: 800; color: var(--ink); text-decoration: none; }
+.legal-home .logo-mark { width: 28px; height: 28px; margin: 0; }
+.site-foot { display: flex; flex-wrap: wrap; gap: 8px 20px; justify-content: center; padding: 22px 16px 34px; font-size: 13px; color: var(--muted); border-top: 1px solid var(--line); }
+.site-foot a { color: var(--ink-2); text-decoration: none; } .site-foot a:hover { text-decoration: underline; }
+.powered a { color: inherit; }
+@media (max-width: 640px) { .home-grid { grid-template-columns: 1fr; } .home-card h1 { font-size: 38px; } }

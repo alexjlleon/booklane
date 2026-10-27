@@ -36,6 +36,7 @@ const isAdmin = (req) => ROLE_RANK[req.membership?.role] >= ROLE_RANK.admin;
 function meResponse(req) {
   const cur = req.membership ? B.byId(req.membership.id) : null;
   return { user: req.user, business: req.membership ? { ...req.membership, custom_domain: cur.custom_domain || null, public_base: B.baseFor(cur), page_url: B.pageUrl(cur, '') } : null, businesses: req.memberships || [],
+    calendar_alerts: require('../services/calendar-health').problemsFor(req.user.id, req.membership),
     app: { base_url: baseUrl(), calendars: Object.fromEntries(Object.entries(calendars.PROVIDERS).map(([k, p]) => [k, { label: p.label, configured: calendars.isConfigured(k) }])), email_provider: appConfig.get('RESEND_API_KEY') ? 'resend' : 'log' } };
 }
 
@@ -685,8 +686,11 @@ module.exports = function adminRoutes(app) {
   });
   app.delete('/api/admin/calendars/:id', (req) => {
     requireAuth(req);
+    const conn = db.get('SELECT * FROM calendar_connections WHERE id = ? AND user_id = ?', int(req.params.id), req.user.id);
     db.run('DELETE FROM calendar_connections WHERE id = ? AND user_id = ?', int(req.params.id), req.user.id);
     calendars.clearBusyCache(req.user.id);
+    // Removing it here also removes Availvo's access on Google's side, so nothing is left behind.
+    if (conn) calendars.revoke(conn);
     return { ok: true };
   });
 

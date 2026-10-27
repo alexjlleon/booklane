@@ -285,6 +285,11 @@ for (const sql of [
   'CREATE UNIQUE INDEX IF NOT EXISTS idx_businesses_domain ON businesses (custom_domain)',
   // Where a calendar sign-in started, so the platform-wide callback can hand it back to that domain.
   'ALTER TABLE oauth_states ADD COLUMN return_origin TEXT',
+  // A calendar whose sign-in has stopped working (revoked, expired, or unreadable): bookings no
+  // longer see its busy times, so people are told. alerted_at is when they were last told.
+  'ALTER TABLE calendar_connections ADD COLUMN needs_reconnect INTEGER NOT NULL DEFAULT 0',
+  'ALTER TABLE calendar_connections ADD COLUMN alerted_at INTEGER',
+  'ALTER TABLE calendar_connections ADD COLUMN checked_at INTEGER',
 ]) { try { raw.exec(sql); } catch { /* column already exists */ } }
 
 // Booklane no longer takes payments. Drop what the shop, the paid sessions and the card providers
