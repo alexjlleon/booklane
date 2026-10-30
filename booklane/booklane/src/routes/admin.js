@@ -428,6 +428,31 @@ module.exports = function adminRoutes(app) {
     return { ok: true, start_utc: updated.start_utc, host_user_id: updated.host_user_id };
   });
 
+  // Who a call could be passed to: everyone else on its booking page, and whether they are free then.
+  app.get('/api/admin/bookings/:id/handoff', async (req) => {
+    requireRole('host')(req);
+    const bk = ownBooking(req);
+    const et = BK.hydrateEt(db.get('SELECT * FROM event_types WHERE id = ?', bk.event_type_id));
+    if (!et) throw new HttpError(409, 'The booking page for this call no longer exists.');
+    const people = [];
+    for (const h of S.hostsFor(et.id)) {
+      if (h.id === bk.host_user_id) continue;
+      const r = await S.hostFreeAt(et, h.id, Date.parse(bk.start_utc), { excludeBookingId: bk.id });
+      people.push({ id: h.id, name: h.name, free: r.free, reason: r.reason });
+    }
+    people.sort((a, b) => (b.free - a.free) || String(a.name).localeCompare(String(b.name)));
+    const cur = db.get('SELECT name FROM users WHERE id = ?', bk.host_user_id);
+    return { start_utc: bk.start_utc, host: { id: bk.host_user_id, name: cur?.name }, event: { name: et.name }, people };
+  });
+
+  // Pass a call to a teammate at the same time. Hosts can pass their own calls; admins anyone's.
+  app.post('/api/admin/bookings/:id/handoff', async (req) => {
+    requireRole('host')(req);
+    const bk = ownBooking(req);
+    const updated = await BK.reassignBooking(bk, req.body?.user_id, { note: req.body?.note, notifyCustomer: req.body?.notify_customer !== false, by: req.user.name });
+    return { ok: true, host_user_id: updated.host_user_id };
+  });
+
   // ---------- This company's domain and email ----------
   // The domain decides where its pages live and where every link it sends points. The send-from
   // address is stored against this company only, so each company emails as itself.

@@ -51,7 +51,7 @@ function bookingView(b) {
   return { b, et, business, host };
 }
 
-async function sendBookingEmails(kind, booking) {
+async function sendBookingEmails(kind, booking, { oldHost, notifyCustomer = true } = {}) {
   const { b, et, business, host } = bookingView(booking);
   const tz = b.invitee_tz || business.timezone;
   const start = Date.parse(b.start_utc), end = Date.parse(b.end_utc);
@@ -60,11 +60,12 @@ async function sendBookingEmails(kind, booking) {
   const summary = `${et?.name || 'Call'} with ${business.name}`;
   const answers = db.json(b.answers, {});
   const ics = buildIcs({ uid: `booking-${b.id}-${b.token.slice(0, 8)}@booklane`, start, end, summary, description: `Manage: ${manage}`, location: b.location,
-    organizerName: business.name, organizerEmail: host?.email, attendeeName: b.name, attendeeEmail: b.email, cancelled: kind === 'cancelled', sequence: kind === 'rescheduled' ? 1 : kind === 'cancelled' ? 2 : 0 });
-  const headings = { created: `You're booked, ${esc((b.name || '').split(' ')[0])}!`, rescheduled: 'Your call was rescheduled', cancelled: 'Your call was cancelled' };
-  await sendEmail({
+    organizerName: business.name, organizerEmail: host?.email, attendeeName: b.name, attendeeEmail: b.email, cancelled: kind === 'cancelled', sequence: kind === 'rescheduled' || kind === 'reassigned' ? 1 : kind === 'cancelled' ? 2 : 0 });
+  const headings = { created: `You're booked, ${esc((b.name || '').split(' ')[0])}!`, rescheduled: 'Your call was rescheduled', cancelled: 'Your call was cancelled',
+    reassigned: `Your call is now with ${esc(host?.name || 'a teammate')}` };
+  if (kind !== 'reassigned' || notifyCustomer) await sendEmail({
     to: b.email, businessId: business.id, fromName: business.name, replyTo: host?.email || business.email,
-    subject: kind === 'cancelled' ? `Cancelled: ${summary}` : kind === 'rescheduled' ? `Rescheduled: ${summary} on ${when}` : `Confirmed: ${summary} on ${when}`,
+    subject: kind === 'cancelled' ? `Cancelled: ${summary}` : kind === 'reassigned' ? `Update: ${summary} on ${when} is now with ${host?.name || 'a teammate'}` : kind === 'rescheduled' ? `Rescheduled: ${summary} on ${when}` : `Confirmed: ${summary} on ${when}`,
     html: layout(business, {
       heading: headings[kind],
       body: rows([['What', summary], ['When', when], ['Where', b.location], ['With', host?.name]]) +
@@ -73,15 +74,17 @@ async function sendBookingEmails(kind, booking) {
     }),
     attachments: [{ filename: 'invite.ics', content: ics }],
   });
-  const team = new Set(B.teamEmails(business));
+  // A handoff only concerns the two people involved, not the whole team inbox.
+  const team = new Set(kind === 'reassigned' ? [] : B.teamEmails(business));
   if (host?.email) team.add(host.email);
+  if (oldHost?.email) team.add(oldHost.email);
   if (business.settings.notifications.notify_on_booking || kind !== 'created') {
     await sendEmail({
       to: [...team], businessId: business.id,
-      subject: `${kind === 'created' ? 'New booking' : kind === 'rescheduled' ? 'Rescheduled' : 'Cancelled'}: ${b.name} · ${T.formatDateTime(start, business.timezone, { weekday: 'short', month: 'short', year: undefined })}`,
+      subject: `${kind === 'created' ? 'New booking' : kind === 'rescheduled' ? 'Rescheduled' : kind === 'reassigned' ? `Passed to ${host?.name}` : 'Cancelled'}: ${b.name} · ${T.formatDateTime(start, business.timezone, { weekday: 'short', month: 'short', year: undefined })}`,
       html: layout(business, {
-        heading: kind === 'created' ? 'New call booked' : kind === 'rescheduled' ? 'A call was rescheduled' : 'A call was cancelled',
-        body: rows([['Event', et?.name], ['When', T.formatDateTime(start, business.timezone)], ['Host', host?.name], ['Name', b.name], ['Email', b.email], ['Phone', b.phone], ['Location', b.location],
+        heading: kind === 'created' ? 'New call booked' : kind === 'rescheduled' ? 'A call was rescheduled' : kind === 'reassigned' ? `${esc(oldHost?.name || 'Someone')} passed this call to ${esc(host?.name || 'a teammate')}` : 'A call was cancelled',
+        body: rows([['Event', et?.name], ['When', T.formatDateTime(start, business.timezone)], ['Host', host?.name], ...(kind === 'reassigned' ? [['Was with', oldHost?.name], ['Note', b.handoff_note]] : []), ['Name', b.name], ['Email', b.email], ['Phone', b.phone], ['Location', b.location],
           ['Reason', b.cancel_reason], ...L.answersToPairs(answers)]),
         cta: { label: 'Open in dashboard', url: B.linkFor(business, '/app#/bookings') },
       }),
@@ -231,6 +234,42 @@ async function rescheduleBooking(booking, startIso, tz) {
   return b;
 }
 
+// Pass a call to a teammate at the same time. The new person must be on the call's booking page
+// and genuinely free then. Their calendar gets the event, the old one loses it, both are emailed,
+// and the customer is told who they will now be talking to (unless the person passing says not to).
+async function reassignBooking(booking, newHostId, { note, notifyCustomer = true, by } = {}) {
+  if (booking.status !== 'confirmed') throw new HttpError(400, 'Only an upcoming call can be passed on.');
+  if (Date.parse(booking.start_utc) < Date.now()) throw new HttpError(400, 'This call already happened.');
+  newHostId = Number(newHostId);
+  if (newHostId === booking.host_user_id) throw new HttpError(400, 'That person already has this call.');
+  const et = hydrateEt(db.get('SELECT * FROM event_types WHERE id = ?', booking.event_type_id));
+  if (!et) throw new HttpError(409, 'The booking page for this call no longer exists.');
+  if (!S.hostsFor(et.id).some((h) => h.id === newHostId)) throw new HttpError(422, 'That person is not a host on this booking page.');
+  const startMs = Date.parse(booking.start_utc), endMs = Date.parse(booking.end_utc);
+  const check = await S.hostFreeAt(et, newHostId, startMs, { excludeBookingId: booking.id });
+  if (!check.free) throw new HttpError(409, `They are not free then (${check.reason}).`);
+  const oldHost = db.get('SELECT id, name, email FROM users WHERE id = ?', booking.host_user_id);
+  const oldExternal = db.json(booking.external_events, []);
+  const cleanNote = String(note || '').trim().slice(0, 1000) || null;
+  db.tx(() => {
+    const fresh = db.get('SELECT status, host_user_id FROM bookings WHERE id = ?', booking.id);
+    if (!fresh || fresh.status !== 'confirmed') throw new HttpError(400, 'This booking was cancelled.');
+    if (fresh.host_user_id !== booking.host_user_id) throw new HttpError(409, 'Someone else just changed who has this call. Refresh and try again.');
+    assertFree(et, newHostId, startMs, endMs, booking.id);
+    db.run("UPDATE bookings SET host_user_id = ?, handoff_note = ?, external_events = '[]' WHERE id = ?", newHostId, cleanNote, booking.id);
+  });
+  for (const ext of oldExternal) await calendars.deleteEvent(ext);
+  const b = db.get('SELECT * FROM bookings WHERE id = ?', booking.id);
+  const ext = await calendars.createEvent(newHostId, { summary: `${et.name}: ${b.name || b.email}`, start: startMs, end: endMs, attendeeEmail: b.email, attendeeName: b.name,
+    timezone: b.invitee_tz, location: b.location, locationType: PLACES.placeFor(et, b.place_id).type, description: `Passed on by ${oldHost?.name || 'a teammate'}.${cleanNote ? ` Note: ${cleanNote}` : ''} Manage: ${B.linkFor(B.byId(b.business_id), '/app#/bookings')}` });
+  if (ext) db.run('UPDATE bookings SET external_events = ?, location = CASE WHEN ? IS NOT NULL THEN ? ELSE location END WHERE id = ?', JSON.stringify([ext]), ext.join_url, ext.join_url, b.id);
+  const after = db.get('SELECT * FROM bookings WHERE id = ?', booking.id);
+  const newHost = db.get('SELECT name FROM users WHERE id = ?', newHostId);
+  if (after.lead_id) B.logActivity(after.business_id, after.lead_id, 'booking', `Call passed from ${oldHost?.name || 'someone'} to ${newHost?.name || 'someone'}${by ? ` by ${by}` : ''}`, { booking_id: after.id });
+  sendBookingEmails('reassigned', after, { oldHost, notifyCustomer }).catch((e) => console.error('[booking email]', e));
+  return after;
+}
+
 async function sendReminders() {
   const due = db.all(`SELECT * FROM bookings WHERE status = 'confirmed' AND reminder_sent_at IS NULL AND start_utc > ? AND start_utc <= ?`,
     new Date().toISOString(), new Date(Date.now() + 24 * 3600000).toISOString());
@@ -250,4 +289,4 @@ async function sendReminders() {
   }
 }
 
-module.exports = { createBooking, cancelBooking, deleteBookings, rescheduleBooking, sendReminders, hydrateEt, bookingPayload, bookingView, validateContact };
+module.exports = { createBooking, cancelBooking, deleteBookings, rescheduleBooking, reassignBooking, sendReminders, hydrateEt, bookingPayload, bookingView, validateContact };

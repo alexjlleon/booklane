@@ -102,6 +102,34 @@ async function availableHostsAt(et, startMs, opts = {}) {
   return [];
 }
 
+/**
+ * Is this one person free for this call at exactly this time? Used when a call is passed to a
+ * teammate at the same time, so it ignores the page's notice and slot grid (the time is already
+ * booked) and only asks: is it inside their hours, clear of their bookings and calendar, and under
+ * the page's daily limit. Returns { free, reason }.
+ */
+async function hostFreeAt(et, userId, startMs, { excludeBookingId } = {}) {
+  const host = db.get('SELECT id, timezone FROM users WHERE id = ?', userId);
+  if (!host) return { free: false, reason: 'not found' };
+  const tz = T.isValidTz(host.timezone) ? host.timezone : 'UTC';
+  const endMs = startMs + et.duration_min * 60000;
+  const z = T.utcToZoned(startMs, tz);
+  const startMin = Math.round((startMs - T.zonedToUtc(z.date, 0, tz)) / 60000);
+  const inHours = windowsFor(host.id, z.date, {}).some(([ws, we]) => ws <= startMin && startMin + et.duration_min <= we);
+  if (!inHours) return { free: false, reason: 'outside their hours' };
+  const s0 = startMs - et.buffer_before * 60000, e0 = endMs + et.buffer_after * 60000;
+  const busy = internalBusy(host.id, startMs, endMs, excludeBookingId);
+  if (busy.some((b) => b.start < e0 && b.end > s0)) return { free: false, reason: 'has another call then' };
+  const external = await calendars.getBusy(host.id, startMs - 3600000, endMs + 3600000);
+  if (external.some(([bs, be]) => bs < e0 && be > s0)) return { free: false, reason: 'busy on their calendar' };
+  if (et.daily_limit > 0) {
+    const dayStart = T.zonedToUtc(z.date, 0, tz), dayEnd = T.zonedToUtc(T.addDays(z.date, 1), 0, tz);
+    const n = busy.filter((b) => b.event_type_id === et.id && b.startRaw >= dayStart && b.startRaw < dayEnd).length;
+    if (n >= et.daily_limit) return { free: false, reason: 'at their daily limit' };
+  }
+  return { free: true, reason: null };
+}
+
 const LEVELS = ['senior', 'junior', 'staff'];
 const normLevel = (v) => (LEVELS.includes(v) ? v : 'staff');
 
@@ -170,4 +198,4 @@ function pickHost(et, hostIds, opts = {}) {
   return stats[0].id;
 }
 
-module.exports = { computeSlots, availableHostsAt, pickHost, hostsFor, windowsFor, servicesCount, levelOrder, matchesByServices, LEVELS };
+module.exports = { computeSlots, availableHostsAt, hostFreeAt, pickHost, hostsFor, windowsFor, servicesCount, levelOrder, matchesByServices, LEVELS };

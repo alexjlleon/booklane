@@ -90,7 +90,7 @@
     const who = b.lead_id ? `<a href="#/leads/${b.lead_id}">${esc(b.name || b.email || 'Customer')}</a>` : esc(b.name || b.email || 'Customer');
     let actions = '';
     if (kind === 'upcoming') {
-      actions = `<button class="btn btn-ghost btn-sm" data-resched="${b.id}">Reschedule</button> <button class="btn btn-ghost btn-sm" data-cancel="${b.id}">Cancel</button>`;
+      actions = `<button class="btn btn-ghost btn-sm" data-resched="${b.id}">Reschedule</button> <button class="btn btn-ghost btn-sm" data-handoff="${b.id}">Pass on</button> <button class="btn btn-ghost btn-sm" data-cancel="${b.id}">Cancel</button>`;
     } else if (b.status === 'confirmed') {
       actions = `<span class="pill booked">Showed</span> <button class="btn btn-link btn-sm" data-noshow="${b.id}">Mark no-show</button>`;
     } else if (b.status === 'no_show') {
@@ -213,11 +213,42 @@
     });
   }
 
+  // Pass a call to someone else on its booking page, same time. Busy people are listed but greyed out
+  // with the reason, so it is clear why they cannot take it.
+  function handoff(id, done) {
+    A.drawer(`<div class="drawer-head"><div><div class="small muted">Booking</div><h2>Pass this call on</h2></div><button class="icon-x" data-close-drawer aria-label="Close">&times;</button></div>
+      <form id="handoff-form" class="panel stack"><div data-who><div class="empty-state"><span class="spinner"></span></div></div></form>`, async (el) => {
+      const box = $('[data-who]', el);
+      let r;
+      try { r = await api('GET', `/bookings/${id}/handoff`); } catch (err) { box.innerHTML = `<p class="muted">${esc(err.message)}</p>`; return; }
+      const free = r.people.filter((p) => p.free);
+      box.innerHTML = `<p class="small">${esc(r.event.name)}, ${esc(A.dt(r.start_utc, { weekday: 'short' }))}. Now with <b>${esc(r.host.name || 'nobody')}</b>. Same time, new person.</p>`
+        + (r.people.length ? `<div class="stack" style="gap:6px">${r.people.map((p) => `<label class="row" style="gap:8px;${p.free ? '' : 'opacity:.55'}"><input type="radio" name="to" value="${p.id}" ${p.free ? '' : 'disabled'}> <span>${esc(p.name)}${p.free ? '' : ` <span class="small muted">(${esc(p.reason)})</span>`}</span></label>`).join('')}</div>`
+          : '<p class="muted">Nobody else is a host on this booking page. Add people to the page to be able to pass its calls on.</p>')
+        + (r.people.length && !free.length ? '<p class="small muted">Nobody else is free at this time. Reschedule it instead, or ask a teammate to free up the slot.</p>' : '')
+        + (r.people.length ? `${A.field('Note for them', '<textarea class="textarea" rows="3" name="note" placeholder="Optional. Anything they should know before the call."></textarea>')}
+          <label class="row" style="gap:8px"><input type="checkbox" name="notify" checked> <span>Email the customer who they will be talking to now (with an updated invite)</span></label>
+          <div class="row between"><button type="button" class="btn btn-ghost" data-close-drawer>Keep it</button><button type="submit" class="btn btn-primary" disabled data-go>Pass it on</button></div>` : '');
+      const go = $('[data-go]', el);
+      el.addEventListener('change', (e) => { if (e.target.name === 'to' && go) { go.disabled = false; go.textContent = `Pass to ${r.people.find((p) => String(p.id) === e.target.value).name}`; } });
+      $('#handoff-form', el).addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        const to = $('[name="to"]:checked', el); if (!to) return;
+        go.disabled = true;
+        try {
+          await A.guard(() => api('POST', `/bookings/${id}/handoff`, { user_id: Number(to.value), note: $('[name="note"]', el).value, notify_customer: $('[name="notify"]', el).checked }), 'Call passed on. They have been emailed.');
+          A.closeDrawer(); done();
+        } catch (err) { go.disabled = false; }
+      });
+    });
+  }
+
   A.bookingActions = {
-    reschedule, cancel, setNoShow,
+    reschedule, cancel, setNoShow, handoff,
     /** Wire the buttons any meeting list uses. Returns true when it handled the click. */
     handle(e, done) {
       const rs = e.target.closest('[data-resched]'); if (rs) { reschedule(Number(rs.dataset.resched), done); return true; }
+      const ho = e.target.closest('[data-handoff]'); if (ho) { handoff(Number(ho.dataset.handoff), done); return true; }
       const c = e.target.closest('[data-cancel]'); if (c) { cancel(Number(c.dataset.cancel), done); return true; }
       const ns = e.target.closest('[data-noshow]'); if (ns) { setNoShow(Number(ns.dataset.noshow), true).then(done).catch(() => {}); return true; }
       const sh = e.target.closest('[data-showed]'); if (sh) { setNoShow(Number(sh.dataset.showed), false).then(done).catch(() => {}); return true; }

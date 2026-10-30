@@ -2260,6 +2260,67 @@ test('an admin can move anyone\'s call to a real open time, and the reminders mo
   assert.equal(clash.status, 409);
 });
 
+test('a host can pass their own call to a free teammate on the same page, at the same time', async () => {
+  require('../src/lib/security').resetRateLimits();
+  const bizId = db.get('SELECT id FROM businesses WHERE slug = ?', bizSlug).id;
+  const pat = db.get("SELECT id FROM users WHERE email = 'pat.planner@test.dev'").id;
+  const owner = db.get("SELECT user_id FROM memberships WHERE business_id = ? AND role = 'owner'", bizId).user_id;
+  const patCookie = (await req('POST', '/api/admin/auth/login', { email: 'pat.planner@test.dev', password: 'password123' })).cookie;
+  for (const u of [owner, pat]) {
+    db.run('DELETE FROM availability_rules WHERE user_id = ?', u);
+    for (const wd of [1, 2, 3, 4, 5]) db.run('INSERT INTO availability_rules (user_id, weekday, start_min, end_min) VALUES (?,?,?,?)', u, wd, 9 * 60, 17 * 60);
+  }
+  const page = await req('POST', '/api/admin/event-types', { name: 'Handoff Call', duration_min: 30, hosts: [pat, owner], assignment: 'round_robin' }, { cookie: ownerCookie });
+  assert.equal(page.status, 200, JSON.stringify(page.data));
+  const et = db.get('SELECT * FROM event_types WHERE id = ?', page.data.id);
+  const from = T.addDays(T.utcToZoned(Date.now(), 'America/Chicago').date, 20);
+  const open = await req('GET', `/api/public/b/${bizSlug}/e/${et.slug}/slots?from=${from}&to=${T.addDays(from, 10)}&tz=America/Chicago`);
+  const times = Object.values(open.data.days).flat().map((x) => x.start || x).sort();
+  const made = await req('POST', `/api/public/b/${bizSlug}/e/${et.slug}/book`,
+    { start: times[0], timezone: 'America/Chicago', contact: { first_name: 'Pass', last_name: 'Along', email: 'pass.along@example.com', phone: '7135550166' } });
+  assert.equal(made.status, 200, JSON.stringify(made.data));
+  const bk = db.get('SELECT * FROM bookings WHERE token = ?', made.data.token);
+  db.run('UPDATE bookings SET host_user_id = ? WHERE id = ?', pat, bk.id);
+
+  // Pat sees the owner as someone the call can go to, and free.
+  const who = await req('GET', `/api/admin/bookings/${bk.id}/handoff`, null, { cookie: patCookie });
+  assert.equal(who.status, 200, JSON.stringify(who.data));
+  assert.equal(who.data.host.id, pat);
+  const ownerRow = who.data.people.find((p) => p.id === owner);
+  assert.ok(ownerRow && ownerRow.free, JSON.stringify(who.data.people));
+  assert.ok(!who.data.people.some((p) => p.id === pat), 'not offered to themselves');
+
+  // When the owner has another call at that time they show as busy, and passing is refused.
+  const clashId = db.run(`INSERT INTO bookings (business_id, event_type_id, host_user_id, token, start_utc, end_utc, invitee_tz, name, email, status)
+    VALUES (?,?,?,?,?,?,?,?,?,'confirmed')`, bizId, et.id, owner, 'tok-owner-busy', bk.start_utc, bk.end_utc, 'America/Chicago', 'Busy', 'busy2@example.com').lastId;
+  const busyView = await req('GET', `/api/admin/bookings/${bk.id}/handoff`, null, { cookie: patCookie });
+  assert.equal(busyView.data.people.find((p) => p.id === owner).free, false);
+  assert.equal((await req('POST', `/api/admin/bookings/${bk.id}/handoff`, { user_id: owner }, { cookie: patCookie })).status, 409);
+  db.run('DELETE FROM bookings WHERE id = ?', clashId);
+
+  // Someone not on the page cannot be given it, nor can the current host.
+  assert.equal((await req('POST', `/api/admin/bookings/${bk.id}/handoff`, { user_id: 999999 }, { cookie: patCookie })).status, 422);
+  assert.equal((await req('POST', `/api/admin/bookings/${bk.id}/handoff`, { user_id: pat }, { cookie: patCookie })).status, 400);
+
+  // Passing it works, keeps the time, stores the note, and logs it on the lead.
+  const done = await req('POST', `/api/admin/bookings/${bk.id}/handoff`, { user_id: owner, note: 'They want a DJ quote too' }, { cookie: patCookie });
+  assert.equal(done.status, 200, JSON.stringify(done.data));
+  const after = db.get('SELECT * FROM bookings WHERE id = ?', bk.id);
+  assert.equal(after.host_user_id, owner);
+  assert.equal(after.start_utc, bk.start_utc);
+  assert.equal(after.handoff_note, 'They want a DJ quote too');
+
+  // Now it is the owner's call, Pat can no longer touch it; the owner (an admin) can pass it back.
+  assert.equal((await req('POST', `/api/admin/bookings/${bk.id}/handoff`, { user_id: pat }, { cookie: patCookie })).status, 403);
+  const back = await req('POST', `/api/admin/bookings/${bk.id}/handoff`, { user_id: pat, notify_customer: false }, { cookie: ownerCookie });
+  assert.equal(back.status, 200, JSON.stringify(back.data));
+  assert.equal(db.get('SELECT host_user_id FROM bookings WHERE id = ?', bk.id).host_user_id, pat);
+});
+
+test('the Pass on button is on both meeting lists', async () => {
+  for (const f of ['admin-team.js', 'admin-main.js']) assert.match(fs.readFileSync(path.join(__dirname, '..', 'public', 'js', f), 'utf8'), /data-handoff=/);
+});
+
 test('the team screen is only in the menu for admins, and every new screen loads its script', async () => {
   const html = (await req('GET', '/app')).data;
   assert.match(html, /admin-team\.js/);

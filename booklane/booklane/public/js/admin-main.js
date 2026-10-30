@@ -294,7 +294,7 @@
       const who = q.mine ? 'mine' : q.host || '';
       let lastDay = '';
       const action = (b) => {
-        if (scope === 'upcoming' && b.status === 'confirmed') return `<button class="btn btn-ghost btn-sm" data-resched="${b.id}">Reschedule</button> <button class="btn btn-ghost btn-sm" data-cancel="${b.id}">Cancel</button>`;
+        if (scope === 'upcoming' && b.status === 'confirmed') return `<button class="btn btn-ghost btn-sm" data-resched="${b.id}">Reschedule</button> <button class="btn btn-ghost btn-sm" data-handoff="${b.id}">Pass on</button> <button class="btn btn-ghost btn-sm" data-cancel="${b.id}">Cancel</button>`;
         if (scope === 'past' && b.status === 'confirmed') return `<span class="pill booked">Showed</span> <button class="btn btn-link btn-sm" data-noshow="${b.id}">Mark no-show</button>`;
         if (scope === 'past' && b.status === 'no_show') return `<span class="pill lost">No-show</span> <button class="btn btn-link btn-sm" data-showed="${b.id}">They showed up</button>`;
         return A.pill(b.status);
