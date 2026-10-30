@@ -38,6 +38,7 @@
           <td class="small">${x.calendar_ids.length ? x.calendar_ids.map((id) => esc((data.calendars.find((c) => c.id === id) || {}).name || '?')).join(', ') : '<span class="pill partial">none yet</span>'}</td>
           <td class="num">${x.booked || ''}</td>
           <td class="num"><a class="btn btn-ghost btn-sm" href="${esc(x.public_url)}" target="_blank" rel="noopener">View</a>
+            <button type="button" class="btn btn-ghost btn-sm" data-embed-session="${x.id}">Embed</button>
             <button type="button" class="btn btn-ghost btn-sm" data-edit-session="${x.id}">Edit</button></td>
         </tr>`).join('')}
         </tbody></table></div>
@@ -76,6 +77,12 @@
         }
         if (e.target.closest('[data-new-session]')) return editSession(null);
         if (e.target.closest('[data-new-cal]')) return editCalendar(null);
+        const em = e.target.closest('[data-embed-session]');
+        if (em) {
+          const x = ((A.cache.sessions || {}).sessions || []).find((y) => y.id === Number(em.dataset.embedSession));
+          if (x) A.embedDrawer({ name: x.name, url: x.public_url, path: `s/${x.slug || x.public_url.split('/s/').pop()}`, kind: 'session' });
+          return;
+        }
         const es = e.target.closest('[data-edit-session]');
         if (es) return editSession(((A.cache.sessions || {}).sessions || []).find((x) => x.id === Number(es.dataset.editSession)));
         const ec = e.target.closest('[data-edit-cal]');

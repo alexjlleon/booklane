@@ -88,6 +88,31 @@
     if (mount) mount(wrap.firstElementChild);
     return wrap.firstElementChild;
   };
+  /**
+   * The embed codes for one public page (a booking page or a session). `path` is what embed.js is
+   * given, e.g. "discovery-call" or "s/engagement-session"; `url` is the page's clean public address.
+   * The script is served from the company's own domain when it has one, so the frame does too.
+   */
+  A.embedDrawer = ({ name, url, path, kind = 'booking page' }) => {
+    const b = A.me.business, esc = A.esc;
+    const origin = b.public_base || A.me.app.base_url;
+    const ref = `b/${b.slug}/${String(path).replace(/^\//, '')}`;
+    const script = `<div data-booklane="${ref}"></div>\n<script src="${origin}/embed.js" async></script>`;
+    const popup = `<button data-booklane-popup="${ref}">${name}</button>\n<script src="${origin}/embed.js" async></script>`;
+    const iframe = `<iframe src="${url}?embed=1" style="width:100%;height:760px;border:0" loading="lazy" title="${name}"></iframe>`;
+    const link = `<a href="${url}" class="wu-cta">${name}</a>`;
+    return A.drawer(`<div class="drawer-head"><div><div class="small muted">Embed this ${esc(kind)}</div><h2>${esc(name)}</h2></div><button class="icon-x" data-close-drawer aria-label="Close">&times;</button></div>
+      <div class="panel stack">
+        ${A.field('Link', `<input class="input" readonly value="${esc(url)}">`, 'For a button, an email, a text or a QR code.')}
+        ${A.field('On the page (recommended)', `<textarea class="textarea" rows="3" readonly>${esc(script)}</textarea>`, 'Paste into a Custom HTML or code block (WordPress, Avada, Squarespace, Wix). It grows and shrinks to fit, and records which page each lead came from.')}
+        ${A.field('As a popup button', `<textarea class="textarea" rows="3" readonly>${esc(popup)}</textarea>`, 'A button that opens this page over your site. Change the words between the tags, and style the button however you like.')}
+        ${A.field('Plain iframe', `<textarea class="textarea" rows="3" readonly>${esc(iframe)}</textarea>`, 'A fixed height. Only for places that do not allow scripts.')}
+        ${A.field('As a link', `<textarea class="textarea" rows="2" readonly>${esc(link)}</textarea>`, 'Style <code>.wu-cta</code> however you like on the site.')}
+        <div class="row"><button type="button" class="btn btn-ghost btn-sm" data-copy="${esc(url)}">Copy the link</button>
+        <button type="button" class="btn btn-primary btn-sm" data-copy="${esc(script)}">Copy the embed</button>
+        <button type="button" class="btn btn-ghost btn-sm" data-copy="${esc(popup)}">Copy the popup button</button></div>
+      </div>`);
+  };
   A.closeDrawer = () => { A.$$('.drawer-back').forEach((d) => d.remove()); document.body.style.overflow = ''; };
   addEventListener('keydown', (e) => { if (e.key === 'Escape') A.closeDrawer(); });
 

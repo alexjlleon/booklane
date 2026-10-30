@@ -27,9 +27,17 @@
     .filter(Boolean).map((t) => `<span class="pill">${esc(t.name)}</span>`).join(' ') || '<span class="pill partial">Not filed</span>'}</div>
           <div class="small">${esc(et.hosts.map((h) => (d.members.find((m) => m.id === h) || {}).name).filter(Boolean).join(', '))}${et.hosts.length > 1 ? ` · ${et.assignment === 'round_robin' ? 'round robin' : 'first available'}` : ''}</div>
           <div class="small muted" style="margin-top:6px">${et.bookings_30d} booked in 30 days</div></div>
-          <div class="foot"><button class="btn btn-link btn-sm" data-copy="${esc(pageUrl(et.slug))}">Copy link</button>
+          <div class="foot"><div class="row" style="gap:2px"><button class="btn btn-link btn-sm" data-copy="${esc(pageUrl(et.slug))}">Copy link</button><button class="btn btn-link btn-sm" data-embed-et="${et.id}">Embed</button></div>
           <div class="row" style="gap:4px"><a class="btn btn-ghost btn-sm" href="/b/${esc(slug)}/${esc(et.slug)}" target="_blank">Preview</a>${isAdmin() ? `<a class="btn btn-ghost btn-sm" href="#/event-types/${et.id}">Edit</a>` : ''}</div></div></div>`).join('')}</div>`
         : '<div class="panel"><div class="empty-state"><h3>No call types yet</h3><a class="btn btn-primary" href="#/event-types/new">Create one</a></div></div>'}`;
+    },
+    mount(root) {
+      root.addEventListener('click', (e) => {
+        const b = e.target.closest('[data-embed-et]');
+        if (!b) return;
+        const et = (A.cache.et.event_types || []).find((x) => x.id === Number(b.dataset.embedEt));
+        if (et) A.embedDrawer({ name: et.name, url: pageUrl(et.slug), path: et.slug });
+      });
     },
   });
 
