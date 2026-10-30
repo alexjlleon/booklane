@@ -166,10 +166,11 @@
     title: 'People',
     async render() {
       const rows = await api('GET', '/team');
-      return `<div class="topbar"><div><h1>People</h1><div class="sub">Who can take calls or manage this business. Group them into teams on <a href="#/org">Teams &amp; types</a>.</div></div></div>
-        <div class="cols-2"><div class="panel" style="padding-bottom:6px"><div class="table-wrap"><table class="t"><thead><tr><th>Person</th><th>Role</th><th>Teams</th><th>Setup</th><th></th></tr></thead><tbody>
+      return `<div class="topbar"><div><h1>People</h1><div class="sub">Who can take calls or manage this business. Group them into teams on <a href="#/org">Teams &amp; types</a>. Level decides who gets sales calls: 3 or more services go to Senior staff, 2 to Junior staff, 1 to Staff, stepping down a level when nobody is free.</div></div></div>
+        <div class="cols-2"><div class="panel" style="padding-bottom:6px"><div class="table-wrap"><table class="t"><thead><tr><th>Person</th><th>Role</th><th>Level</th><th>Teams</th><th>Setup</th><th></th></tr></thead><tbody>
           ${rows.map((m) => `<tr><td><b>${esc(m.name)}</b>${m.id === A.me.user.id ? ' <span class="small muted">(you)</span>' : ''}${m.status === 'invited' ? ' <span class="pill partial">Invite pending</span>' : ''}<div class="small muted">${esc(m.email)}</div></td>
             <td>${isAdmin() ? `<select class="select btn-sm" data-role="${m.id}" style="width:auto">${['host', 'admin', 'owner'].map((r) => `<option ${m.role === r ? 'selected' : ''}>${r}</option>`).join('')}</select>` : A.pill(m.role)}</td>
+            <td>${isAdmin() ? `<select class="select btn-sm" data-level="${m.id}" style="width:auto" title="Decides who gets sales calls by how many services were picked">${[['senior', 'Senior staff'], ['junior', 'Junior staff'], ['staff', 'Staff']].map(([v, l]) => `<option value="${v}" ${(m.level || 'staff') === v ? 'selected' : ''}>${l}</option>`).join('')}</select>` : `<span class="small">${esc({ senior: 'Senior staff', junior: 'Junior staff' }[m.level] || 'Staff')}</span>`}</td>
             <td class="small">${(m.teams || []).length ? m.teams.map((t) => `<span class="pill">${esc(t.name)}</span>`).join(' ') : '<span class="muted">—</span>'}</td>
             <td class="small">${m.has_hours ? '<span class="pill booked">Hours set</span>' : '<span class="pill partial">No hours</span>'} ${m.calendars.length ? `<span class="pill booked">${m.calendars.length} calendar</span>` : '<span class="pill">No calendar</span>'}</td>
             <td class="num">${isAdmin() ? `<a class="btn btn-ghost btn-sm" href="#/availability?user_id=${m.id}">Hours</a>${m.id !== A.me.user.id ? ` <button class="icon-x" data-remove="${m.id}" title="Remove">×</button>` : ''}` : ''}</td></tr>`).join('')}</tbody></table></div></div>
@@ -190,7 +191,7 @@
           if (!r.invite_url) setTimeout(() => A.render(), 1500);
         } catch (err) { A.toast(err.message, true); A.showErrors(f, err.details); }
       });
-      root.addEventListener('change', async (e) => { const r = e.target.dataset.role; if (r) { await A.guard(() => api('PATCH', `/team/${r}`, { role: e.target.value }), 'Role updated').catch(() => A.render()); } });
+      root.addEventListener('change', async (e) => { const lv = e.target.dataset.level; if (lv) { await A.guard(() => api('PATCH', `/team/${lv}`, { level: e.target.value }), 'Level updated').catch(() => A.render()); return; } const r = e.target.dataset.role; if (r) { await A.guard(() => api('PATCH', `/team/${r}`, { role: e.target.value }), 'Role updated').catch(() => A.render()); } });
       root.addEventListener('click', async (e) => { const r = e.target.closest('[data-remove]'); if (r && confirm('Remove this person from the business?')) { await A.guard(() => api('DELETE', `/team/${r.dataset.remove}`), 'Removed'); A.render(); } });
     },
   });

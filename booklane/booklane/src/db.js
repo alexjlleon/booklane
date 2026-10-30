@@ -290,6 +290,14 @@ for (const sql of [
   'ALTER TABLE calendar_connections ADD COLUMN needs_reconnect INTEGER NOT NULL DEFAULT 0',
   'ALTER TABLE calendar_connections ADD COLUMN alerted_at INTEGER',
   'ALTER TABLE calendar_connections ADD COLUMN checked_at INTEGER',
+  // A person's level for sales routing: 'senior', 'junior' or 'staff' (NULL reads as staff).
+  // Per business, because the same person can be senior at one company and staff at another.
+  'ALTER TABLE memberships ADD COLUMN level TEXT',
+  // A booking type whose pages hand each call to a level by how many services the customer picked:
+  // three or more to senior staff, two to junior staff, one to staff.
+  'ALTER TABLE booking_types ADD COLUMN match_by_services INTEGER NOT NULL DEFAULT 0',
+  // How many services were picked when it was booked, so a reschedule routes the same way.
+  'ALTER TABLE bookings ADD COLUMN services_count INTEGER',
 ]) { try { raw.exec(sql); } catch { /* column already exists */ } }
 
 // Booklane no longer takes payments. Drop what the shop, the paid sessions and the card providers

@@ -58,6 +58,7 @@
         throw new Error('Call type not found');
       }
       const et = (A.editing = JSON.parse(JSON.stringify(src)));
+      const salesType = (d.booking_types || []).find((t) => t.id === et.booking_type_id && t.match_by_services);
       return `<div class="topbar"><div><a href="#/event-types" class="small">← Booking pages</a><h1 style="margin-top:6px">${isNew ? 'New call type' : esc(et.name)}</h1></div>
         <div class="tools">${!isNew ? '<button class="btn btn-danger btn-sm" data-del>Delete</button>' : ''}<button class="btn btn-primary" data-save>Save</button></div></div>
         <div id="et-err"></div>
@@ -82,9 +83,10 @@
             <div class="grid-2">${A.field('Buffer before (min)', A.input('buffer_before', et.buffer_before, 'type="number" min="0" data-type="number"'))}${A.field('Buffer after (min)', A.input('buffer_after', et.buffer_after, 'type="number" min="0" data-type="number"'))}</div>
           </div>
           <div class="panel" id="hosts"><h2>Who takes these calls</h2><p class="desc">Times show when any selected person is free.</p>
-            <div class="stack" style="gap:8px">${d.members.map((m) => { const pr = (et.host_priorities || {})[m.id] || 'medium'; return `<div class="row between" style="gap:10px;align-items:center"><label class="check" style="font-size:14px;flex:1;min-width:0"><input type="checkbox" data-host="${m.id}" ${et.hosts.includes(m.id) ? 'checked' : ''}><span><b>${esc(m.name)}</b> <span class="muted">${esc(m.email)}</span></span></label>
+            <div class="stack" style="gap:8px">${d.members.map((m) => { const pr = (et.host_priorities || {})[m.id] || 'medium'; return `<div class="row between" style="gap:10px;align-items:center"><label class="check" style="font-size:14px;flex:1;min-width:0"><input type="checkbox" data-host="${m.id}" ${et.hosts.includes(m.id) ? 'checked' : ''}><span><b>${esc(m.name)}</b> <span class="muted">${esc(m.email)}</span>${salesType ? ` <span class="pill">${esc({ senior: 'Senior staff', junior: 'Junior staff' }[m.level] || 'Staff')}</span>` : ''}</span></label>
               <select class="select" data-priority="${m.id}" style="width:auto;padding:4px 8px;font-size:13px" aria-label="Priority for ${esc(m.name)}" title="Round robin priority">${['high', 'medium', 'low'].map((v) => `<option value="${v}" ${pr === v ? 'selected' : ''}>${v[0].toUpperCase() + v.slice(1)}</option>`).join('')}</select></div>`; }).join('')}</div>
             <div style="margin-top:14px">${A.field('When more than one person is free', A.select('assignment', et.assignment, { round_robin: 'Round robin (spread calls evenly)', single: 'Always first person listed' }))}</div>
+            ${salesType ? `<p class="help" style="margin:6px 0 0"><b>${esc(salesType.name)}</b> matches people by services picked: 3 or more go to Senior staff, 2 to Junior staff, 1 to Staff, stepping down a level when nobody is free. Priority below then decides within a level. Change levels on <a href="#/team">People</a>.</p>` : ''}
             <p class="help" data-priority-help style="margin:6px 0 0">Priority: when several people are free at a time, the call goes to the highest priority among them, spread evenly within that level. Lower priorities get calls when nobody above them is free.</p>
           </div>
           <div class="panel" id="filing"><h2>Filing</h2><p class="desc">The type is the heading this page sits under on your booking page. The team is shown on its card.</p>

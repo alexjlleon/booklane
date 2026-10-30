@@ -23,7 +23,7 @@ const memberIds = (teamId) => db.all('SELECT user_id FROM team_members WHERE tea
 
 const listTypes = (businessId, { all = false } = {}) =>
   db.all(`SELECT * FROM booking_types WHERE business_id = ? ${all ? '' : 'AND active = 1'} ORDER BY sort, id`, businessId)
-    .map((t) => ({ ...t, active: !!t.active }));
+    .map((t) => ({ ...t, active: !!t.active, match_by_services: !!t.match_by_services }));
 
 // Teams a person is on, for showing on their row in the people list.
 const teamsOf = (businessId, userId) =>
@@ -75,13 +75,14 @@ function saveType(businessId, body, existing) {
   const f = {
     name, description: clampStr(body.description ?? existing?.description, 500),
     active: body.active === undefined ? (existing ? existing.active : 1) : body.active ? 1 : 0,
+    match_by_services: body.match_by_services === undefined ? (existing ? existing.match_by_services || 0 : 0) : body.match_by_services ? 1 : 0,
   };
   const keys = Object.keys(f);
   let id = existing?.id;
   if (id) db.run(`UPDATE booking_types SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ? AND business_id = ?`, ...keys.map((k) => f[k]), id, businessId);
   else id = db.run(`INSERT INTO booking_types (business_id, sort, ${keys.join(', ')}) VALUES (?,?,${keys.map(() => '?').join(',')})`, businessId, nextSort('booking_types', businessId), ...keys.map((k) => f[k])).lastId;
   const row = db.get('SELECT * FROM booking_types WHERE id = ?', id);
-  return { ...row, active: !!row.active };
+  return { ...row, active: !!row.active, match_by_services: !!row.match_by_services };
 }
 
 /**

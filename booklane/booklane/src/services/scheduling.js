@@ -102,9 +102,59 @@ async function availableHostsAt(et, startMs, opts = {}) {
   return [];
 }
 
-function pickHost(et, hostIds) {
+const LEVELS = ['senior', 'junior', 'staff'];
+const normLevel = (v) => (LEVELS.includes(v) ? v : 'staff');
+
+/**
+ * How many services the customer picked, read from the first "Pick several" question in the steps
+ * they filled in. Choices that send them to another calendar ("I'm a client") are not services and
+ * do not count, and nor does anything that is not one of the question's own choices. null when
+ * there is no pick-several question to count from.
+ */
+function servicesCount(steps, answers = {}) {
+  for (const step of steps || []) {
+    for (const q of step.questions || []) {
+      if (q.type !== 'multi') continue;
+      const routes = q.routes || {};
+      const valid = new Map((q.options || []).filter((o) => !routes[o]).map((o) => [String(o).trim().toLowerCase(), o]));
+      const picked = new Set([].concat(answers[q.id] ?? []).map((x) => String(x).trim().toLowerCase()).filter((x) => valid.has(x)));
+      return picked.size;
+    }
+  }
+  return null;
+}
+
+/**
+ * Which level to try first, then where to go when nobody there is free. Each level steps down first
+ * (senior, then junior, then staff). Only when nobody at or below the starting level is free does
+ * it step up, so a one-service call still gets booked rather than turned away.
+ */
+function levelOrder(count) {
+  if (count >= 3) return ['senior', 'junior', 'staff'];
+  if (count === 2) return ['junior', 'staff', 'senior'];
+  return ['staff', 'junior', 'senior'];
+}
+
+/** Whether this page's booking type matches people to the number of services picked. */
+function matchesByServices(et) {
+  if (!et.booking_type_id) return false;
+  const t = db.get('SELECT match_by_services FROM booking_types WHERE id = ? AND business_id = ?', et.booking_type_id, et.business_id);
+  return !!(t && t.match_by_services);
+}
+
+function pickHost(et, hostIds, opts = {}) {
   if (!hostIds.length) return null;
   if (et.assignment !== 'round_robin' || hostIds.length === 1) return hostIds[0];
+  // Sales pages: narrow to the right level before anything else. Priority and the even spread
+  // below then decide between the people at that level.
+  if (opts.servicesCount != null && matchesByServices(et)) {
+    const lv = new Map(db.all(`SELECT user_id, level FROM memberships WHERE business_id = ? AND user_id IN (${hostIds.map(() => '?').join(',')})`, et.business_id, ...hostIds).map((r) => [r.user_id, normLevel(r.level)]));
+    for (const level of levelOrder(opts.servicesCount)) {
+      const at = hostIds.filter((id) => (lv.get(id) || 'staff') === level);
+      if (at.length) { hostIds = at; break; }
+    }
+    if (hostIds.length === 1) return hostIds[0];
+  }
   // Priority first: of the people free at this time, only the highest-rated are in the running.
   // A low-priority host still gets calls whenever nobody above them is free.
   const prio = new Map(db.all(`SELECT user_id, priority FROM event_type_hosts WHERE event_type_id = ? AND user_id IN (${hostIds.map(() => '?').join(',')})`, et.id, ...hostIds).map((r) => [r.user_id, r.priority]));
@@ -120,4 +170,4 @@ function pickHost(et, hostIds) {
   return stats[0].id;
 }
 
-module.exports = { computeSlots, availableHostsAt, pickHost, hostsFor, windowsFor };
+module.exports = { computeSlots, availableHostsAt, pickHost, hostsFor, windowsFor, servicesCount, levelOrder, matchesByServices, LEVELS };

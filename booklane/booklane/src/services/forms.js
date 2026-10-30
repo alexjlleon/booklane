@@ -254,6 +254,7 @@ async function submit(business, form, body = {}) {
       contact,
       answers: Object.assign({ form: f.name }, answers),
       lead,
+      countSteps: f.steps,
     });
     B.logActivity(business.id, lead.id, 'form', `Booked through ${f.name}`, { form_id: f.id, booking_id: booking.id });
     return { kind: 'booked', redirect: `/booking/${booking.token}` };

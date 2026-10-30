@@ -212,6 +212,77 @@ test('round robin priority: the highest-rated free host gets the call', async ()
   await req('PATCH', `/api/admin/event-types/${etRow.id}`, { host_priorities: { [owner]: 'medium', [riley]: 'medium' } }, { cookie: ownerCookie });
 });
 
+test('sales calls go to a level by how many services were picked', async () => {
+  const S = require('../src/services/scheduling');
+  const me = await req('GET', '/api/admin/auth/me', null, { cookie: ownerCookie });
+  const owner = me.data.user.id;
+  const riley = db.get("SELECT id FROM users WHERE email = 'riley@test.dev'").id;
+  const etRow = db.get("SELECT * FROM event_types WHERE slug = 'discovery-call'");
+
+  // Counting: only the first pick-several question, only its own choices, and a choice that
+  // routes to another calendar is not a service.
+  const steps = [{ type: 'questions', questions: [
+    { id: 'venue', type: 'text' },
+    { id: 'services', type: 'multi', options: ['Photography', 'DJ', 'Video', 'I am a client'], routes: { 'I am a client': 7 } },
+    { id: 'extras', type: 'multi', options: ['Lighting'] }] }];
+  assert.equal(S.servicesCount(steps, { services: ['Photography', 'dj ', 'Video', 'I am a client', 'Made up'] }), 3);
+  assert.equal(S.servicesCount(steps, { services: 'DJ' }), 1);
+  assert.equal(S.servicesCount(steps, {}), 0);
+  assert.equal(S.servicesCount([{ type: 'questions', questions: [{ id: 'x', type: 'choice', options: ['A'] }] }], { x: 'A' }), null);
+
+  // Levels are set per person on the People screen; staff is the default.
+  let r = await req('GET', '/api/admin/team', null, { cookie: ownerCookie });
+  assert.ok(r.data.every((m) => m.level === 'staff'));
+  r = await req('PATCH', `/api/admin/team/${owner}`, { level: 'senior' }, { cookie: ownerCookie });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.equal((await req('PATCH', `/api/admin/team/${riley}`, { level: 'boss' }, { cookie: ownerCookie })).status, 422);
+  r = await req('GET', '/api/admin/team', null, { cookie: ownerCookie });
+  assert.equal(r.data.find((m) => m.id === owner).level, 'senior');
+  assert.equal(r.data.find((m) => m.id === owner).role, 'owner', 'a level change leaves the role alone');
+
+  // Nothing changes until the page's booking type is switched on.
+  await req('PATCH', `/api/admin/event-types/${etRow.id}`, { hosts: [owner, riley] }, { cookie: ownerCookie });
+  let et = db.get('SELECT * FROM event_types WHERE id = ?', etRow.id);
+  const before = S.pickHost(et, [owner, riley], { servicesCount: 3 });
+  assert.ok([owner, riley].includes(before));
+  const type = await req('POST', '/api/admin/booking-types', { name: 'Sales Test Calls', match_by_services: true }, { cookie: ownerCookie });
+  assert.equal(type.status, 200, JSON.stringify(type.data));
+  assert.equal(type.data.match_by_services, true);
+  await req('PATCH', `/api/admin/event-types/${etRow.id}`, { booking_type_id: type.data.id }, { cookie: ownerCookie });
+  et = db.get('SELECT * FROM event_types WHERE id = ?', etRow.id);
+
+  assert.equal(S.pickHost(et, [owner, riley], { servicesCount: 3 }), owner, '3+ goes to senior');
+  assert.equal(S.pickHost(et, [owner, riley], { servicesCount: 1 }), riley, '1 goes to staff');
+  assert.equal(S.pickHost(et, [owner, riley], { servicesCount: 2 }), riley, '2 with no junior steps down to staff');
+  assert.equal(S.pickHost(et, [riley], { servicesCount: 3 }), riley, 'senior busy: steps down');
+  assert.equal(S.pickHost(et, [owner], { servicesCount: 1 }), owner, 'nobody below free: steps up rather than losing the call');
+  // Within a level, priority still decides; and a page with no pick-several question is left alone.
+  assert.ok([owner, riley].includes(S.pickHost(et, [owner, riley], {})));
+
+  // End to end: a booking counts the services from the page's own question and remembers it.
+  const keep = db.json(etRow.steps, []);
+  const withServices = [{ type: 'questions', title: 'Services', questions: [{ id: 'services', label: 'Services', type: 'multi', options: ['Photography', 'DJ', 'Video'] }] }].concat(keep);
+  r = await req('PATCH', `/api/admin/event-types/${etRow.id}`, { steps: withServices }, { cookie: ownerCookie });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  await req('PUT', '/api/admin/availability', { user_id: riley, rules: [1, 2, 3, 4, 5].map((w) => ({ weekday: w, start_min: 540, end_min: 1020 })), overrides: [] }, { cookie: ownerCookie });
+  const day = nextWeekday(18);
+  const slots = (await req('GET', `/api/public/b/${bizSlug}/e/discovery-call/slots?from=${day}&to=${day}&tz=America/Chicago`)).data.days[day];
+  const book = (start, services, email) => req('POST', `/api/public/b/${bizSlug}/e/discovery-call/book`, { start, timezone: 'America/Chicago', answers: { services }, contact: { first_name: 'S', last_name: 'C', email, phone: '5555550100' } });
+  const big = await book(slots[0], ['Photography', 'DJ', 'Video'], 's1@x.dev');
+  assert.equal(big.status, 200, JSON.stringify(big.data));
+  const bigRow = db.get('SELECT host_user_id, services_count FROM bookings WHERE token = ?', big.data.token);
+  assert.deepEqual([bigRow.host_user_id, bigRow.services_count], [owner, 3]);
+  const small = await book(slots[1], ['DJ'], 's2@x.dev');
+  assert.equal(small.status, 200, JSON.stringify(small.data));
+  assert.equal(db.get('SELECT host_user_id FROM bookings WHERE token = ?', small.data.token).host_user_id, riley);
+
+  // Put things back for the tests that follow.
+  await req('PATCH', `/api/admin/event-types/${etRow.id}`, { steps: keep, booking_type_id: null }, { cookie: ownerCookie });
+  await req('PATCH', `/api/admin/team/${owner}`, { level: 'staff' }, { cookie: ownerCookie });
+  await req('PUT', '/api/admin/availability', { user_id: riley, rules: [], overrides: [] }, { cookie: ownerCookie });
+  await req('DELETE', `/api/admin/booking-types/${type.data.id}`, null, { cookie: ownerCookie });
+});
+
 test('quote pricing is computed server side; contract request emails, pushes to BoothBook and webhook', async () => {
   const svc = await req('POST', '/api/admin/services', {
     name: 'DJ', pricing_type: 'flat', option_groups: [{ name: 'Package', mode: 'base', required: true, choices: [{ name: 'Silver', price: 1000, default: true }, { name: 'Gold', price: 1500 }] }],

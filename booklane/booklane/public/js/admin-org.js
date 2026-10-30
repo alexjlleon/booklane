@@ -27,8 +27,10 @@
         <button type="button" class="btn btn-ghost btn-sm" data-cancel-team="${t.id}">Cancel</button></div></form>` : ''}
   </div>`;
 
+  const salesCheck = (on) => `<label class="check" style="margin-top:6px"><input type="checkbox" name="match_by_services" ${on ? 'checked' : ''}><span>Sales calls: match the person to how many services they pick</span></label>
+      <div class="help" style="margin-left:26px">On round robin pages of this type, 3 or more services go to Senior staff, 2 to Junior staff and 1 to Staff (set levels on <a href="#/team">People</a>). If nobody at that level is free it steps down a level, and only steps up when nobody below is free either. Counted from the first "Pick several" question; choices that send people to another calendar don't count.</div>`;
   const typeRow = (t, editable) => `<div class="panel" data-type="${t.id}" style="padding:14px">
-    <div class="panel-head" style="margin-bottom:0"><div><b>${esc(t.name)}</b>${t.active ? '' : ' <span class="pill">Hidden</span>'}
+    <div class="panel-head" style="margin-bottom:0"><div><b>${esc(t.name)}</b>${t.active ? '' : ' <span class="pill">Hidden</span>'}${t.match_by_services ? ' <span class="pill booked">Matches by services</span>' : ''}
       ${t.description ? `<div class="small muted">${esc(t.description)}</div>` : ''}</div>
       ${editable ? `<div><button class="btn btn-ghost btn-sm" data-edit-type="${t.id}">Edit</button>
         <button class="icon-x" data-del-type="${t.id}" title="Delete">&times;</button></div>` : ''}</div>
@@ -36,6 +38,7 @@
       ${A.field('Type name', `<input class="input" name="name" value="${esc(t.name)}">`)}
       ${A.field('Description', `<input class="input" name="description" value="${esc(t.description || '')}" placeholder="Optional. Shown under the heading on your booking page.">`)}
       <label class="check"><input type="checkbox" name="active" ${t.active ? 'checked' : ''}><span>Show this heading on the booking page</span></label>
+      ${salesCheck(t.match_by_services)}
       <div style="margin-top:10px"><button class="btn btn-primary btn-sm">Save</button>
         <button type="button" class="btn btn-ghost btn-sm" data-cancel-type="${t.id}">Cancel</button></div></form>` : ''}
   </div>`;
@@ -66,7 +69,8 @@
             ${editable ? `<form class="panel" id="new-type" style="margin-top:14px"><h2>Add a booking type</h2>
               ${A.field('Type name', '<input class="input" name="name" placeholder="Imaging Sessions">')}
               ${A.field('Description', '<input class="input" name="description" placeholder="Optional">')}
-              <button class="btn btn-primary">Add type</button></form>` : ''}
+              ${salesCheck(false)}
+              <button class="btn btn-primary" style="margin-top:10px">Add type</button></form>` : ''}
           </div>
         </div>
         <p class="muted small" style="margin-top:18px">Set a page's team and type on <a href="#/event-types">Booking pages</a>.</p>`;
@@ -79,6 +83,7 @@
         if (form.querySelector('[name="color"]')) body.color = fd.get('color');
         if (form.querySelector('[name="members"]')) body.members = fd.getAll('members').map(Number);
         if (form.querySelector('[name="active"]')) body.active = !!fd.get('active');
+        if (form.querySelector('[name="match_by_services"]')) body.match_by_services = !!fd.get('match_by_services');
         return body;
       };
       const submit = (form, method, url, msg) => form.addEventListener('submit', async (e) => {

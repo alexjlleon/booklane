@@ -514,7 +514,7 @@ module.exports = function adminRoutes(app) {
   // ---------- Event types ----------
   // Real people only. Market and designer calendars are login-less rows and belong on the
   // Sessions screen, not in the team list or the host pickers.
-  const members = (businessId) => db.all("SELECT u.id, u.name, u.email, u.timezone, m.role FROM users u JOIN memberships m ON m.user_id = u.id WHERE m.business_id = ? AND m.status = 'active' AND COALESCE(u.is_resource,0) = 0 ORDER BY u.name", businessId);
+  const members = (businessId) => db.all("SELECT u.id, u.name, u.email, u.timezone, m.role, COALESCE(m.level, 'staff') level FROM users u JOIN memberships m ON m.user_id = u.id WHERE m.business_id = ? AND m.status = 'active' AND COALESCE(u.is_resource,0) = 0 ORDER BY u.name", businessId);
   const PRIORITY_VALUE = { high: 3, medium: 2, low: 1 };
   const PRIORITY_NAME = { 3: 'high', 2: 'medium', 1: 'low' };
   function etOut(et) {
@@ -1319,7 +1319,7 @@ module.exports = function adminRoutes(app) {
   // ---------- Team ----------
   app.get('/api/admin/team', (req) => {
     requireRole('host')(req);
-    return db.all('SELECT u.id, u.name, u.email, u.timezone, m.role, m.status FROM users u JOIN memberships m ON m.user_id = u.id WHERE m.business_id = ? AND COALESCE(u.is_resource,0) = 0 ORDER BY m.status, u.name', bid(req)).map((m) => ({ ...m, has_hours: !!db.get('SELECT 1 FROM availability_rules WHERE user_id = ?', m.id), calendars: db.all('SELECT provider, account_email FROM calendar_connections WHERE user_id = ?', m.id), teams: ORG.teamsOf(bid(req), m.id) }));
+    return db.all("SELECT u.id, u.name, u.email, u.timezone, m.role, m.status, COALESCE(m.level, 'staff') level FROM users u JOIN memberships m ON m.user_id = u.id WHERE m.business_id = ? AND COALESCE(u.is_resource,0) = 0 ORDER BY m.status, u.name", bid(req)).map((m) => ({ ...m, has_hours: !!db.get('SELECT 1 FROM availability_rules WHERE user_id = ?', m.id), calendars: db.all('SELECT provider, account_email FROM calendar_connections WHERE user_id = ?', m.id), teams: ORG.teamsOf(bid(req), m.id) }));
   });
   app.post('/api/admin/team', async (req) => {
     requireRole('admin')(req);
@@ -1371,6 +1371,14 @@ module.exports = function adminRoutes(app) {
   });
   app.patch('/api/admin/team/:userId', (req) => {
     requireRole('admin')(req);
+    // A level change on its own, from the People screen. It decides who gets which sales calls,
+    // nothing about what they can see or do, so any admin can set it for anyone, owners included.
+    if (req.body && req.body.level !== undefined && req.body.role === undefined) {
+      if (!S.LEVELS.includes(req.body.level)) throw new HttpError(422, 'Unknown level');
+      const n = db.run('UPDATE memberships SET level = ? WHERE user_id = ? AND business_id = ?', req.body.level, int(req.params.userId), bid(req)).changes;
+      if (!n) throw new HttpError(404, 'Not found');
+      return { ok: true };
+    }
     const role = req.body?.role;
     if (!['host', 'admin', 'owner'].includes(role)) throw new HttpError(422, 'Unknown role');
     if (role === 'owner' && req.membership.role !== 'owner') throw new HttpError(403, 'Only owners can make owners');

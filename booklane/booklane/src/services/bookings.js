@@ -106,7 +106,7 @@ function assertFree(et, hostId, startMs, endMs, excludeId = 0) {
   }
 }
 
-async function createBooking({ business, et, startIso, tz, contact = {}, answers = {}, lead, quote, restrictHostIds, placeId, contactEt }) {
+async function createBooking({ business, et, startIso, tz, contact = {}, answers = {}, lead, quote, restrictHostIds, placeId, contactEt, countSteps }) {
   const startMs = Date.parse(startIso);
   if (!Number.isFinite(startMs)) throw new HttpError(400, 'Pick a valid time');
   if (!T.isValidTz(tz)) tz = business.timezone;
@@ -115,7 +115,10 @@ async function createBooking({ business, et, startIso, tz, contact = {}, answers
   validateContact(contactEt || et, contact, business);
   const hosts = await S.availableHostsAt(et, startMs, { restrictHostIds });
   if (!hosts.length) throw new HttpError(409, 'Sorry, that time was just taken. Please pick another time.');
-  const hostId = S.pickHost(et, hosts);
+  // Counted from the questions the person actually answered: this page's, the page that routed
+  // them here, or the custom form they came through.
+  const servicesCount = S.servicesCount(countSteps || (contactEt || et).steps, answers);
+  const hostId = S.pickHost(et, hosts, { servicesCount });
   const endMs = startMs + et.duration_min * 60000;
   const name = [contact.first_name, contact.last_name].map((x) => String(x || '').trim()).filter(Boolean).join(' ');
   const cleanAnswers = L.sanitizeAnswers(answers);
@@ -126,9 +129,9 @@ async function createBooking({ business, et, startIso, tz, contact = {}, answers
 
   const bookingId = db.tx(() => {
     assertFree(et, hostId, startMs, endMs);
-    return db.run(`INSERT INTO bookings (business_id, event_type_id, host_user_id, lead_id, quote_id, token, start_utc, end_utc, invitee_tz, name, email, phone, location, place_id, answers)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, business.id, et.id, hostId, lead?.id, quote?.id, t, new Date(startMs).toISOString(), new Date(endMs).toISOString(), tz,
-    clampStr(name, 160), String(contact.email).trim().toLowerCase(), clampStr(contact.phone, 40), PLACES.placeText(place, contact), place.id, JSON.stringify(cleanAnswers)).lastId;
+    return db.run(`INSERT INTO bookings (business_id, event_type_id, host_user_id, lead_id, quote_id, token, start_utc, end_utc, invitee_tz, name, email, phone, location, place_id, answers, services_count)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, business.id, et.id, hostId, lead?.id, quote?.id, t, new Date(startMs).toISOString(), new Date(endMs).toISOString(), tz,
+    clampStr(name, 160), String(contact.email).trim().toLowerCase(), clampStr(contact.phone, 40), PLACES.placeText(place, contact), place.id, JSON.stringify(cleanAnswers), servicesCount).lastId;
   });
 
   const host = db.get('SELECT name FROM users WHERE id = ?', hostId);
@@ -205,7 +208,7 @@ async function rescheduleBooking(booking, startIso, tz) {
   if (!Number.isFinite(startMs)) throw new HttpError(400, 'Pick a valid time');
   const hosts = await S.availableHostsAt(et, startMs, { excludeBookingId: booking.id });
   if (!hosts.length) throw new HttpError(409, 'Sorry, that time is not available.');
-  const hostId = hosts.includes(booking.host_user_id) ? booking.host_user_id : S.pickHost(et, hosts);
+  const hostId = hosts.includes(booking.host_user_id) ? booking.host_user_id : S.pickHost(et, hosts, { servicesCount: booking.services_count });
   const endMs = startMs + et.duration_min * 60000;
   const oldExternal = db.json(booking.external_events, []);
   db.tx(() => {
