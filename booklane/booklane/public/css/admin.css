@@ -263,3 +263,14 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
 .cal-alert span { display: block; font-size: 13px; color: #9a3a3a; }
 .cal-alert .cal-alert-list { margin-top: 2px; }
 .cal-alert .btn { flex: none; }
+
+/* Automations: team chips, filters and sort */
+.auto-tools { margin: 4px 0 14px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.chip { border: 1px solid var(--line); background: #fff; color: inherit; font: inherit; font-size: 13px; font-weight: 600; padding: 6px 14px; border-radius: 99px; cursor: pointer; }
+.chip:hover { border-color: var(--brand); }
+.chip.on { background: var(--brand); border-color: var(--brand); color: #fff; }
+.auto-filters { display: flex; flex-wrap: wrap; gap: 8px; }
+.auto-filters .input, .auto-filters .select { width: auto; flex: 0 1 auto; min-width: 0; padding-top: 8px; padding-bottom: 8px; font-size: 14px; }
+.auto-filters input[type="search"] { flex: 1 1 220px; }
+@media (max-width: 640px) { .auto-filters .select, .auto-filters input[type="search"] { flex: 1 1 100%; } }

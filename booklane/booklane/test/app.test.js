@@ -300,6 +300,32 @@ test('a booking page can hide its progress bar, and other page settings survive'
   db.run('UPDATE event_types SET settings = ? WHERE id = ?', et.settings, et.id);
 });
 
+test('automations carry a team for filtering, and relabelling one keeps its queue', async () => {
+  const team = await req('POST', '/api/admin/teams', { name: 'Sales Auto Test' }, { cookie: ownerCookie });
+  assert.equal(team.status, 200, JSON.stringify(team.data));
+  const made = await req('POST', '/api/admin/automations', { name: 'Team test', trigger: 'before', channel: 'email', offset_min: 60, team_id: team.data.id }, { cookie: ownerCookie });
+  assert.equal(made.status, 200, JSON.stringify(made.data));
+  assert.equal(made.data.team_id, team.data.id);
+  const list = await req('GET', '/api/admin/automations', null, { cookie: ownerCookie });
+  assert.ok(list.data.teams.some((t) => t.id === team.data.id));
+  assert.ok(list.data.event_types.every((e) => 'team_id' in e));
+  // A queued message survives a team change, but not a change to what is sent.
+  const bk = db.get('SELECT id, business_id FROM bookings LIMIT 1');
+  const q = db.run("INSERT INTO scheduled_messages (business_id, automation_id, booking_id, channel, to_addr, status, send_after) VALUES (?,?,?,'email','x@x.dev','queued',?)", bk.business_id, made.data.id, bk.id, Date.now() + 86400000).lastId;
+  let r = await req('PATCH', `/api/admin/automations/${made.data.id}`, { name: 'Team test', team_id: null }, { cookie: ownerCookie });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.equal(r.data.team_id, null);
+  assert.equal(db.get('SELECT status FROM scheduled_messages WHERE id = ?', q).status, 'queued');
+  r = await req('PATCH', `/api/admin/automations/${made.data.id}`, { name: 'Team test', offset_min: 120 }, { cookie: ownerCookie });
+  assert.equal(db.get('SELECT status FROM scheduled_messages WHERE id = ?', q).status, 'cancelled');
+  // Clone keeps the team.
+  await req('PATCH', `/api/admin/automations/${made.data.id}`, { name: 'Team test', team_id: team.data.id }, { cookie: ownerCookie });
+  const copy = await req('POST', `/api/admin/automations/${made.data.id}/clone`, null, { cookie: ownerCookie });
+  assert.equal(copy.data.team_id, team.data.id);
+  for (const id of [made.data.id, copy.data.id]) await req('DELETE', `/api/admin/automations/${id}`, null, { cookie: ownerCookie });
+  await req('DELETE', `/api/admin/teams/${team.data.id}`, null, { cookie: ownerCookie });
+});
+
 test('quote pricing is computed server side; contract request emails, pushes to BoothBook and webhook', async () => {
   const svc = await req('POST', '/api/admin/services', {
     name: 'DJ', pricing_type: 'flat', option_groups: [{ name: 'Package', mode: 'base', required: true, choices: [{ name: 'Silver', price: 1000, default: true }, { name: 'Gold', price: 1500 }] }],

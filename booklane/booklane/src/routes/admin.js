@@ -1112,6 +1112,7 @@ module.exports = function adminRoutes(app) {
       body_html: clampStr(body.body_html || '', 20000),
       sms_body: clampStr(body.sms_body || '', 1600),
       active: body.active !== undefined ? (bool(body.active) ? 1 : 0) : (existing?.active ?? 0),
+      team_id: body.team_id === undefined ? (existing?.team_id ?? null) : ORG.teamIdFor(bid(req), body.team_id),
     };
     if (out.active) {
       // Refuse to switch on something that would send nothing, or nothing sendable.
@@ -1130,7 +1131,8 @@ module.exports = function adminRoutes(app) {
       summary: MSG.summary(businessId),
       triggers: MSG.TRIGGERS,
       variables: MSG.VARIABLES,
-      event_types: db.all('SELECT id, name, kind FROM event_types WHERE business_id = ? ORDER BY sort, id', businessId),
+      event_types: db.all('SELECT id, name, kind, team_id FROM event_types WHERE business_id = ? ORDER BY sort, id', businessId),
+      teams: ORG.listTeams(businessId).map((t) => ({ id: t.id, name: t.name, color: t.color })),
       calendars: SESS.listCalendars(businessId, { includeInactive: true }).map((c) => ({ id: c.id, name: c.name, kind: c.kind })),
       services: db.all('SELECT name FROM services WHERE business_id = ? AND active = 1 ORDER BY sort, id', businessId).map((r) => r.name),
       sms: {
@@ -1146,10 +1148,10 @@ module.exports = function adminRoutes(app) {
     const f = automationIn(req, null);
     const sort = (db.get('SELECT MAX(sort) m FROM message_automations WHERE business_id = ?', bid(req)) || {}).m || 0;
     const { lastId } = db.run(`INSERT INTO message_automations (business_id, name, channel, kind, trigger, offset_min,
-        event_type_ids, calendar_ids, service_match, match_mode, skip_if_rebooked, subject, body_html, sms_body, active, sort)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        event_type_ids, calendar_ids, service_match, match_mode, skip_if_rebooked, subject, body_html, sms_body, active, sort, team_id)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     bid(req), f.name, f.channel, f.kind, f.trigger, f.offset_min, f.event_type_ids, f.calendar_ids, f.service_match,
-    f.match_mode, f.skip_if_rebooked, f.subject, f.body_html, f.sms_body, f.active, sort + 1);
+    f.match_mode, f.skip_if_rebooked, f.subject, f.body_html, f.sms_body, f.active, sort + 1, f.team_id);
     return MSG.listAutomations(bid(req)).find((a) => a.id === lastId);
   });
 
@@ -1164,12 +1166,15 @@ module.exports = function adminRoutes(app) {
     const existing = getAutomation(req);
     const f = automationIn(req, existing);
     db.run(`UPDATE message_automations SET name=?, channel=?, kind=?, trigger=?, offset_min=?, event_type_ids=?, calendar_ids=?,
-        service_match=?, match_mode=?, skip_if_rebooked=?, subject=?, body_html=?, sms_body=?, active=?, updated_at=datetime('now')
+        service_match=?, match_mode=?, skip_if_rebooked=?, subject=?, body_html=?, sms_body=?, active=?, team_id=?, updated_at=datetime('now')
       WHERE id = ? AND business_id = ?`,
     f.name, f.channel, f.kind, f.trigger, f.offset_min, f.event_type_ids, f.calendar_ids, f.service_match,
-    f.match_mode, f.skip_if_rebooked, f.subject, f.body_html, f.sms_body, f.active, existing.id, bid(req));
-    // Timing or conditions may have changed, so anything not yet sent is stale.
-    const dropped = db.run("UPDATE scheduled_messages SET status = 'cancelled', skip_reason = 'the automation was edited' WHERE automation_id = ? AND status = 'queued'", existing.id).changes;
+    f.match_mode, f.skip_if_rebooked, f.subject, f.body_html, f.sms_body, f.active, f.team_id, existing.id, bid(req));
+    // Timing, conditions or wording may have changed, so anything not yet sent is stale. A change
+    // to the team label (or the name) alone sends nothing differently, so the queue is left alone.
+    const sends = ['channel', 'kind', 'trigger', 'offset_min', 'event_type_ids', 'calendar_ids', 'service_match', 'match_mode', 'skip_if_rebooked', 'subject', 'body_html', 'sms_body', 'active'];
+    const changed = sends.some((k) => String(f[k] ?? '') !== String(existing[k] ?? ''));
+    const dropped = changed ? db.run("UPDATE scheduled_messages SET status = 'cancelled', skip_reason = 'the automation was edited' WHERE automation_id = ? AND status = 'queued'", existing.id).changes : 0;
     const out = MSG.listAutomations(bid(req)).find((a) => a.id === existing.id);
     return { ...out, requeued_note: dropped ? `${dropped} queued message${dropped === 1 ? '' : 's'} dropped; new bookings use the updated version` : null };
   });
@@ -1181,10 +1186,10 @@ module.exports = function adminRoutes(app) {
     const a = getAutomation(req);
     const sort = (db.get('SELECT MAX(sort) m FROM message_automations WHERE business_id = ?', bid(req)) || {}).m || 0;
     const { lastId } = db.run(`INSERT INTO message_automations (business_id, name, channel, kind, trigger, offset_min,
-        event_type_ids, calendar_ids, service_match, match_mode, skip_if_rebooked, subject, body_html, sms_body, active, sort)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)`,
+        event_type_ids, calendar_ids, service_match, match_mode, skip_if_rebooked, subject, body_html, sms_body, active, sort, team_id)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)`,
     a.business_id, `${a.name} (copy)`.slice(0, 200), a.channel, a.kind, a.trigger, a.offset_min, a.event_type_ids, a.calendar_ids,
-    a.service_match, a.match_mode, a.skip_if_rebooked, a.subject, a.body_html, a.sms_body, sort + 1);
+    a.service_match, a.match_mode, a.skip_if_rebooked, a.subject, a.body_html, a.sms_body, sort + 1, a.team_id);
     return MSG.listAutomations(bid(req)).find((x) => x.id === lastId);
   });
 

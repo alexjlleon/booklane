@@ -298,6 +298,9 @@ for (const sql of [
   'ALTER TABLE booking_types ADD COLUMN match_by_services INTEGER NOT NULL DEFAULT 0',
   // How many services were picked when it was booked, so a reschedule routes the same way.
   'ALTER TABLE bookings ADD COLUMN services_count INTEGER',
+  // Which team an automation belongs to, for filtering the list. NULL means "work it out from the
+  // booking pages it applies to". A label only: it never changes who receives the message.
+  'ALTER TABLE message_automations ADD COLUMN team_id INTEGER',
 ]) { try { raw.exec(sql); } catch { /* column already exists */ } }
 
 // Booklane no longer takes payments. Drop what the shop, the paid sessions and the card providers

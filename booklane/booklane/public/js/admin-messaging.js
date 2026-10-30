@@ -43,23 +43,24 @@
 
       <div class="panel">
         <div class="panel-head"><div><h2>Your automations</h2><p class="desc" style="margin:0">Texts are held until ${s.quiet_hours.to}am in the customer's own timezone.</p></div></div>
-        ${d.automations.length ? `<div class="table-wrap"><table class="t"><thead><tr><th>Name</th><th>Goes out</th><th>Channel</th><th>Applies to</th><th class="num">Sent</th><th></th></tr></thead><tbody>
-          ${d.automations.map((a) => `<tr${a.active ? '' : ' style="opacity:.55"'}>
-            <td><b>${esc(a.name)}</b>${a.active ? '' : ' <span class="pill lost">Off</span>'}${a.kind === 'marketing' ? ' <span class="pill quoted">Promotional</span>' : ''}
-              ${a.subject ? `<div class="small muted">${esc(a.subject)}</div>` : ''}</td>
-            <td class="small">${esc(a.timing)}</td>
-            <td class="small">${esc(CHANNELS[a.channel] || a.channel)}</td>
-            <td class="small">${describeScope(a, d)}</td>
-            <td class="num">${a.sent || ''}${a.failed ? ` <span style="color:#c0392b">(${a.failed} failed)</span>` : ''}</td>
-            <td class="num" style="white-space:nowrap"><button type="button" class="btn btn-ghost btn-sm" data-clone="${a.id}" title="Make a switched-off copy to start a similar message">Clone</button> <button type="button" class="btn btn-ghost btn-sm" data-edit="${a.id}">Edit</button></td>
-          </tr>`).join('')}
-        </tbody></table></div>` : `<div class="empty-state"><h3>Nothing scheduled yet</h3>
+        ${d.automations.length ? `${toolbar(d)}<div id="auto-list">${listHtml(d)}</div>` : `<div class="empty-state"><h3>Nothing scheduled yet</h3>
           <p>Add a reminder before the appointment, a thank-you after it, or a nudge for consults that did not book. You write the words; the timing and conditions are set here.</p>
           <button type="button" class="btn btn-primary" data-new>Write your first one</button></div>`}
       </div>`;
     },
     mount(root) {
+      // Filters and sorting only redraw the list, so typing in the search box keeps its focus.
+      const redraw = () => { const box = $('#auto-list', root); if (box) box.innerHTML = listHtml(A.cache.auto); saveView(); };
+      root.addEventListener('input', (e) => { const k = e.target.dataset.view; if (k) { view[k] = e.target.value; redraw(); } });
+      root.addEventListener('change', (e) => { const k = e.target.dataset.view; if (k) { view[k] = e.target.value; redraw(); } });
       root.addEventListener('click', (e) => {
+        const chip = e.target.closest('[data-team-chip]');
+        if (chip) {
+          view.team = chip.dataset.teamChip;
+          $$('[data-team-chip]', root).forEach((c) => c.classList.toggle('on', c === chip));
+          return redraw();
+        }
+        if (e.target.closest('[data-clear-view]')) { Object.assign(view, VIEW_DEFAULTS); saveView(); return A.render(); }
         if (e.target.closest('[data-new]')) return editAutomation(null);
         const ed = e.target.closest('[data-edit]');
         if (ed) return editAutomation((A.cache.auto.automations || []).find((a) => a.id === Number(ed.dataset.edit)));
@@ -75,6 +76,116 @@
       });
     },
   });
+
+  // ------------------------------------------------------------ filtering and sorting
+  const VIEW_DEFAULTS = { team: 'all', q: '', when: 'all', channel: 'all', status: 'all', page: 'all', kind: 'all', sort: 'timeline' };
+  const VIEW_KEY = 'availvo:automations-view';
+  const view = Object.assign({}, VIEW_DEFAULTS, (() => { try { return JSON.parse(localStorage.getItem(VIEW_KEY) || '{}'); } catch (e) { return {}; } })());
+  const saveView = () => { try { localStorage.setItem(VIEW_KEY, JSON.stringify(view)); } catch (e) { /* private window */ } };
+
+  const SORTS = {
+    timeline: 'Order they go out',
+    closest: 'Closest to the appointment first',
+    farthest: 'Farthest from the appointment first',
+    newest: 'Newest first',
+    oldest: 'Oldest first',
+    edited: 'Recently edited',
+    name: 'Name, A to Z',
+    sent: 'Most sent',
+    custom: 'Order they were added',
+  };
+  const WHENS = { all: 'Any time', booked: 'When booked', before: 'Before the appointment', after: 'After the appointment', cancelled: 'When cancelled', rescheduled: 'When moved' };
+
+  /**
+   * The teams an automation belongs to. One set on the automation wins. Otherwise it is the teams of
+   * the booking pages it is limited to. Empty means it goes out for every booking, so it belongs to
+   * every team and shows under each of them.
+   */
+  function teamsOf(a, d) {
+    if (a.team_id) return [a.team_id];
+    return [...new Set(a.event_type_ids.map((id) => (d.event_types.find((e) => e.id === id) || {}).team_id).filter(Boolean))];
+  }
+
+  // Where it sits relative to the appointment, in minutes: negative before, positive after.
+  // Booking-time messages come first in the timeline; cancel and move messages have no place on it.
+  function position(a) {
+    if (a.trigger === 'before') return -a.offset_min;
+    if (a.trigger === 'after') return a.offset_min;
+    if (a.trigger === 'booked') return -Infinity;
+    return null;
+  }
+  const RANK = { booked: 0, before: 1, after: 2, rescheduled: 3, cancelled: 4 };
+
+  function filtered(d) {
+    const q = view.q.trim().toLowerCase();
+    const rows = d.automations.filter((a) => {
+      if (view.team !== 'all') {
+        const ts = teamsOf(a, d);
+        if (view.team === 'none' ? ts.length : ts.length && !ts.includes(Number(view.team))) return false;
+      }
+      if (view.when !== 'all' && a.trigger !== view.when) return false;
+      if (view.channel !== 'all' && a.channel !== view.channel && !(view.channel !== 'both' && a.channel === 'both')) return false;
+      if (view.status === 'on' && !a.active) return false;
+      if (view.status === 'off' && a.active) return false;
+      if (view.kind !== 'all' && a.kind !== view.kind) return false;
+      if (view.page !== 'all' && a.event_type_ids.length && !a.event_type_ids.includes(Number(view.page))) return false;
+      if (q && ![a.name, a.subject, a.sms_body, a.body_html].some((x) => String(x || '').toLowerCase().includes(q))) return false;
+      return true;
+    });
+    // Booking, cancel and move messages are tied to an action, not to the appointment, so they sort last.
+    const dist = (a) => { const p = position(a); return p === null || p === -Infinity ? Infinity : Math.abs(p); };
+    const by = {
+      timeline: (x, y) => (RANK[x.trigger] - RANK[y.trigger]) || ((position(x) ?? 0) - (position(y) ?? 0)),
+      closest: (x, y) => dist(x) - dist(y),
+      farthest: (x, y) => ((dist(y) === Infinity ? -1 : dist(y)) - (dist(x) === Infinity ? -1 : dist(x))),
+      newest: (x, y) => String(y.created_at).localeCompare(String(x.created_at)) || y.id - x.id,
+      oldest: (x, y) => String(x.created_at).localeCompare(String(y.created_at)) || x.id - y.id,
+      edited: (x, y) => String(y.updated_at).localeCompare(String(x.updated_at)),
+      name: (x, y) => x.name.localeCompare(y.name),
+      sent: (x, y) => y.sent - x.sent,
+      custom: () => 0,
+    }[view.sort] || (() => 0);
+    return rows.sort((x, y) => by(x, y) || x.name.localeCompare(y.name));
+  }
+
+  function toolbar(d) {
+    const teams = d.teams || [];
+    const opt = (map, val) => Object.entries(map).map(([k, l]) => `<option value="${esc(k)}" ${String(val) === String(k) ? 'selected' : ''}>${esc(l)}</option>`).join('');
+    const chip = (id, label) => `<button type="button" class="chip ${String(view.team) === String(id) ? 'on' : ''}" data-team-chip="${esc(id)}">${esc(label)}</button>`;
+    const pages = Object.fromEntries([['all', 'Every booking page']].concat(d.event_types.map((e) => [e.id, e.name])));
+    return `<div class="auto-tools">
+      <div class="chips">${chip('all', 'All')}${teams.map((t) => chip(t.id, t.name)).join('')}${chip('none', 'No team')}</div>
+      <div class="auto-filters">
+        <input class="input" type="search" data-view="q" value="${esc(view.q)}" placeholder="Search names and wording" aria-label="Search">
+        <select class="select" data-view="sort" aria-label="Sort">${opt(SORTS, view.sort)}</select>
+        <select class="select" data-view="when" aria-label="When">${opt(WHENS, view.when)}</select>
+        <select class="select" data-view="channel" aria-label="Channel">${opt({ all: 'Email or text', email: 'Sends an email', sms: 'Sends a text', both: 'Email and text' }, view.channel)}</select>
+        <select class="select" data-view="status" aria-label="On or off">${opt({ all: 'On and off', on: 'On', off: 'Off' }, view.status)}</select>
+        <select class="select" data-view="kind" aria-label="Kind">${opt({ all: 'Any kind' }, view.kind)}${opt(KINDS, view.kind)}</select>
+        <select class="select" data-view="page" aria-label="Booking page">${opt(pages, view.page)}</select>
+      </div>
+      ${teams.length ? '' : '<p class="small muted" style="margin:6px 0 0">Add teams like Sales, Planning and Management on <a href="#/org">Teams &amp; types</a> to filter by them.</p>'}
+    </div>`;
+  }
+
+  function listHtml(d) {
+    const rows = filtered(d);
+    const teamName = (id) => ((d.teams || []).find((t) => t.id === id) || {}).name;
+    if (!rows.length) return `<div class="empty-state"><h3>Nothing matches</h3><p>No automation fits these filters.</p><button type="button" class="btn btn-ghost" data-clear-view>Clear the filters</button></div>`;
+    return `<div class="small muted" style="margin:0 0 6px">${rows.length} of ${d.automations.length}</div>
+      <div class="table-wrap"><table class="t"><thead><tr><th>Name</th><th>Goes out</th><th>Channel</th><th>Applies to</th><th class="num">Sent</th><th></th></tr></thead><tbody>
+      ${rows.map((a) => { const ts = teamsOf(a, d); return `<tr${a.active ? '' : ' style="opacity:.55"'}>
+        <td><b>${esc(a.name)}</b>${a.active ? '' : ' <span class="pill lost">Off</span>'}${a.kind === 'marketing' ? ' <span class="pill quoted">Promotional</span>' : ''}
+          ${a.subject ? `<div class="small muted">${esc(a.subject)}</div>` : ''}
+          <div style="margin-top:4px">${ts.length ? ts.map((id) => `<span class="pill">${esc(teamName(id) || 'Team')}</span>`).join(' ') : '<span class="pill">Every team</span>'}</div></td>
+        <td class="small">${esc(a.timing)}</td>
+        <td class="small">${esc(CHANNELS[a.channel] || a.channel)}</td>
+        <td class="small">${describeScope(a, d)}</td>
+        <td class="num">${a.sent || ''}${a.failed ? ` <span style="color:#c0392b">(${a.failed} failed)</span>` : ''}</td>
+        <td class="num" style="white-space:nowrap"><button type="button" class="btn btn-ghost btn-sm" data-clone="${a.id}" title="Make a switched-off copy to start a similar message">Clone</button> <button type="button" class="btn btn-ghost btn-sm" data-edit="${a.id}">Edit</button></td>
+      </tr>`; }).join('')}
+      </tbody></table></div>`;
+  }
 
   function describeScope(a, d) {
     const bits = [];
@@ -112,6 +223,7 @@
           <div class="help">Set 0 to send as soon as it is triggered.</div>
         </div>
         ${A.field('Kind', A.select('kind', a ? a.kind : 'transactional', KINDS), 'Promotional messages are the ones people complain about. Keep reminders and directions marked as being about their appointment.')}
+        ${(d.teams || []).length ? A.field('Team', A.select('team_id', a && a.team_id ? a.team_id : '', Object.assign({ '': 'Go by the booking pages it is for' }, Object.fromEntries((d.teams || []).map((t) => [t.id, t.name])))), 'For filtering the list only. It does not change who receives it.') : ''}
       </div>
 
       <div class="panel stack">
