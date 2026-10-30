@@ -81,6 +81,7 @@
               <div id="place-list" class="stack" style="gap:8px"></div>
             </div>
             ${A.toggle('active', et.active, 'Page is live')}
+            ${A.toggle('show_progress', !(et.settings && et.settings.show_progress === false), 'Show the progress bar')}
           </div>
           <div class="panel"><div class="panel-head"><div><h2>Form steps</h2><p class="desc" style="margin:0">Every step autosaves as a lead. Put Contact info early to capture more people who drop off.</p></div>
             <div class="row">${isNew ? '<button class="btn btn-ghost btn-sm" data-template="quick">Use the short date-first form</button>' : ''}<button class="btn btn-ghost btn-sm" data-add-step>+ Questions step</button><button class="btn btn-ghost btn-sm" data-add-availability>+ Date check</button></div></div><div id="steps" class="stack"></div></div>

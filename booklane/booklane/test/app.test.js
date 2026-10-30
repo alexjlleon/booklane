@@ -283,6 +283,23 @@ test('sales calls go to a level by how many services were picked', async () => {
   await req('DELETE', `/api/admin/booking-types/${type.data.id}`, null, { cookie: ownerCookie });
 });
 
+test('a booking page can hide its progress bar, and other page settings survive', async () => {
+  const et = db.get("SELECT id, settings FROM event_types WHERE slug = 'discovery-call'");
+  db.run('UPDATE event_types SET settings = ? WHERE id = ?', JSON.stringify({ keep_me: 1 }), et.id);
+  let r = await req('GET', '/api/admin/event-types', null, { cookie: ownerCookie });
+  assert.notEqual(r.data.event_types.find((x) => x.id === et.id).settings.show_progress, false, 'shown by default');
+  r = await req('PATCH', `/api/admin/event-types/${et.id}`, { show_progress: false }, { cookie: ownerCookie });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.deepEqual(db.json(db.get('SELECT settings FROM event_types WHERE id = ?', et.id).settings, {}), { keep_me: 1, show_progress: false });
+  const page = await req('GET', `/b/${bizSlug}/discovery-call`);
+  assert.match(typeof page.data === 'string' ? page.data : page.raw || '', /"show_progress":false/);
+  // A save that does not mention it leaves it alone.
+  await req('PATCH', `/api/admin/event-types/${et.id}`, { name: 'Discovery call' }, { cookie: ownerCookie });
+  assert.equal(db.json(db.get('SELECT settings FROM event_types WHERE id = ?', et.id).settings, {}).show_progress, false);
+  await req('PATCH', `/api/admin/event-types/${et.id}`, { show_progress: true }, { cookie: ownerCookie });
+  db.run('UPDATE event_types SET settings = ? WHERE id = ?', et.settings, et.id);
+});
+
 test('quote pricing is computed server side; contract request emails, pushes to BoothBook and webhook', async () => {
   const svc = await req('POST', '/api/admin/services', {
     name: 'DJ', pricing_type: 'flat', option_groups: [{ name: 'Package', mode: 'base', required: true, choices: [{ name: 'Silver', price: 1000, default: true }, { name: 'Gold', price: 1500 }] }],

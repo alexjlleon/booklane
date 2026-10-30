@@ -178,7 +178,7 @@
     else body = `<form class="step-form" novalidate>${(step.questions || []).map(renderQuestion).join('')}</form>`;
     app.innerHTML = `<div class="shell"><div class="card booker">${side()}
       <main class="booker-main">
-        <div class="progress" aria-label="Step ${pos} of ${total}"><div class="progress-bar"><span style="width:${Math.round((pos / total) * 100)}%"></span></div><div class="progress-count">${pos} / ${total}</div></div>
+        ${(et.settings || {}).show_progress === false ? '' : `<div class="progress" aria-label="Step ${pos} of ${total}"><div class="progress-bar"><span style="width:${Math.round((pos / total) * 100)}%"></span></div><div class="progress-count">${pos} / ${total}</div></div>`}
         ${step.type === 'availability' && st.avail && !st.avail.loading ? '' : `<div class="step-head"><h2>${esc(step.title || '')}</h2>${step.subtitle ? `<p>${esc(step.subtitle)}</p>` : ''}</div>`}
         ${st.error ? `<div class="form-error" role="alert">${esc(st.error)}</div>` : ''}
         <div class="step-body">${body}</div>

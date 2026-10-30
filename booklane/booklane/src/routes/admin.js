@@ -579,6 +579,13 @@ module.exports = function adminRoutes(app) {
       team_id: b.team_id === undefined ? (existing ? existing.team_id : null) : ORG.teamIdFor(businessId, b.team_id),
       booking_type_id: b.booking_type_id === undefined ? (existing ? existing.booking_type_id : null) : ORG.typeIdFor(businessId, b.booking_type_id),
     };
+    // Page-level display choices live in settings. Only what this save sends is changed, so a
+    // screen that does not know about a setting never resets it.
+    if (b.show_progress !== undefined) {
+      const settings = existing ? db.json(existing.settings, {}) : {};
+      settings.show_progress = bool(b.show_progress);
+      f.settings = JSON.stringify(settings);
+    }
     let id = existing?.id;
     db.tx(() => {
       if (existing) {
