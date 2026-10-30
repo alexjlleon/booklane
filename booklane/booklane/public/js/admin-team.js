@@ -186,6 +186,7 @@
           const days = Object.entries(r.days).filter(([, list]) => list.length);
           slotsEl.innerHTML = days.length ? days.map(([d, list]) => `<div class="resched-day"><div class="small"><b>${esc(A.dt(d + 'T12:00:00Z', { weekday: 'long', hour: undefined, minute: undefined }))}</b></div>
             <div class="resched-times">${list.map((s) => `<button type="button" class="btn btn-ghost btn-sm" data-slot="${esc(s.start)}" title="${s.same_host ? 'Same person' : 'With someone else on this page'}">${esc(A.dt(s.start, { month: undefined, day: undefined }))}${s.same_host ? '' : ' *'}</button>`).join('')}</div></div>`).join('')
+            + (r.keep_host ? '<p class="small muted">Only times you are free are shown. The call stays with you; an admin can move it to someone else.</p>' : '')
             + (days.some(([, l]) => l.some((s) => !s.same_host)) ? '<p class="small muted">* Their current host is busy then, so the call would go to someone else on this page.</p>' : '')
             : '<p class="muted">No open times in these two weeks. Try later, or check this page\'s hours.</p>';
         } catch (err) { slotsEl.innerHTML = `<p class="muted">${esc(err.message)}</p>`; }

@@ -2260,6 +2260,71 @@ test('an admin can move anyone\'s call to a real open time, and the reminders mo
   assert.equal(clash.status, 409);
 });
 
+test('a host can move their own call but never hand it to someone else; an admin still can', async () => {
+  require('../src/lib/security').resetRateLimits();
+  const bizId = db.get('SELECT id FROM businesses WHERE slug = ?', bizSlug).id;
+  const pat = db.get("SELECT id FROM users WHERE email = 'pat.planner@test.dev'").id;
+  const owner = db.get("SELECT user_id FROM memberships WHERE business_id = ? AND role = 'owner'", bizId).user_id;
+  const patLogin = await req('POST', '/api/admin/auth/login', { email: 'pat.planner@test.dev', password: 'password123' });
+  assert.equal(patLogin.status, 200, JSON.stringify(patLogin.data));
+  const patCookie = patLogin.cookie;
+  // Owner and Pat share the same weekday hours so either could take any call.
+  for (const u of [owner, pat]) {
+    db.run('DELETE FROM availability_rules WHERE user_id = ?', u);
+    for (const wd of [1, 2, 3, 4, 5]) db.run('INSERT INTO availability_rules (user_id, weekday, start_min, end_min) VALUES (?,?,?,?)', u, wd, 9 * 60, 17 * 60);
+  }
+  const page = await req('POST', '/api/admin/event-types', { name: 'Shared RR Call', duration_min: 30, hosts: [pat, owner], assignment: 'round_robin' }, { cookie: ownerCookie });
+  assert.equal(page.status, 200, JSON.stringify(page.data));
+  const et = db.get('SELECT * FROM event_types WHERE id = ?', page.data.id);
+
+  const from = T.addDays(T.utcToZoned(Date.now(), 'America/Chicago').date, 14);
+  const to = T.addDays(from, 10);
+  const open = await req('GET', `/api/public/b/${bizSlug}/e/${et.slug}/slots?from=${from}&to=${to}&tz=America/Chicago`);
+  const times = Object.values(open.data.days).flat().sort();
+  const first = times[0];
+  const made = await req('POST', `/api/public/b/${bizSlug}/e/${et.slug}/book`,
+    { start: first, timezone: 'America/Chicago', contact: { first_name: 'Host', last_name: 'Move', email: 'host.move@example.com', phone: '7135550177' } });
+  assert.equal(made.status, 200, JSON.stringify(made.data));
+  const bk = db.get('SELECT * FROM bookings WHERE token = ?', made.data.token);
+  db.run('UPDATE bookings SET host_user_id = ? WHERE id = ?', pat, bk.id);
+  // Pat is busy at a later time (another call of theirs), but the owner is free then.
+  const blocked = times.find((t) => Date.parse(t) - Date.parse(first) >= 3 * 3600000);
+  db.run(`INSERT INTO bookings (business_id, event_type_id, host_user_id, token, start_utc, end_utc, invitee_tz, name, email, status)
+    VALUES (?,?,?,?,?,?,?,?,?,'confirmed')`, bizId, et.id, pat, 'tok-pat-busy', blocked, new Date(Date.parse(blocked) + 1800000).toISOString(), 'America/Chicago', 'Busy', 'busy@example.com');
+
+  // Pat only sees times Pat is free, and is told so.
+  const mine = await req('GET', `/api/admin/bookings/${bk.id}/slots?from=${from}&to=${to}&tz=America/Chicago`, null, { cookie: patCookie });
+  assert.equal(mine.status, 200, JSON.stringify(mine.data));
+  assert.equal(mine.data.keep_host, true);
+  const mineAll = Object.values(mine.data.days).flat();
+  assert.ok(mineAll.length > 0);
+  assert.ok(mineAll.every((s) => s.same_host), 'no times with someone else');
+  assert.ok(!mineAll.some((s) => s.start === blocked), 'their busy time is not offered');
+
+  // Posting that time anyway is refused, and the call stays put with Pat.
+  const sneaky = await req('POST', `/api/admin/bookings/${bk.id}/reschedule`, { start: blocked, timezone: 'America/Chicago' }, { cookie: patCookie });
+  assert.equal(sneaky.status, 409, JSON.stringify(sneaky.data));
+  let now = db.get('SELECT * FROM bookings WHERE id = ?', bk.id);
+  assert.equal(now.host_user_id, pat);
+  assert.equal(now.start_utc, bk.start_utc);
+
+  // A time Pat is free works, and the call stays with Pat.
+  const fine = mineAll.find((s) => s.start !== first && s.start !== blocked && Math.abs(Date.parse(s.start) - Date.parse(blocked)) >= 3600000);
+  const ok = await req('POST', `/api/admin/bookings/${bk.id}/reschedule`, { start: fine.start, timezone: 'America/Chicago' }, { cookie: patCookie });
+  assert.equal(ok.status, 200, JSON.stringify(ok.data));
+  now = db.get('SELECT * FROM bookings WHERE id = ?', bk.id);
+  assert.equal(now.host_user_id, pat);
+
+  // The owner sees the busy time (marked as someone else) and can move the call there.
+  const all = await req('GET', `/api/admin/bookings/${bk.id}/slots?from=${from}&to=${to}&tz=America/Chicago`, null, { cookie: ownerCookie });
+  assert.equal(all.data.keep_host, false);
+  const other = Object.values(all.data.days).flat().find((s) => s.start === blocked);
+  assert.ok(other && !other.same_host, 'admins see times with someone else');
+  const handed = await req('POST', `/api/admin/bookings/${bk.id}/reschedule`, { start: blocked, timezone: 'America/Chicago' }, { cookie: ownerCookie });
+  assert.equal(handed.status, 200, JSON.stringify(handed.data));
+  assert.equal(db.get('SELECT host_user_id FROM bookings WHERE id = ?', bk.id).host_user_id, owner);
+});
+
 test('the team screen is only in the menu for admins, and every new screen loads its script', async () => {
   const html = (await req('GET', '/app')).data;
   assert.match(html, /admin-team\.js/);
