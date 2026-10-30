@@ -377,7 +377,6 @@ module.exports = function adminRoutes(app) {
       .map((r) => ({ ...r, answers: db.json(r.answers, {}), synced: db.json(r.external_events, []).length > 0, external_events: undefined }));
   });
   // Admins manage everyone's calendar. A host can still manage their own calls.
-  const isAdminish = (req) => (ROLE_RANK[req.membership.role] || 0) >= ROLE_RANK.admin;
   const ownBooking = (req) => {
     const bk = db.get('SELECT * FROM bookings WHERE id = ? AND business_id = ?', int(req.params.id), bid(req));
     if (!bk) throw new HttpError(404, 'Booking not found');
@@ -413,15 +412,10 @@ module.exports = function adminRoutes(app) {
     if (to < from) to = from;
     if (Date.parse(to) - Date.parse(from) > 62 * 86400000) to = T.addDays(from, 62);
     const slots = await S.computeSlots(et, from, to, tz, { excludeBookingId: bk.id });
-    // Hosts can move their own calls but not hand them to someone else, so they only see times
-    // they are free themselves. Admins and owners still see every time anyone on the page is free.
-    const keepHost = !isAdminish(req);
+    const hostIds = new Set();
     const days = {};
-    for (const [d, list] of Object.entries(slots)) {
-      const out = list.map((x) => ({ start: x.start, same_host: x.hosts.includes(bk.host_user_id) })).filter((x) => !keepHost || x.same_host);
-      if (out.length) days[d] = out;
-    }
-    return { timezone: tz, from, to, days, host_user_id: bk.host_user_id, keep_host: keepHost, event: { name: et.name, duration_min: et.duration_min } };
+    for (const [d, list] of Object.entries(slots)) days[d] = list.map((x) => { x.hosts.forEach((h) => hostIds.add(h)); return { start: x.start, same_host: x.hosts.includes(bk.host_user_id) }; });
+    return { timezone: tz, from, to, days, host_user_id: bk.host_user_id, event: { name: et.name, duration_min: et.duration_min } };
   });
 
   // Move a call for someone. The customer gets the same rescheduled email and invite as if they
@@ -429,7 +423,7 @@ module.exports = function adminRoutes(app) {
   app.post('/api/admin/bookings/:id/reschedule', async (req) => {
     requireRole('host')(req);
     const bk = ownBooking(req);
-    const updated = await BK.rescheduleBooking(bk, req.body?.start, req.body?.timezone || bk.invitee_tz, { keepHost: !isAdminish(req) });
+    const updated = await BK.rescheduleBooking(bk, req.body?.start, req.body?.timezone || bk.invitee_tz);
     if (bk.lead_id) B.logActivity(bid(req), bk.lead_id, 'booking', `Rescheduled by ${req.user.name}`, { booking_id: bk.id });
     return { ok: true, start_utc: updated.start_utc, host_user_id: updated.host_user_id };
   });

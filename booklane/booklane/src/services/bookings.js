@@ -199,9 +199,7 @@ async function deleteBookings(businessId, ids) {
   return rows.length;
 }
 
-// opts.keepHost: the call must stay with its current host (used when a host moves their own call,
-// so they cannot pass it to a teammate). Customers and admins can still land on someone else.
-async function rescheduleBooking(booking, startIso, tz, opts = {}) {
+async function rescheduleBooking(booking, startIso, tz) {
   if (booking.status !== 'confirmed') throw new HttpError(400, 'This booking was cancelled. Please book a new time.');
   const et = hydrateEt(db.get('SELECT * FROM event_types WHERE id = ?', booking.event_type_id));
   if (!et) throw new HttpError(400, 'This call type is no longer available. Please book a new time.');
@@ -210,7 +208,6 @@ async function rescheduleBooking(booking, startIso, tz, opts = {}) {
   if (!Number.isFinite(startMs)) throw new HttpError(400, 'Pick a valid time');
   const hosts = await S.availableHostsAt(et, startMs, { excludeBookingId: booking.id });
   if (!hosts.length) throw new HttpError(409, 'Sorry, that time is not available.');
-  if (opts.keepHost && !hosts.includes(booking.host_user_id)) throw new HttpError(409, 'You are not free at that time, so the call cannot move there. Ask an admin if it needs to go to someone else.');
   const hostId = hosts.includes(booking.host_user_id) ? booking.host_user_id : S.pickHost(et, hosts, { servicesCount: booking.services_count });
   const endMs = startMs + et.duration_min * 60000;
   const oldExternal = db.json(booking.external_events, []);
