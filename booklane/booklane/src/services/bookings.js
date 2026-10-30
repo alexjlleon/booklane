@@ -177,6 +177,25 @@ async function cancelBooking(booking, reason, by = 'invitee') {
   return b;
 }
 
+/**
+ * Remove bookings for good (test runs, junk). No email or text goes to the customer: a
+ * booking that is still on is taken off the host's calendar, and anything queued for it is
+ * dropped with it.
+ */
+async function deleteBookings(businessId, ids) {
+  const rows = [...new Set((ids || []).map(Number).filter(Number.isInteger))]
+    .map((id) => db.get('SELECT * FROM bookings WHERE id = ? AND business_id = ?', id, businessId)).filter(Boolean);
+  for (const b of rows) {
+    if (b.status === 'confirmed') {
+      for (const ext of db.json(b.external_events, [])) {
+        try { await calendars.deleteEvent(ext); } catch (e) { console.error('[delete booking calendar]', e.message); }
+      }
+    }
+    db.run('DELETE FROM bookings WHERE id = ?', b.id);
+  }
+  return rows.length;
+}
+
 async function rescheduleBooking(booking, startIso, tz) {
   if (booking.status !== 'confirmed') throw new HttpError(400, 'This booking was cancelled. Please book a new time.');
   const et = hydrateEt(db.get('SELECT * FROM event_types WHERE id = ?', booking.event_type_id));
@@ -228,4 +247,4 @@ async function sendReminders() {
   }
 }
 
-module.exports = { createBooking, cancelBooking, rescheduleBooking, sendReminders, hydrateEt, bookingPayload, bookingView, validateContact };
+module.exports = { createBooking, cancelBooking, deleteBookings, rescheduleBooking, sendReminders, hydrateEt, bookingPayload, bookingView, validateContact };

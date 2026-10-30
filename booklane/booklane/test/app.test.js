@@ -2501,3 +2501,36 @@ test('a calendar whose sign-in is revoked is flagged, emailed about, shown in th
     delete process.env.GOOGLE_CLIENT_ID; delete process.env.GOOGLE_CLIENT_SECRET;
   }
 });
+
+test('leads and bookings can be deleted several at once, quietly, and only your own', async () => {
+  resetBookLimits();
+  const slot = await firstSlot(sessSlug, 'houston', 4);
+  const contact = { first_name: 'Testy', last_name: 'Clearout', email: 'clearout@example.com', phone: '8325559876' };
+  const booked = await req('POST', `/api/public/b/${bizSlug}/s/${sessSlug}/book`, { calendar: 'houston', start: slot.start, timezone: 'America/Chicago', contact });
+  assert.equal(booked.status, 200, JSON.stringify(booked.data));
+  const bk = db.get("SELECT * FROM bookings WHERE email = 'clearout@example.com' ORDER BY id DESC LIMIT 1");
+  const q = await req('POST', `/api/public/b/${bizSlug}/quotes`, {});
+  await req('PATCH', `/api/public/quotes/${q.data.token}`, { contact: { first_name: 'Testy', last_name: 'Quote', email: 'clearout2@example.com', phone: '8325559877' } });
+  const qLead = db.get('SELECT lead_id FROM quotes WHERE token = ?', q.data.token).lead_id;
+  const mailsBefore = db.get("SELECT COUNT(*) c FROM email_log WHERE to_addr LIKE '%clearout%'").c;
+
+  // Someone else's ids are skipped, not deleted.
+  const other = await signup('clearout-other@test.dev', 'Other Biz');
+  const theirs = await req('POST', '/api/admin/bookings/delete', { ids: [bk.id] }, { cookie: other });
+  assert.equal(theirs.data.deleted, 0);
+  assert.ok(db.get('SELECT 1 FROM bookings WHERE id = ?', bk.id), 'still there');
+
+  const dBk = await req('POST', '/api/admin/bookings/delete', { ids: [bk.id, 99999999] }, { cookie: ownerCookie });
+  assert.equal(dBk.status, 200, JSON.stringify(dBk.data));
+  assert.equal(dBk.data.deleted, 1);
+  assert.equal(db.get('SELECT 1 FROM bookings WHERE id = ?', bk.id), undefined);
+  assert.equal(db.get("SELECT COUNT(*) c FROM scheduled_messages WHERE booking_id = ?", bk.id).c, 0, 'nothing left queued for it');
+  assert.equal(db.get("SELECT COUNT(*) c FROM email_log WHERE to_addr LIKE '%clearout%'").c, mailsBefore, 'the customer is not emailed');
+
+  const dL = await req('POST', '/api/admin/leads/delete', { ids: [bk.lead_id, qLead] }, { cookie: ownerCookie });
+  assert.equal(dL.status, 200, JSON.stringify(dL.data));
+  assert.equal(dL.data.deleted, 2);
+  assert.equal(dL.data.quotes_deleted, 1);
+  assert.equal(db.get('SELECT COUNT(*) c FROM leads WHERE id IN (?, ?)', bk.lead_id, qLead).c, 0);
+  assert.equal((await req('POST', '/api/admin/leads/delete', { ids: [] }, { cookie: ownerCookie })).status, 422);
+});

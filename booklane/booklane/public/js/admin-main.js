@@ -162,6 +162,31 @@
   // ---------- Leads ----------
   const stepDots = (l) => { const total = l.step_total || 0; if (!total) return ''; const reached = l.status === 'partial' ? l.max_step_index + 1 : total; return `<span class="progress-mini" title="Reached step ${reached} of ${total}">${Array.from({ length: total }, (_, i) => `<i class="${i < reached ? 'on' : ''}"></i>`).join('')}</span>`; };
 
+  // Tick boxes and a "Delete selected" button for a list. Admins only.
+  const pick = {
+    head: () => '<th style="width:34px"><input type="checkbox" data-pick-all aria-label="Select all"></th>',
+    cell: (id) => `<td style="width:34px" data-pick-cell><input type="checkbox" data-pick="${id}" aria-label="Select"></td>`,
+    bar: (what) => `<button type="button" class="btn btn-danger btn-sm" data-pick-delete hidden>Delete selected</button><span hidden data-pick-what>${what}</span>`,
+    mount(root, path, warn) {
+      const btn = $('[data-pick-delete]', root);
+      if (!btn) return;
+      const chosen = () => [...root.querySelectorAll('[data-pick]:checked')].map((c) => Number(c.dataset.pick));
+      const sync = () => { const n = chosen().length; btn.hidden = !n; btn.textContent = `Delete ${n} selected`; };
+      root.addEventListener('change', (e) => {
+        if (e.target.matches('[data-pick-all]')) root.querySelectorAll('[data-pick]').forEach((c) => { c.checked = e.target.checked; });
+        if (e.target.matches('[data-pick], [data-pick-all]')) sync();
+      });
+      btn.addEventListener('click', async () => {
+        const ids = chosen();
+        const what = $('[data-pick-what]', root).textContent;
+        if (!ids.length || !confirm(`Delete ${ids.length} ${what}${ids.length === 1 ? '' : 's'} for good? ${warn}`)) return;
+        btn.disabled = true;
+        try { const r = await A.guard(() => api('POST', path, { ids })); A.toast(`Deleted ${r.deleted} ${what}${r.deleted === 1 ? '' : 's'}`); A.render(); } catch { btn.disabled = false; }
+      });
+    },
+  };
+  const canDelete = () => ['owner', 'admin'].includes((A.me.business || {}).role);
+
   A.route('/leads', {
     title: 'Leads',
     async render(p, q) {
@@ -169,15 +194,15 @@
       const d = await api('GET', `/leads?${qs}`);
       const opts = (vals, sel, all) => `<option value="">${all}</option>` + vals.map((v) => `<option value="${v}" ${v === sel ? 'selected' : ''}>${A.label(v)}</option>`).join('');
       return `<div class="topbar"><div><h1>Leads</h1><div class="sub">Everyone who started a form, including people who did not finish.</div></div>
-        <div class="tools"><a class="btn btn-ghost btn-sm" href="/api/admin/leads/export.csv">Export CSV</a></div></div>
+        <div class="tools">${canDelete() ? pick.bar('lead') : ''}<a class="btn btn-ghost btn-sm" href="/api/admin/leads/export.csv">Export CSV</a></div></div>
         <div class="panel"><div class="panel-head"><form class="filters" id="lf">
           <input class="input" name="q" placeholder="Search name, email, phone" value="${esc(q.q || '')}">
           <select class="select" name="status">${opts(STATUSES, q.status, 'All statuses')}</select>
           <select class="select" name="source">${opts(['booking', 'quote'], q.source, 'All forms')}</select>
           <label class="toggle small"><input type="checkbox" name="hide_anonymous" ${qs.get('hide_anonymous') === '1' ? 'checked' : ''}><span class="sw"></span><span>Only with contact info</span></label>
         </form><span class="small muted">${d.total} lead${d.total === 1 ? '' : 's'}</span></div>
-        ${d.rows.length ? `<div class="table-wrap"><table class="t"><thead><tr><th>Name</th><th>Status</th><th>Form</th><th>Progress</th><th>Value / call</th><th>Last active</th></tr></thead><tbody>
-          ${d.rows.map((l) => `<tr class="click" data-lead="${l.id}"><td><b>${esc(A.name(l))}</b><div class="small muted">${esc([l.email, l.phone].filter(Boolean).join(' · '))}</div></td>
+        ${d.rows.length ? `<div class="table-wrap"><table class="t"><thead><tr>${canDelete() ? pick.head() : ''}<th>Name</th><th>Status</th><th>Form</th><th>Progress</th><th>Value / call</th><th>Last active</th></tr></thead><tbody>
+          ${d.rows.map((l) => `<tr class="click" data-lead="${l.id}">${canDelete() ? pick.cell(l.id) : ''}<td><b>${esc(A.name(l))}</b><div class="small muted">${esc([l.email, l.phone].filter(Boolean).join(' · '))}</div></td>
             <td>${A.pill(l.status)}</td><td class="small">${esc(l.source === 'quote' ? 'Quote builder' : l.event_name || 'Booking')}</td><td>${stepDots(l)}</td>
             <td class="small">${l.quote_total ? `<b>${A.money(l.quote_total)}</b>` : ''}${l.booking_start ? `<div>${esc(A.dt(l.booking_start))}</div>` : ''}${!l.quote_total && !l.booking_start && l.answers.requested_time ? `<span class="muted">Wanted ${esc(l.answers.requested_time.split(' (')[0])}</span>` : ''}</td>
             <td class="small muted">${esc(A.ago(l.last_activity_at))}</td></tr>`).join('')}</tbody></table></div>
@@ -192,9 +217,11 @@
       f.addEventListener('input', (e) => { if (e.target.name === 'q') { clearTimeout(t); t = setTimeout(apply, 450); } });
       f.addEventListener('submit', (e) => { e.preventDefault(); apply(); });
       root.addEventListener('click', (e) => {
+        if (e.target.closest('[data-pick-cell]')) return;
         const r = e.target.closest('[data-lead]'); if (r) A.go(`#/leads/${r.dataset.lead}`);
         const pg = e.target.closest('[data-page]'); if (pg) A.go('#/leads?' + new URLSearchParams(Object.assign({}, q, { page: pg.dataset.page })));
       });
+      pick.mount(root, '/leads/delete', 'Their quotes go too. Bookings stay; delete those on the Bookings screen.');
       const qEl = $('input[name=q]', root); if (q.q) { qEl.focus(); qEl.setSelectionRange(qEl.value.length, qEl.value.length); }
     },
   });
@@ -273,13 +300,13 @@
         return A.pill(b.status);
       };
       return `<div class="topbar"><div><h1>Bookings</h1><div class="sub">Calls booked through your pages.</div></div>
-        <div class="tools"><div class="seg">${['upcoming', 'past', 'cancelled'].map((s) => `<button data-scope="${s}" class="${s === scope ? 'on' : ''}">${A.label(s)}</button>`).join('')}</div>
+        <div class="tools">${isAdminRole && rows.length ? pick.bar('booking') : ''}<div class="seg">${['upcoming', 'past', 'cancelled'].map((s) => `<button data-scope="${s}" class="${s === scope ? 'on' : ''}">${A.label(s)}</button>`).join('')}</div>
         ${people.length ? `<select class="select" data-who style="width:auto"><option value="">Everyone</option><option value="mine" ${who === 'mine' ? 'selected' : ''}>Only mine</option>${people.map((m) => `<option value="${m.id}" ${String(who) === String(m.id) ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>`
     : `<label class="toggle small"><input type="checkbox" data-mine ${q.mine ? 'checked' : ''}><span class="sw"></span><span>Only mine</span></label>`}</div></div>
-        <div class="panel">${rows.length ? `<div class="table-wrap"><table class="t"><tbody>${rows.map((b) => {
+        <div class="panel">${rows.length ? `<div class="table-wrap"><table class="t">${isAdminRole ? `<thead><tr>${pick.head()}<th colspan="5" class="small muted" style="font-weight:normal">Select all on this tab</th></tr></thead>` : ''}<tbody>${rows.map((b) => {
           const day = A.dt(b.start_utc, { weekday: 'long', month: 'long', day: 'numeric', hour: undefined, minute: undefined });
-          const head = day !== lastDay ? `<tr><th colspan="5" style="background:#faf9f7">${esc(day)}</th></tr>` : ''; lastDay = day;
-          return `${head}<tr><td style="width:120px"><b>${esc(A.dt(b.start_utc, { month: undefined, day: undefined }))}</b></td>
+          const head = day !== lastDay ? `<tr><th colspan="${isAdminRole ? 6 : 5}" style="background:#faf9f7">${esc(day)}</th></tr>` : ''; lastDay = day;
+          return `${head}<tr>${isAdminRole ? pick.cell(b.id) : ''}<td style="width:120px"><b>${esc(A.dt(b.start_utc, { month: undefined, day: undefined }))}</b></td>
             <td><span class="pill" style="background:${esc(b.color || '#eee')}22;color:${esc(b.color || '#444')}">${esc(b.event_name || 'Call')}</span><div class="small muted" style="margin-top:4px">with ${b.host_user_id && isAdminRole ? `<a href="#/team-stats/${b.host_user_id}">${esc(b.host || '-')}</a>` : esc(b.host || '-')}${b.synced ? ' · on calendar' : ''}</div></td>
             <td><b>${b.lead_id ? `<a href="#/leads/${b.lead_id}">${esc(b.name || b.email)}</a>` : esc(b.name || b.email)}</b><div class="small muted">${esc([b.email, b.phone].filter(Boolean).join(' · '))}</div></td>
             <td class="small">${esc(b.location || '')}${b.cancel_reason ? `<div class="muted">Reason: ${esc(b.cancel_reason)}</div>` : ''}</td>
@@ -292,6 +319,7 @@
         const s = e.target.closest('[data-scope]'); if (s) return A.go(`#/bookings?scope=${s.dataset.scope}${filter()}`);
         A.bookingActions.handle(e, () => A.render());
       });
+      pick.mount(root, '/bookings/delete', 'The customer is not told. Any still on a calendar are taken off it.');
       root.addEventListener('change', (e) => {
         const scope = q.scope || 'upcoming';
         if (e.target.matches('[data-mine]')) A.go(`#/bookings?scope=${scope}${e.target.checked ? '&mine=1' : ''}`);

@@ -325,6 +325,23 @@ module.exports = function adminRoutes(app) {
     });
     return { ok: true, quotes_deleted: quotes };
   });
+  // Several at once, for clearing out test runs. Same as deleting each: the lead and its quotes go,
+  // any bookings stay (they have their own delete).
+  app.post('/api/admin/leads/delete', (req) => {
+    requireRole('admin')(req);
+    const ids = [...new Set([].concat(req.body?.ids || []).map(Number).filter(Number.isInteger))].slice(0, 1000);
+    if (!ids.length) throw new HttpError(422, 'Pick at least one lead');
+    return db.tx(() => {
+      let deleted = 0, quotes = 0;
+      for (const id of ids) {
+        const l = db.get('SELECT id FROM leads WHERE id = ? AND business_id = ?', id, bid(req));
+        if (!l) continue;
+        quotes += db.run('DELETE FROM quotes WHERE lead_id = ?', l.id).changes;
+        deleted += db.run('DELETE FROM leads WHERE id = ?', l.id).changes;
+      }
+      return { ok: true, deleted, quotes_deleted: quotes };
+    });
+  });
   app.post('/api/admin/leads/:id/recovery', async (req) => {
     requireRole('host')(req);
     const l = getLead(req);
@@ -476,6 +493,14 @@ module.exports = function adminRoutes(app) {
     const out = TEAM.personDetail(B.byId(bid(req)), int(req.params.userId, 0), req.query || {});
     if (!out) throw new HttpError(404, 'That person is not on this team');
     return out;
+  });
+
+  // Delete for good, without telling the customer. For test bookings; real ones should be cancelled.
+  app.post('/api/admin/bookings/delete', async (req) => {
+    requireRole('admin')(req);
+    const ids = [].concat(req.body?.ids || []).slice(0, 1000);
+    if (!ids.length) throw new HttpError(422, 'Pick at least one booking');
+    return { ok: true, deleted: await BK.deleteBookings(bid(req), ids) };
   });
 
   app.post('/api/admin/bookings/:id/cancel', async (req) => {
