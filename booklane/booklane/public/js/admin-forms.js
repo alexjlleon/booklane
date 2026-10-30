@@ -494,7 +494,10 @@
 
     const paneHtml = { steps: stepsTab, look: lookTab, settings: settingsTab };
     function repaint(root, which, opts) {
-      harvest(root);
+      // Callers that just added, removed or reordered steps or questions have already read the
+      // screen. Reading it again here would write the old rows back by position over the new list
+      // (removing question 1 would then wipe question 2 instead).
+      if (!(opts && opts.harvested)) harvest(root);
       // After a layout change the style is already new; reading the old controls would undo it.
       if (!(opts && opts.styleIsFresh)) harvestStyle(root);
       const open = $$('.look-sec', root).filter((d) => d.open).map((d) => d.dataset.sec);
@@ -608,15 +611,15 @@
           if (type === 'questions') fresh.questions = [{ id: '', label: '', type: 'text', required: false, options: [] }];
           if (type === 'contact') fresh.fields = { first_name: 'required', last_name: 'optional', email: 'required', phone: 'optional', sms_consent: 'hidden' };
           if (type === 'availability') fresh.date_question_id = 'event_date';
-          steps.push(fresh); focusStep = steps.length - 1; return repaint(root, 'steps');
+          steps.push(fresh); focusStep = steps.length - 1; return repaint(root, 'steps', { harvested: true });
         }
-        const rm = t.closest('[data-rm-step]'); if (rm) { harvest(root); steps.splice(Number(rm.dataset.rmStep), 1); focusStep = Math.min(focusStep, steps.length - 1); return repaint(root, 'steps'); }
-        const upS = t.closest('[data-up]'); if (upS) { harvest(root); const i = Number(upS.dataset.up); [steps[i - 1], steps[i]] = [steps[i], steps[i - 1]]; return repaint(root, 'steps'); }
-        const dn = t.closest('[data-down]'); if (dn) { harvest(root); const i = Number(dn.dataset.down); [steps[i + 1], steps[i]] = [steps[i], steps[i + 1]]; return repaint(root, 'steps'); }
-        const aq = t.closest('[data-add-q]'); if (aq) { harvest(root); steps[Number(aq.dataset.addQ)].questions.push({ id: '', label: '', type: 'text', required: false, options: [] }); return repaint(root, 'steps'); }
-        const rq = t.closest('[data-rm-q]'); if (rq) { harvest(root); const [i, qi] = rq.dataset.rmQ.split('.').map(Number); steps[i].questions.splice(qi, 1); openQs.clear(); return repaint(root, 'steps'); }
-        const qu = t.closest('[data-q-up]'); if (qu) { harvest(root); const [i, qi] = qu.dataset.qUp.split('.').map(Number); const qs = steps[i].questions; [qs[qi - 1], qs[qi]] = [qs[qi], qs[qi - 1]]; openQs.clear(); return repaint(root, 'steps'); }
-        const qd = t.closest('[data-q-down]'); if (qd) { harvest(root); const [i, qi] = qd.dataset.qDown.split('.').map(Number); const qs = steps[i].questions; [qs[qi + 1], qs[qi]] = [qs[qi], qs[qi + 1]]; openQs.clear(); return repaint(root, 'steps'); }
+        const rm = t.closest('[data-rm-step]'); if (rm) { harvest(root); steps.splice(Number(rm.dataset.rmStep), 1); focusStep = Math.min(focusStep, steps.length - 1); return repaint(root, 'steps', { harvested: true }); }
+        const upS = t.closest('[data-up]'); if (upS) { harvest(root); const i = Number(upS.dataset.up); [steps[i - 1], steps[i]] = [steps[i], steps[i - 1]]; return repaint(root, 'steps', { harvested: true }); }
+        const dn = t.closest('[data-down]'); if (dn) { harvest(root); const i = Number(dn.dataset.down); [steps[i + 1], steps[i]] = [steps[i], steps[i + 1]]; return repaint(root, 'steps', { harvested: true }); }
+        const aq = t.closest('[data-add-q]'); if (aq) { harvest(root); steps[Number(aq.dataset.addQ)].questions.push({ id: '', label: '', type: 'text', required: false, options: [] }); return repaint(root, 'steps', { harvested: true }); }
+        const rq = t.closest('[data-rm-q]'); if (rq) { harvest(root); const [i, qi] = rq.dataset.rmQ.split('.').map(Number); steps[i].questions.splice(qi, 1); openQs.clear(); return repaint(root, 'steps', { harvested: true }); }
+        const qu = t.closest('[data-q-up]'); if (qu) { harvest(root); const [i, qi] = qu.dataset.qUp.split('.').map(Number); const qs = steps[i].questions; [qs[qi - 1], qs[qi]] = [qs[qi], qs[qi - 1]]; openQs.clear(); return repaint(root, 'steps', { harvested: true }); }
+        const qd = t.closest('[data-q-down]'); if (qd) { harvest(root); const [i, qi] = qd.dataset.qDown.split('.').map(Number); const qs = steps[i].questions; [qs[qi + 1], qs[qi]] = [qs[qi], qs[qi + 1]]; openQs.clear(); return repaint(root, 'steps', { harvested: true }); }
       });
 
       // Whichever step you are working in is the one the preview shows.
