@@ -226,7 +226,11 @@ async function explainBusy(conn, fromMs, toMs) {
 
 const clearBusyCache = (userId) => { for (const k of busyCache.keys()) if (k.startsWith(userId + ':')) busyCache.delete(k); };
 
-async function createEvent(hostUserId, { summary, description, start, end, attendeeEmail, attendeeName, location, locationType, timezone }) {
+// The customer plus anyone they invited, in each provider's own shape. Guests are optional attendees.
+const googleAttendees = (email, name, guests = []) => [...(email ? [{ email, displayName: name }] : []), ...guests.map((g) => ({ email: g, optional: true }))];
+const graphAttendees = (email, name, guests = []) => [...(email ? [{ emailAddress: { address: email, name }, type: 'required' }] : []), ...guests.map((g) => ({ emailAddress: { address: g }, type: 'optional' }))];
+
+async function createEvent(hostUserId, { summary, description, start, end, attendeeEmail, attendeeName, guests, location, locationType, timezone }) {
   const conn = db.get('SELECT * FROM calendar_connections WHERE user_id = ? AND write_events = 1 ORDER BY id LIMIT 1', hostUserId);
   if (!conn || !isConfigured(conn.provider)) return null;
   try {
@@ -235,7 +239,7 @@ async function createEvent(hostUserId, { summary, description, start, end, atten
       const body = {
         summary, description, location: locationType === 'google_meet' ? undefined : location,
         start: { dateTime: new Date(start).toISOString(), timeZone: timezone }, end: { dateTime: new Date(end).toISOString(), timeZone: timezone },
-        attendees: attendeeEmail ? [{ email: attendeeEmail, displayName: attendeeName }] : [],
+        attendees: googleAttendees(attendeeEmail, attendeeName, guests),
         reminders: { useDefault: true },
       };
       if (locationType === 'google_meet') body.conferenceData = { createRequest: { requestId: token(8), conferenceSolutionKey: { type: 'hangoutsMeet' } } };
@@ -250,7 +254,7 @@ async function createEvent(hostUserId, { summary, description, start, end, atten
       subject: summary, body: { contentType: 'text', content: description },
       start: { dateTime: new Date(start).toISOString().slice(0, 19), timeZone: 'UTC' }, end: { dateTime: new Date(end).toISOString().slice(0, 19), timeZone: 'UTC' },
       location: location && locationType !== 'teams' ? { displayName: location } : undefined,
-      attendees: attendeeEmail ? [{ emailAddress: { address: attendeeEmail, name: attendeeName }, type: 'required' }] : [],
+      attendees: graphAttendees(attendeeEmail, attendeeName, guests),
     };
     if (locationType === 'teams') { body.isOnlineMeeting = true; body.onlineMeetingProvider = 'teamsForBusiness'; }
     const r = await fetch('https://graph.microsoft.com/v1.0/me/events', {
@@ -275,4 +279,21 @@ async function deleteEvent(ext) {
   } catch (e) { markError(conn, e); }
 }
 
-module.exports = { needsReconnect, checkConnection, revoke, explainBusy, ignoredReason, PROVIDERS, isConfigured, startAuth, finishAuth, stateRow, getBusy, createEvent, deleteEvent, clearBusyCache };
+// Change who is on an event that already exists. A calendar that will not take the change is
+// logged, not raised: the guest still has their emailed invite.
+async function updateAttendees(ext, { attendeeEmail, attendeeName, guests }) {
+  const conn = db.get('SELECT * FROM calendar_connections WHERE id = ?', ext.connection_id);
+  if (!conn || !isConfigured(conn.provider)) return;
+  try {
+    const at = await accessToken(conn);
+    const google = conn.provider === 'google';
+    const url = google
+      ? `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(conn.calendar_id || 'primary')}/events/${encodeURIComponent(ext.event_id)}?sendUpdates=none`
+      : `https://graph.microsoft.com/v1.0/me/events/${encodeURIComponent(ext.event_id)}`;
+    const attendees = google ? googleAttendees(attendeeEmail, attendeeName, guests) : graphAttendees(attendeeEmail, attendeeName, guests);
+    const r = await fetch(url, { method: 'PATCH', headers: { Authorization: `Bearer ${at}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ attendees }), signal: AbortSignal.timeout(10000) });
+    if (!r.ok) throw new Error(`${conn.provider} update event ${r.status}`);
+  } catch (e) { markError(conn, e); console.warn('[calendar] update attendees failed:', e.message); }
+}
+
+module.exports = { needsReconnect, checkConnection, revoke, explainBusy, ignoredReason, PROVIDERS, isConfigured, startAuth, finishAuth, stateRow, getBusy, createEvent, updateAttendees, deleteEvent, clearBusyCache };

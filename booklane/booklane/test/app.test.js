@@ -2709,3 +2709,110 @@ test('leads and bookings can be deleted several at once, quietly, and only your 
   assert.equal(db.get('SELECT COUNT(*) c FROM leads WHERE id IN (?, ?)', bk.lead_id, qLead).c, 0);
   assert.equal((await req('POST', '/api/admin/leads/delete', { ids: [] }, { cookie: ownerCookie })).status, 422);
 });
+
+test('a customer can invite guests, who get invites but never the manage link', async () => {
+  const cookie = await signup('guests@test.dev', 'Guest Co');
+  const me = await req('GET', '/api/admin/auth/me', null, { cookie });
+  const slug = me.data.business.slug;
+  const bizId = me.data.business.id;
+  const uid = me.data.user.id;
+  const day = nextWeekday(4);
+  const slots = (await req('GET', `/api/public/b/${slug}/e/discovery-call/slots?from=${day}&to=${day}&tz=America/Chicago`)).data.days[day];
+  const contact = { first_name: 'Gail', last_name: 'Host', email: 'gail@example.com', phone: '5555550100' };
+  const mails = (to) => db.all("SELECT * FROM email_log WHERE business_id = ? AND to_addr = ? ORDER BY id", bizId, to);
+  const settle = async (check) => { for (let i = 0; i < 100 && !check(); i++) await new Promise((r) => setTimeout(r, 10)); };
+
+  // Bad and excess lists are refused before anything is booked.
+  const bad = await req('POST', `/api/public/b/${slug}/e/discovery-call/book`, { start: slots[0], timezone: 'America/Chicago', contact, guests: ['nope'] });
+  assert.equal(bad.status, 422);
+  const many = ['a', 'b', 'c', 'd', 'e', 'f'].map((x) => `${x}@example.com`);
+  assert.equal((await req('POST', `/api/public/b/${slug}/e/discovery-call/book`, { start: slots[0], timezone: 'America/Chicago', contact, guests: many })).status, 422);
+  assert.equal(db.get('SELECT COUNT(*) c FROM bookings WHERE business_id = ?', bizId).c, 0);
+
+  // The customer's own address and repeats are dropped quietly.
+  const ok = await req('POST', `/api/public/b/${slug}/e/discovery-call/book`, { start: slots[0], timezone: 'America/Chicago', contact, guests: ['Ann@Example.com', 'ann@example.com', 'gail@example.com'] });
+  assert.equal(ok.status, 200, JSON.stringify(ok.data));
+  const bk = () => db.get('SELECT * FROM bookings WHERE token = ?', ok.data.token);
+  assert.deepEqual(db.json(bk().guests, []), ['ann@example.com']);
+
+  await settle(() => mails('ann@example.com').length);
+  const invite = mails('ann@example.com')[0];
+  assert.match(invite.subject, /^You're invited/);
+  assert.match(invite.html, /Gail Host/);
+  assert.ok(!invite.html.includes(ok.data.token), 'a guest must not receive the link that can cancel the call');
+  assert.match((await req('GET', `/api/public/bookings/${ok.data.token}/ics`)).data, /ATTENDEE;ROLE=OPT-PARTICIPANT;RSVP=FALSE:mailto:ann@example\.com/);
+
+  // Later, from the manage link: the calendar event is updated to match.
+  db.run('INSERT INTO calendar_connections (user_id, provider, account_email, access_token, refresh_token, expires_at) VALUES (?,?,?,?,?,?)', uid, 'google', 'g@test.dev',
+    require('../src/lib/security').encrypt('live'), require('../src/lib/security').encrypt('refresh'), Date.now() + 3600000);
+  const conn = db.get('SELECT id FROM calendar_connections WHERE user_id = ?', uid).id;
+  db.run('UPDATE bookings SET external_events = ? WHERE id = ?', JSON.stringify([{ provider: 'google', connection_id: conn, event_id: 'ev1' }]), bk().id);
+  const realFetch = global.fetch;
+  const saved = [process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET];
+  process.env.GOOGLE_CLIENT_ID = 'cid'; process.env.GOOGLE_CLIENT_SECRET = 'secret';
+  const patches = [];
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('googleapis.com/calendar')) { patches.push({ url: String(url), method: opts.method, body: JSON.parse(opts.body) }); return new Response('{}', { status: 200 }); }
+    return realFetch(url, opts);
+  };
+  try {
+    const add = await req('POST', `/api/public/bookings/${ok.data.token}/guests`, { emails: ['ben@example.com'] });
+    assert.equal(add.status, 200, JSON.stringify(add.data));
+    assert.deepEqual(add.data.guests, ['ann@example.com', 'ben@example.com']);
+    assert.equal(patches.length, 1);
+    assert.equal(patches[0].method, 'PATCH');
+    assert.match(patches[0].url, /sendUpdates=none/);
+    assert.deepEqual(patches[0].body.attendees.map((a) => a.email), ['gail@example.com', 'ann@example.com', 'ben@example.com']);
+    await settle(() => mails('ben@example.com').length && mails('guests@test.dev').some((m) => /Guests changed/.test(m.subject)));
+    assert.equal(mails('ben@example.com').length, 1);
+    assert.equal(mails('ann@example.com').length, 1, 'someone already invited is not invited again');
+
+    const rm = await req('POST', `/api/public/bookings/${ok.data.token}/guests/remove`, { email: 'ben@example.com' });
+    assert.deepEqual(rm.data.guests, ['ann@example.com']);
+    assert.deepEqual(patches[1].body.attendees.map((a) => a.email), ['gail@example.com', 'ann@example.com']);
+    await settle(() => mails('ben@example.com').length === 2);
+    assert.match(mails('ben@example.com')[1].subject, /no longer on/);
+  } finally {
+    global.fetch = realFetch;
+    [process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET] = saved;
+    if (saved[0] === undefined) delete process.env.GOOGLE_CLIENT_ID;
+    if (saved[1] === undefined) delete process.env.GOOGLE_CLIENT_SECRET;
+  }
+
+  // Guests follow the call: moved and cancelled, with no manage link either time.
+  const moved = await req('POST', `/api/public/bookings/${ok.data.token}/reschedule`, { start: slots[1], timezone: 'America/Chicago' });
+  assert.equal(moved.status, 200, JSON.stringify(moved.data));
+  await settle(() => mails('ann@example.com').length === 2);
+  assert.match(mails('ann@example.com')[1].subject, /^Rescheduled/);
+  const list = await req('GET', '/api/admin/bookings?scope=upcoming', null, { cookie });
+  assert.deepEqual(list.data.find((b) => b.token === ok.data.token).guests, ['ann@example.com']);
+  await req('POST', `/api/public/bookings/${ok.data.token}/cancel`, {});
+  await settle(() => mails('ann@example.com').length === 3);
+  assert.match(mails('ann@example.com')[2].subject, /^Cancelled/);
+  assert.ok(mails('ann@example.com').every((m) => !m.html.includes(ok.data.token)));
+  assert.equal((await req('POST', `/api/public/bookings/${ok.data.token}/guests`, { emails: ['late@example.com'] })).status, 400);
+
+  // A page can switch it off: nothing added at booking, and the manage link refuses too.
+  const et = db.get('SELECT id FROM event_types WHERE business_id = ? AND slug = ?', bizId, 'discovery-call');
+  assert.equal((await req('PATCH', `/api/admin/event-types/${et.id}`, { allow_guests: false }, { cookie })).status, 200);
+  const off = await req('POST', `/api/public/b/${slug}/e/discovery-call/book`, { start: slots[2], timezone: 'America/Chicago', contact: { ...contact, email: 'off@example.com' }, guests: ['ann@example.com'] });
+  assert.equal(off.status, 200, JSON.stringify(off.data));
+  assert.deepEqual(db.json(db.get('SELECT guests FROM bookings WHERE token = ?', off.data.token).guests, []), []);
+  assert.equal((await req('POST', `/api/public/bookings/${off.data.token}/guests`, { emails: ['x@example.com'] })).status, 403);
+});
+
+test('guests get the day-before reminder even when automations remind the customer', async () => {
+  const cookie = await signup('remind@test.dev', 'Remind Co');
+  const me = await req('GET', '/api/admin/auth/me', null, { cookie });
+  const bizId = me.data.business.id;
+  const et = db.get('SELECT id FROM event_types WHERE business_id = ?', bizId);
+  const start = new Date(Date.now() + 5 * 3600000).toISOString();
+  db.run(`INSERT INTO bookings (business_id, event_type_id, token, start_utc, end_utc, invitee_tz, name, email, guests, created_at) VALUES (?,?,?,?,?,?,?,?,?, datetime('now', '-3 days'))`,
+    bizId, et.id, 'remind-token-1234', start, new Date(Date.parse(start) + 1800000).toISOString(), 'America/Chicago', 'Rae', 'rae@example.com', JSON.stringify(['gus@example.com']));
+  db.run(`INSERT INTO message_automations (business_id, name, trigger, offset_min, channel, active) VALUES (?,?,?,?,?,1)`, bizId, 'Mine', 'before', 60, 'email');
+  await require('../src/services/bookings').sendReminders();
+  const m = db.all('SELECT * FROM email_log WHERE business_id = ?', bizId);
+  assert.equal(m.filter((x) => x.to_addr === 'gus@example.com').length, 1);
+  assert.equal(m.filter((x) => x.to_addr === 'rae@example.com').length, 0, 'their automation handles the customer');
+  assert.ok(!m.find((x) => x.to_addr === 'gus@example.com').html.includes('remind-token-1234'));
+});

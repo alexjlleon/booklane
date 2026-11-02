@@ -12,7 +12,10 @@
     // Preselected, so somebody who scrolls straight to the calendar still books the first way this
     // page offers rather than nothing at all.
     placeId: ((et.places || [])[0] || {}).id || null,
+    guests: [], guestDraft: '', guestsOpen: false, guestError: null,
   };
+  const MAX_GUESTS = 5;
+  const guestsOn = () => (et.settings || {}).allow_guests !== false;
   const steps = et.steps;
 
   // An answer can route the booking to another page's calendar (an existing client to the planning
@@ -107,6 +110,34 @@
     if ((steps[st.i] || {}).type === 'availability') render();
   }
 
+  function renderGuests() {
+    const list = st.guests.length ? `<ul class="guest-list">${st.guests.map((g) => `<li><span>${esc(g)}</span><button type="button" class="btn btn-link btn-sm" data-guest-remove="${esc(g)}">Remove</button></li>`).join('')}</ul>` : '';
+    if (!st.guestsOpen && !st.guests.length) return `<div class="guests"><button type="button" class="btn btn-link btn-sm guest-open" data-guest-open>+ Add guests</button></div>`;
+    return `<div class="guests">${list}${st.guests.length < MAX_GUESTS ? `<div class="field ${st.guestError ? 'has-error' : ''}"><label for="f-guest">Guest email</label>
+      <div class="guest-add"><input class="input" id="f-guest" name="guest" type="email" inputmode="email" placeholder="guest@example.com" value="${esc(st.guestDraft)}" data-guest-input>
+      <button type="button" class="btn btn-ghost" data-guest-add>Add</button></div>${st.guestError ? `<div class="field-error">${esc(st.guestError)}</div>` : ''}</div>` : ''}
+      <p class="muted small">Guests get the calendar invite and reminders. You can add up to ${MAX_GUESTS}.</p></div>`;
+  }
+
+  // Just this block, so the rest of the step does not fade back in on every guest.
+  function repaintGuests() {
+    const el = $('.guests');
+    if (el) el.outerHTML = renderGuests();
+    const input = $('#f-guest');
+    if (input) input.focus();
+  }
+
+  // Adds whatever is typed in the guest box. False when it is not a usable address.
+  function commitGuest() {
+    const email = st.guestDraft.trim().toLowerCase();
+    st.guestError = null;
+    if (!email) return true;
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) { st.guestError = 'Enter a valid email'; return false; }
+    if (email !== st.contact.email.trim().toLowerCase() && !st.guests.includes(email)) st.guests.push(email);
+    st.guestDraft = '';
+    return true;
+  }
+
   function renderContact(step) {
     const f = step.fields || {};
     const c = st.contact;
@@ -116,6 +147,7 @@
       <div class="grid-2">${show('first_name') ? field('first_name', 'First name', inp('first_name', 'text', 'given-name'), f.first_name === 'required') : ''}${show('last_name') ? field('last_name', 'Last name', inp('last_name', 'text', 'family-name'), f.last_name === 'required') : ''}</div>
       ${show('email') ? field('email', 'Email', inp('email', 'email', 'email', 'you@example.com'), f.email !== 'optional') : ''}
       ${show('phone') ? field('phone', 'Phone', inp('phone', 'tel', 'tel', '(555) 555-5555'), f.phone === 'required') : ''}
+      ${guestsOn() ? renderGuests() : ''}
       ${show('sms_consent') ? `<label class="check"><input type="checkbox" name="sms_consent" data-contact ${c.sms_consent ? 'checked' : ''}><span>${esc(biz.settings.sms_consent_text)}</span></label>` : ''}
       ${biz.settings.privacy_note ? `<p class="muted small" style="margin-top:14px">${esc(biz.settings.privacy_note)}</p>` : ''}
     </form>`;
@@ -213,6 +245,8 @@
     if (step.type === 'availability') return errors;
     if (step.type === 'schedule') { if (!st.slot) st.error = 'Pick a date and time to continue.'; return !st.slot ? { _: 1 } : errors; }
     if (step.type === 'contact') {
+      // An address typed but never added would otherwise be dropped without them knowing.
+      if (!commitGuest()) return { guest: st.guestError };
       const f = step.fields || {}, c = st.contact;
       if (f.first_name === 'required' && !c.first_name.trim()) errors.first_name = 'Required';
       if (f.last_name === 'required' && !c.last_name.trim()) errors.last_name = 'Required';
@@ -259,7 +293,7 @@
     try {
       await ensureLead();
       await saver.flush();
-      const r = await api('POST', `/api/public/b/${biz.slug}/e/${et.slug}/book`, { lead_token: st.leadToken, quote_token: st.quoteToken, start: st.slot, timezone: st.tz, contact: st.contact, answers: st.answers, place_id: st.placeId });
+      const r = await api('POST', `/api/public/b/${biz.slug}/e/${et.slug}/book`, { lead_token: st.leadToken, quote_token: st.quoteToken, start: st.slot, timezone: st.tz, contact: st.contact, guests: st.guests, answers: st.answers, place_id: st.placeId });
       BL.store.del(storeKey);
       location.href = r.redirect;
     } catch (e) {
@@ -281,13 +315,20 @@
 
   // --------- Events ---------
   app.addEventListener('click', (e) => {
+    const remove = e.target.closest('[data-guest-remove]');
+    if (remove) { st.guests = st.guests.filter((g) => g !== remove.dataset.guestRemove); return repaintGuests(); }
+    if (e.target.closest('[data-guest-open]')) { st.guestsOpen = true; return repaintGuests(); }
+    if (e.target.closest('[data-guest-add]')) { commitGuest(); return repaintGuests(); }
     if (e.target.closest('[data-next]')) { e.preventDefault(); go(1); }
     else if (e.target.closest('[data-back]')) { e.preventDefault(); go(-1); }
   });
   app.addEventListener('submit', (e) => { e.preventDefault(); go(1); });
-  app.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.matches('input.input')) { e.preventDefault(); go(1); } });
+  app.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && e.target.matches('[data-guest-input]')) { e.preventDefault(); commitGuest(); return repaintGuests(); }
+    if (e.key === 'Enter' && e.target.matches('input.input')) { e.preventDefault(); go(1); } });
   function onInput(e) {
     const t = e.target;
+    if (t.hasAttribute('data-guest-input')) { st.guestDraft = t.value; return; }
     if (t.hasAttribute('data-place')) {
       st.placeId = t.value;
       const chosen = (et.places || []).find((p) => p.id === t.value);

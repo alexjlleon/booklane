@@ -8,7 +8,7 @@
   const app = document.getElementById('app');
   const tz = bk.timezone || BL.guessTz();
   let mode = D.reschedule ? 'reschedule' : 'view';
-  let error = null, busy = false;
+  let error = null, busy = false, guestDraft = '', guestError = null;
 
   function summary() {
     return `<div class="summary">
@@ -18,6 +18,28 @@
       ${bk.host ? `<div><span class="k">With</span><span class="v">${esc(bk.host)}</span></div>` : ''}
       <div><span class="k">Confirmation sent to</span><span class="v">${esc(bk.email)}</span></div>
     </div>`;
+  }
+
+  // Guests are shown to whoever holds this link, and only they can change the list.
+  function guestsPanel() {
+    const list = bk.guests || [];
+    const editable = !bk.is_past;
+    const canAdd = editable && bk.guests_allowed && list.length < bk.max_guests;
+    if (!list.length && !canAdd) return '';
+    return `<div class="guests guests-manage"><h3>Guests</h3>
+      ${list.length ? `<ul class="guest-list">${list.map((g) => `<li><span>${esc(g)}</span>${editable ? `<button type="button" class="btn btn-link btn-sm" data-guest-remove="${esc(g)}">Remove</button>` : ''}</li>`).join('')}</ul>` : ''}
+      ${canAdd ? `<div class="field ${guestError ? 'has-error' : ''}"><label for="f-guest">Invite someone to this call</label>
+        <div class="guest-add"><input class="input" id="f-guest" type="text" inputmode="email" placeholder="guest@example.com" value="${esc(guestDraft)}">
+        <button type="button" class="btn btn-ghost" data-guest-add ${busy ? 'disabled' : ''}>Invite</button></div>${guestError ? `<div class="field-error">${esc(guestError)}</div>` : ''}</div>
+      <p class="muted small">They get the invite and reminders. Only you can reschedule or cancel. You can invite up to ${bk.max_guests}.</p>` : ''}</div>`;
+  }
+
+  async function inviteGuests() {
+    const emails = guestDraft.split(/[\s,;]+/).filter(Boolean);
+    if (!emails.length || busy) return;
+    busy = true; guestError = null;
+    try { bk.guests = (await api('POST', `/api/public/bookings/${bk.token}/guests`, { emails })).guests; guestDraft = ''; } catch (err) { guestError = err.message; }
+    busy = false; render();
   }
 
   function render() {
@@ -38,7 +60,7 @@
     } else {
       inner = `<div class="done"><div class="done-icon">${icons.check}</div>
         <h2>${isNew ? `You're booked${bk.name ? ', ' + esc(bk.name.split(' ')[0]) : ''}!` : 'Your upcoming call'}</h2>
-        <p class="muted">${isNew ? 'A calendar invite is on its way to your inbox.' : ''}</p>${summary()}
+        <p class="muted">${isNew ? 'A calendar invite is on its way to your inbox.' : ''}</p>${summary()}${guestsPanel()}
         <div class="actions"><a class="btn btn-ghost" href="${esc(bk.google_link)}" target="_blank" rel="noopener">Add to Google Calendar</a><a class="btn btn-ghost" href="${esc(bk.ics_url)}">Apple / Outlook (.ics)</a></div>
         <div class="actions" style="margin-top:18px"><button class="btn btn-link" data-mode="reschedule">Reschedule</button><button class="btn btn-link" data-mode="cancel">Cancel</button></div>
         ${biz.settings.quote.enabled && isNew ? `<p class="small muted" style="margin-top:24px">Want to see pricing before the call? <a href="/b/${esc(biz.slug)}/quote">Build your quote</a></p>` : ''}</div>`;
@@ -61,11 +83,19 @@
   app.addEventListener('click', async (e) => {
     const m = e.target.closest('[data-mode]');
     if (m) { mode = m.dataset.mode; error = null; render(); return; }
+    if (e.target.closest('[data-guest-add]')) return inviteGuests();
+    const drop = e.target.closest('[data-guest-remove]');
+    if (drop) {
+      try { bk.guests = (await api('POST', `/api/public/bookings/${bk.token}/guests/remove`, { email: drop.dataset.guestRemove })).guests; guestError = null; } catch (err) { guestError = err.message; }
+      render(); return;
+    }
     if (e.target.closest('[data-cancel]')) {
       busy = true; render();
       try { await api('POST', `/api/public/bookings/${bk.token}/cancel`, { reason: ($('#reason') || {}).value }); bk.status = 'cancelled'; bk.cancel_reason = ($('#reason') || {}).value; } catch (err) { error = err.message; }
       busy = false; mode = 'view'; render();
     }
   });
+  app.addEventListener('input', (e) => { if (e.target.id === 'f-guest') guestDraft = e.target.value; });
+  app.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.id === 'f-guest') { e.preventDefault(); inviteGuests(); } });
   render();
 })();

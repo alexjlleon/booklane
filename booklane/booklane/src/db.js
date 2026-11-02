@@ -303,6 +303,8 @@ for (const sql of [
   'ALTER TABLE message_automations ADD COLUMN team_id INTEGER',
   // The note left when a call was passed to a teammate, shown to them in the handoff email.
   'ALTER TABLE bookings ADD COLUMN handoff_note TEXT',
+  // Email addresses of the people the customer invited to the call, as a JSON list.
+  "ALTER TABLE bookings ADD COLUMN guests TEXT NOT NULL DEFAULT '[]'",
 ]) { try { raw.exec(sql); } catch { /* column already exists */ } }
 
 // Booklane no longer takes payments. Drop what the shop, the paid sessions and the card providers

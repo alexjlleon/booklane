@@ -287,6 +287,7 @@ module.exports = function publicRoutes(app) {
     const summary = `${et?.name || 'Call'} with ${business.name}`;
     return { token: bk.token, status: bk.status, start: bk.start_utc, end: bk.end_utc, timezone: bk.invitee_tz, name: bk.name, email: bk.email, location: bk.location,
       host: host?.name, event_name: et?.name, duration_min: et?.duration_min, cancel_reason: bk.cancel_reason,
+      guests: BK.guestsOf(bk), guests_allowed: BK.guestsAllowed(et), max_guests: BK.MAX_GUESTS, is_past: start < Date.now(),
       google_link: googleCalendarLink({ start, end, summary, location: bk.location, description: B.linkFor(business, `/booking/${bk.token}`) }), ics_url: `/api/public/bookings/${bk.token}/ics` };
   }
 
@@ -349,7 +350,7 @@ module.exports = function publicRoutes(app) {
     // An answer can send them to another page's calendar, e.g. an existing client to the planning team.
     const routed = routedEventType(b, et, body.answers);
     if (routed) body.answers.routed_to = routed.name;
-    const booking = await BK.createBooking({ business: b, et: routed || et, contactEt: et, startIso: body.start, tz: body.timezone, contact, answers: body.answers || {}, lead, quote, placeId: routed ? undefined : body.place_id });
+    const booking = await BK.createBooking({ business: b, et: routed || et, contactEt: et, startIso: body.start, tz: body.timezone, contact, answers: body.answers || {}, guests: BK.guestsAllowed(et) ? body.guests : [], lead, quote, placeId: routed ? undefined : body.place_id });
     if (quote) db.run("UPDATE quotes SET next_step = 'call', status = CASE WHEN status = 'draft' THEN 'submitted' ELSE status END, updated_at = datetime('now') WHERE id = ?", quote.id);
     return { token: booking.token, redirect: `/booking/${booking.token}?new=1` };
   });
@@ -359,8 +360,24 @@ module.exports = function publicRoutes(app) {
     if (!bk) throw new HttpError(404, 'Not found');
     const { et, business, host } = BK.bookingView(bk);
     res.set('Content-Disposition', 'attachment; filename="booking.ics"');
-    res.text(buildIcs({ uid: `booking-${bk.id}-${bk.token.slice(0, 8)}@booklane`, start: Date.parse(bk.start_utc), end: Date.parse(bk.end_utc), summary: `${et?.name || 'Call'} with ${business.name}`,
+    res.text(buildIcs({ guests: BK.guestsOf(bk), uid: `booking-${bk.id}-${bk.token.slice(0, 8)}@booklane`, start: Date.parse(bk.start_utc), end: Date.parse(bk.end_utc), summary: `${et?.name || 'Call'} with ${business.name}`,
       description: B.linkFor(business, `/booking/${bk.token}`), location: bk.location, organizerName: business.name, organizerEmail: host?.email, attendeeName: bk.name, attendeeEmail: bk.email, method: 'PUBLISH', cancelled: bk.status === 'cancelled' }), 'text/calendar; charset=utf-8');
+  });
+
+  // The manage link is the customer's, so holding it is what lets someone change the guest list.
+  // Every add can send email to a new address, so it shares the tight booking limit.
+  app.post('/api/public/bookings/:token/guests', async (req) => {
+    bookLimit(req);
+    const bk = db.get('SELECT * FROM bookings WHERE token = ?', req.params.token);
+    if (!bk) throw new HttpError(404, 'Not found');
+    return { guests: BK.guestsOf(await BK.addGuests(bk, req.body?.emails)) };
+  });
+
+  app.post('/api/public/bookings/:token/guests/remove', async (req) => {
+    bookLimit(req);
+    const bk = db.get('SELECT * FROM bookings WHERE token = ?', req.params.token);
+    if (!bk) throw new HttpError(404, 'Not found');
+    return { guests: BK.guestsOf(await BK.removeGuest(bk, req.body?.email)) };
   });
 
   app.post('/api/public/bookings/:token/cancel', async (req) => {

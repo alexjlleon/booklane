@@ -42,6 +42,26 @@ function locationText(et, contact, joinUrl) {
   return PLACES.placeText(PLACES.placesFor(et)[0], contact, joinUrl);
 }
 
+// ---------- Guests: people the customer invites to their call ----------
+const MAX_GUESTS = 5;
+const guestsOf = (b) => db.json(b.guests, []);
+// On unless a booking page has switched it off.
+const guestsAllowed = (et) => et?.settings?.allow_guests !== false;
+
+// The list after adding `list` to `existing`: lower-cased, no repeats, and never the customer.
+function mergeGuests(list, customerEmail, existing = []) {
+  const own = String(customerEmail || '').trim().toLowerCase();
+  const out = [...existing];
+  for (const raw of [].concat(list || [])) {
+    const email = String(raw || '').trim().toLowerCase();
+    if (!email) continue;
+    if (!isEmail(email)) throw new HttpError(422, `"${email.slice(0, 80)}" is not a valid email address`);
+    if (email !== own && !out.includes(email)) out.push(email);
+  }
+  if (out.length > MAX_GUESTS) throw new HttpError(422, `You can invite up to ${MAX_GUESTS} guests.`);
+  return out;
+}
+
 function bookingView(b) {
   const et = hydrateEt(db.get('SELECT * FROM event_types WHERE id = ?', b.event_type_id));
   const business = B.byId(b.business_id);
@@ -51,6 +71,44 @@ function bookingView(b) {
   return { b, et, business, host };
 }
 
+// What a guest receives. Deliberately has no manage link and no manage link in its invite: that
+// link can move or cancel the call, and only the customer who booked it should hold it.
+async function sendGuestEmails(kind, booking, recipients) {
+  if (!recipients.length) return;
+  const { b, et, business, host } = bookingView(booking);
+  const tz = b.invitee_tz || business.timezone;
+  const start = Date.parse(b.start_utc), end = Date.parse(b.end_utc);
+  const when = T.formatDateTime(start, tz);
+  const summary = `${et?.name || 'Call'} with ${business.name}`;
+  const inviter = b.name || b.email;
+  const off = kind === 'cancelled' || kind === 'removed';
+  const copy = {
+    created: { subject: `You're invited: ${summary} on ${when}`, heading: `${inviter} invited you to a call` },
+    rescheduled: { subject: `Rescheduled: ${summary} on ${when}`, heading: 'This call was rescheduled' },
+    reassigned: { subject: `Update: ${summary} on ${when} is now with ${host?.name || 'a teammate'}`, heading: `This call is now with ${host?.name || 'a teammate'}` },
+    cancelled: { subject: `Cancelled: ${summary}`, heading: 'This call was cancelled' },
+    removed: { subject: `You're no longer on: ${summary}`, heading: `${inviter} removed you from this call` },
+    reminder: { subject: `Reminder: ${summary}`, heading: 'See you soon!' },
+  }[kind];
+  // One message each, so a calendar app treats it as that person's own invite.
+  for (const email of recipients) {
+    const ics = kind === 'reminder' ? null : buildIcs({ uid: bookingUid(b), start, end, summary, description: `Invited by ${inviter}`, location: b.location,
+      organizerName: business.name, organizerEmail: host?.email, attendeeName: b.name, attendeeEmail: b.email, guests: kind === 'removed' ? [email] : guestsOf(b), cancelled: off,
+      sequence: off ? 2 : kind === 'rescheduled' || kind === 'reassigned' ? 1 : 0 });
+    await sendEmail({
+      to: email, businessId: business.id, fromName: business.name, replyTo: host?.email || business.email, subject: copy.subject,
+      html: layout(business, {
+        heading: copy.heading,
+        body: rows([['What', summary], ['When', when], ['Where', b.location], ['With', host?.name], ['Invited by', inviter]]) +
+          (off ? '' : `<p><a href="${googleCalendarLink({ start, end, summary, location: b.location, description: `Invited by ${inviter}` })}">Add to Google Calendar</a>. To change the time, please ask ${esc(inviter)}.</p>`),
+      }),
+      attachments: ics ? [{ filename: 'invite.ics', content: ics }] : undefined,
+    });
+  }
+}
+
+const bookingUid = (b) => `booking-${b.id}-${b.token.slice(0, 8)}@booklane`;
+
 async function sendBookingEmails(kind, booking, { oldHost, notifyCustomer = true } = {}) {
   const { b, et, business, host } = bookingView(booking);
   const tz = b.invitee_tz || business.timezone;
@@ -59,8 +117,9 @@ async function sendBookingEmails(kind, booking, { oldHost, notifyCustomer = true
   const manage = B.linkFor(business, `/booking/${b.token}`);
   const summary = `${et?.name || 'Call'} with ${business.name}`;
   const answers = db.json(b.answers, {});
-  const ics = buildIcs({ uid: `booking-${b.id}-${b.token.slice(0, 8)}@booklane`, start, end, summary, description: `Manage: ${manage}`, location: b.location,
-    organizerName: business.name, organizerEmail: host?.email, attendeeName: b.name, attendeeEmail: b.email, cancelled: kind === 'cancelled', sequence: kind === 'rescheduled' || kind === 'reassigned' ? 1 : kind === 'cancelled' ? 2 : 0 });
+  const guests = guestsOf(b);
+  const ics = buildIcs({ uid: bookingUid(b), start, end, summary, description: `Manage: ${manage}`, location: b.location,
+    organizerName: business.name, organizerEmail: host?.email, attendeeName: b.name, attendeeEmail: b.email, guests, cancelled: kind === 'cancelled', sequence: kind === 'rescheduled' || kind === 'reassigned' ? 1 : kind === 'cancelled' ? 2 : 0 });
   const headings = { created: `You're booked, ${esc((b.name || '').split(' ')[0])}!`, rescheduled: 'Your call was rescheduled', cancelled: 'Your call was cancelled',
     reassigned: `Your call is now with ${esc(host?.name || 'a teammate')}` };
   if (kind !== 'reassigned' || notifyCustomer) await sendEmail({
@@ -68,12 +127,13 @@ async function sendBookingEmails(kind, booking, { oldHost, notifyCustomer = true
     subject: kind === 'cancelled' ? `Cancelled: ${summary}` : kind === 'reassigned' ? `Update: ${summary} on ${when} is now with ${host?.name || 'a teammate'}` : kind === 'rescheduled' ? `Rescheduled: ${summary} on ${when}` : `Confirmed: ${summary} on ${when}`,
     html: layout(business, {
       heading: headings[kind],
-      body: rows([['What', summary], ['When', when], ['Where', b.location], ['With', host?.name]]) +
+      body: rows([['What', summary], ['When', when], ['Where', b.location], ['With', host?.name], ['Guests', guests.join(', ')]]) +
         (kind !== 'cancelled' ? `<p>Need to make a change? <a href="${manage}">Reschedule or cancel</a>. <a href="${googleCalendarLink({ start, end, summary, location: b.location, description: manage })}">Add to Google Calendar</a>.</p>` : ''),
       cta: kind === 'cancelled' ? { label: 'Book a new time', url: B.pageUrl(business, et?.slug || '') } : null,
     }),
     attachments: [{ filename: 'invite.ics', content: ics }],
   });
+  if (kind !== 'reassigned' || notifyCustomer) await sendGuestEmails(kind, b, guests);
   // A handoff only concerns the two people involved, not the whole team inbox.
   const team = new Set(kind === 'reassigned' ? [] : B.teamEmails(business));
   if (host?.email) team.add(host.email);
@@ -84,7 +144,7 @@ async function sendBookingEmails(kind, booking, { oldHost, notifyCustomer = true
       subject: `${kind === 'created' ? 'New booking' : kind === 'rescheduled' ? 'Rescheduled' : kind === 'reassigned' ? `Passed to ${host?.name}` : 'Cancelled'}: ${b.name} · ${T.formatDateTime(start, business.timezone, { weekday: 'short', month: 'short', year: undefined })}`,
       html: layout(business, {
         heading: kind === 'created' ? 'New call booked' : kind === 'rescheduled' ? 'A call was rescheduled' : kind === 'reassigned' ? `${esc(oldHost?.name || 'Someone')} passed this call to ${esc(host?.name || 'a teammate')}` : 'A call was cancelled',
-        body: rows([['Event', et?.name], ['When', T.formatDateTime(start, business.timezone)], ['Host', host?.name], ...(kind === 'reassigned' ? [['Was with', oldHost?.name], ['Note', b.handoff_note]] : []), ['Name', b.name], ['Email', b.email], ['Phone', b.phone], ['Location', b.location],
+        body: rows([['Event', et?.name], ['When', T.formatDateTime(start, business.timezone)], ['Host', host?.name], ...(kind === 'reassigned' ? [['Was with', oldHost?.name], ['Note', b.handoff_note]] : []), ['Name', b.name], ['Email', b.email], ['Phone', b.phone], ['Guests', guests.join(', ')], ['Location', b.location],
           ['Reason', b.cancel_reason], ...L.answersToPairs(answers)]),
         cta: { label: 'Open in dashboard', url: B.linkFor(business, '/app#/bookings') },
       }),
@@ -109,13 +169,14 @@ function assertFree(et, hostId, startMs, endMs, excludeId = 0) {
   }
 }
 
-async function createBooking({ business, et, startIso, tz, contact = {}, answers = {}, lead, quote, restrictHostIds, placeId, contactEt, countSteps }) {
+async function createBooking({ business, et, startIso, tz, contact = {}, answers = {}, guests, lead, quote, restrictHostIds, placeId, contactEt, countSteps }) {
   const startMs = Date.parse(startIso);
   if (!Number.isFinite(startMs)) throw new HttpError(400, 'Pick a valid time');
   if (!T.isValidTz(tz)) tz = business.timezone;
   // A routed booking is made on another page's calendar, but the person filled in this page's
   // contact step, so that is the one their details are checked against.
   validateContact(contactEt || et, contact, business);
+  const guestList = mergeGuests(guests, contact.email);
   const hosts = await S.availableHostsAt(et, startMs, { restrictHostIds });
   if (!hosts.length) throw new HttpError(409, 'Sorry, that time was just taken. Please pick another time.');
   // Counted from the questions the person actually answered: this page's, the page that routed
@@ -132,14 +193,14 @@ async function createBooking({ business, et, startIso, tz, contact = {}, answers
 
   const bookingId = db.tx(() => {
     assertFree(et, hostId, startMs, endMs);
-    return db.run(`INSERT INTO bookings (business_id, event_type_id, host_user_id, lead_id, quote_id, token, start_utc, end_utc, invitee_tz, name, email, phone, location, place_id, answers, services_count)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, business.id, et.id, hostId, lead?.id, quote?.id, t, new Date(startMs).toISOString(), new Date(endMs).toISOString(), tz,
-    clampStr(name, 160), String(contact.email).trim().toLowerCase(), clampStr(contact.phone, 40), PLACES.placeText(place, contact), place.id, JSON.stringify(cleanAnswers), servicesCount).lastId;
+    return db.run(`INSERT INTO bookings (business_id, event_type_id, host_user_id, lead_id, quote_id, token, start_utc, end_utc, invitee_tz, name, email, phone, location, place_id, answers, services_count, guests)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, business.id, et.id, hostId, lead?.id, quote?.id, t, new Date(startMs).toISOString(), new Date(endMs).toISOString(), tz,
+    clampStr(name, 160), String(contact.email).trim().toLowerCase(), clampStr(contact.phone, 40), PLACES.placeText(place, contact), place.id, JSON.stringify(cleanAnswers), servicesCount, JSON.stringify(guestList)).lastId;
   });
 
   const host = db.get('SELECT name FROM users WHERE id = ?', hostId);
   const ext = await calendars.createEvent(hostId, {
-    summary: `${et.name}: ${name || contact.email}`, start: startMs, end: endMs, attendeeEmail: contact.email, attendeeName: name, timezone: tz,
+    summary: `${et.name}: ${name || contact.email}`, start: startMs, end: endMs, attendeeEmail: contact.email, attendeeName: name, guests: guestList, timezone: tz,
     location: PLACES.placeText(place, contact), locationType: place.type,
     description: [`Booked via ${business.name}`, contact.phone ? `Phone: ${contact.phone}` : '', ...L.answersToPairs(cleanAnswers).map(([k, v]) => `${k}: ${v}`),
       quote ? `Quote: ${B.linkFor(business, `/q/${quote.token}`)}` : '', `Manage: ${B.linkFor(business, '/app#/bookings')}`].filter(Boolean).join('\n'),
@@ -165,7 +226,7 @@ async function createBooking({ business, et, startIso, tz, contact = {}, answers
 
 function bookingPayload(b) {
   return { id: b.id, token: b.token, status: b.status, start: b.start_utc, end: b.end_utc, timezone: b.invitee_tz, name: b.name, email: b.email, phone: b.phone,
-    location: b.location, answers: db.json(b.answers, {}), event_type_id: b.event_type_id, host_user_id: b.host_user_id, manage_url: B.linkFor(B.byId(b.business_id), `/booking/${b.token}`) };
+    location: b.location, answers: db.json(b.answers, {}), event_type_id: b.event_type_id, host_user_id: b.host_user_id, guests: guestsOf(b), manage_url: B.linkFor(B.byId(b.business_id), `/booking/${b.token}`) };
 }
 
 async function cancelBooking(booking, reason, by = 'invitee') {
@@ -223,7 +284,7 @@ async function rescheduleBooking(booking, startIso, tz) {
   });
   for (const ext of oldExternal) await calendars.deleteEvent(ext);
   const b = db.get('SELECT * FROM bookings WHERE id = ?', booking.id);
-  const ext = await calendars.createEvent(hostId, { summary: `${et.name}: ${b.name || b.email}`, start: startMs, end: endMs, attendeeEmail: b.email, attendeeName: b.name,
+  const ext = await calendars.createEvent(hostId, { summary: `${et.name}: ${b.name || b.email}`, start: startMs, end: endMs, attendeeEmail: b.email, attendeeName: b.name, guests: guestsOf(b),
     timezone: b.invitee_tz, location: b.location, locationType: PLACES.placeFor(et, b.place_id).type, description: `Rescheduled booking. Manage: ${B.linkFor(B.byId(b.business_id), '/app#/bookings')}` });
   if (ext) db.run('UPDATE bookings SET external_events = ?, location = CASE WHEN ? IS NOT NULL THEN ? ELSE location END WHERE id = ?', JSON.stringify([ext]), ext.join_url, ext.join_url, b.id);
   const business = B.byId(b.business_id);
@@ -260,7 +321,7 @@ async function reassignBooking(booking, newHostId, { note, notifyCustomer = true
   });
   for (const ext of oldExternal) await calendars.deleteEvent(ext);
   const b = db.get('SELECT * FROM bookings WHERE id = ?', booking.id);
-  const ext = await calendars.createEvent(newHostId, { summary: `${et.name}: ${b.name || b.email}`, start: startMs, end: endMs, attendeeEmail: b.email, attendeeName: b.name,
+  const ext = await calendars.createEvent(newHostId, { summary: `${et.name}: ${b.name || b.email}`, start: startMs, end: endMs, attendeeEmail: b.email, attendeeName: b.name, guests: guestsOf(b),
     timezone: b.invitee_tz, location: b.location, locationType: PLACES.placeFor(et, b.place_id).type, description: `Passed on by ${oldHost?.name || 'a teammate'}.${cleanNote ? ` Note: ${cleanNote}` : ''} Manage: ${B.linkFor(B.byId(b.business_id), '/app#/bookings')}` });
   if (ext) db.run('UPDATE bookings SET external_events = ?, location = CASE WHEN ? IS NOT NULL THEN ? ELSE location END WHERE id = ?', JSON.stringify([ext]), ext.join_url, ext.join_url, b.id);
   const after = db.get('SELECT * FROM bookings WHERE id = ?', booking.id);
@@ -270,6 +331,63 @@ async function reassignBooking(booking, newHostId, { note, notifyCustomer = true
   return after;
 }
 
+// Only a call that is still to come can have its guests changed.
+function assertGuestsEditable(booking) {
+  if (booking.status !== 'confirmed') throw new HttpError(400, 'This booking was cancelled.');
+  if (Date.parse(booking.start_utc) < Date.now()) throw new HttpError(400, 'This call already happened.');
+}
+
+async function syncGuestsToCalendar(b) {
+  for (const ext of db.json(b.external_events, [])) await calendars.updateAttendees(ext, { attendeeEmail: b.email, attendeeName: b.name, guests: guestsOf(b) });
+}
+
+// The host hears about it because the people on their call changed. The rest of the team does not.
+async function tellHostGuestsChanged(b, change, email) {
+  const { et, business, host } = bookingView(b);
+  if (b.lead_id) B.logActivity(business.id, b.lead_id, 'booking', `${b.name || b.email} ${change} ${email}`, { booking_id: b.id });
+  if (!host?.email) return;
+  await sendEmail({
+    to: host.email, businessId: business.id, subject: `Guests changed: ${b.name || b.email} · ${T.formatDateTime(Date.parse(b.start_utc), business.timezone, { weekday: 'short', month: 'short', year: undefined })}`,
+    html: layout(business, { heading: `${b.name || b.email} ${change} ${email}`, body: rows([['Event', et?.name], ['When', T.formatDateTime(Date.parse(b.start_utc), business.timezone)], ['Guests', guestsOf(b).join(', ') || 'None']]), cta: { label: 'Open in dashboard', url: B.linkFor(business, '/app#/bookings') } }),
+  });
+}
+
+async function addGuests(booking, emails) {
+  assertGuestsEditable(booking);
+  const { et } = bookingView(booking);
+  if (!guestsAllowed(et)) throw new HttpError(403, 'This booking page does not allow guests.');
+  let added = [];
+  db.tx(() => {
+    const fresh = db.get('SELECT * FROM bookings WHERE id = ?', booking.id);
+    assertGuestsEditable(fresh);
+    const before = guestsOf(fresh);
+    const after = mergeGuests(emails, fresh.email, before);
+    added = after.filter((g) => !before.includes(g));
+    db.run('UPDATE bookings SET guests = ? WHERE id = ?', JSON.stringify(after), booking.id);
+  });
+  const b = db.get('SELECT * FROM bookings WHERE id = ?', booking.id);
+  if (!added.length) return b;
+  await syncGuestsToCalendar(b);
+  sendGuestEmails('created', b, added).then(() => tellHostGuestsChanged(b, 'invited', added.join(', '))).catch((e) => console.error('[guest email]', e));
+  return b;
+}
+
+async function removeGuest(booking, email) {
+  assertGuestsEditable(booking);
+  const target = String(email || '').trim().toLowerCase();
+  let removed = false;
+  db.tx(() => {
+    const before = guestsOf(db.get('SELECT guests FROM bookings WHERE id = ?', booking.id));
+    removed = before.includes(target);
+    if (removed) db.run('UPDATE bookings SET guests = ? WHERE id = ?', JSON.stringify(before.filter((g) => g !== target)), booking.id);
+  });
+  const b = db.get('SELECT * FROM bookings WHERE id = ?', booking.id);
+  if (!removed) return b;
+  await syncGuestsToCalendar(b);
+  sendGuestEmails('removed', b, [target]).then(() => tellHostGuestsChanged(b, 'removed', target)).catch((e) => console.error('[guest email]', e));
+  return b;
+}
+
 async function sendReminders() {
   const due = db.all(`SELECT * FROM bookings WHERE status = 'confirmed' AND reminder_sent_at IS NULL AND start_utc > ? AND start_utc <= ?`,
     new Date().toISOString(), new Date(Date.now() + 24 * 3600000).toISOString());
@@ -277,10 +395,13 @@ async function sendReminders() {
   // sending this built-in one too would be a duplicate in the customer's inbox.
   const handled = new Set(db.all("SELECT DISTINCT business_id FROM message_automations WHERE active = 1 AND trigger = 'before'").map((r) => r.business_id));
   for (const b of due) {
-    if (handled.has(b.business_id)) { db.run("UPDATE bookings SET reminder_sent_at = datetime('now') WHERE id = ?", b.id); continue; }
     if (Date.parse(b.created_at.replace(' ', 'T') + 'Z') > Date.now() - 2 * 3600000) { db.run("UPDATE bookings SET reminder_sent_at = datetime('now') WHERE id = ?", b.id); continue; }
     const { et, business } = bookingView(b);
     db.run("UPDATE bookings SET reminder_sent_at = datetime('now') WHERE id = ?", b.id);
+    // Automations are written to the customer and carry their manage link, so guests never get
+    // those. This plain reminder is theirs, whichever way the customer is reminded.
+    await sendGuestEmails('reminder', b, guestsOf(b));
+    if (handled.has(b.business_id)) continue;
     await sendEmail({
       to: b.email, businessId: business.id, fromName: business.name, replyTo: business.email,
       subject: `Reminder: ${et?.name || 'your call'} with ${business.name}`,
@@ -289,4 +410,4 @@ async function sendReminders() {
   }
 }
 
-module.exports = { createBooking, cancelBooking, deleteBookings, rescheduleBooking, reassignBooking, sendReminders, hydrateEt, bookingPayload, bookingView, validateContact };
+module.exports = { createBooking, cancelBooking, deleteBookings, rescheduleBooking, reassignBooking, addGuests, removeGuest, guestsAllowed, guestsOf, MAX_GUESTS, sendReminders, hydrateEt, bookingPayload, bookingView, validateContact };

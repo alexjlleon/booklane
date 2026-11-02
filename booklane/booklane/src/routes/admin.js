@@ -371,10 +371,10 @@ module.exports = function adminRoutes(app) {
     // pasted into the SQL, and an id from another business simply matches nothing.
     const hostId = req.query.mine === '1' ? Number(req.user.id) : (req.query.host ? int(req.query.host, 0) : 0);
     const mine = hostId ? ' AND b.host_user_id = ' + Number(hostId) : '';
-    return db.all(`SELECT b.id, b.token, b.start_utc, b.end_utc, b.invitee_tz, b.name, b.email, b.phone, b.location, b.status, b.answers, b.cancel_reason, b.lead_id, b.external_events,
+    return db.all(`SELECT b.id, b.token, b.start_utc, b.end_utc, b.invitee_tz, b.name, b.email, b.phone, b.location, b.status, b.answers, b.guests, b.cancel_reason, b.lead_id, b.external_events,
         b.host_user_id, b.start_utc < ? is_past, e.name event_name, e.color, u.name host FROM bookings b LEFT JOIN event_types e ON e.id = b.event_type_id LEFT JOIN users u ON u.id = b.host_user_id
       WHERE b.business_id = ? AND ${cond}${mine} ORDER BY b.start_utc ${order} LIMIT 300`, now, bid(req), now)
-      .map((r) => ({ ...r, answers: db.json(r.answers, {}), synced: db.json(r.external_events, []).length > 0, external_events: undefined }));
+      .map((r) => ({ ...r, answers: db.json(r.answers, {}), guests: db.json(r.guests, []), synced: db.json(r.external_events, []).length > 0, external_events: undefined }));
   });
   // Admins manage everyone's calendar. A host can still manage their own calls.
   const ownBooking = (req) => {
@@ -606,9 +606,10 @@ module.exports = function adminRoutes(app) {
     };
     // Page-level display choices live in settings. Only what this save sends is changed, so a
     // screen that does not know about a setting never resets it.
-    if (b.show_progress !== undefined) {
+    if (b.show_progress !== undefined || b.allow_guests !== undefined) {
       const settings = existing ? db.json(existing.settings, {}) : {};
-      settings.show_progress = bool(b.show_progress);
+      if (b.show_progress !== undefined) settings.show_progress = bool(b.show_progress);
+      if (b.allow_guests !== undefined) settings.allow_guests = bool(b.allow_guests);
       f.settings = JSON.stringify(settings);
     }
     let id = existing?.id;

@@ -3,7 +3,7 @@ const fmt = (ms) => new Date(ms).toISOString().replace(/[-:]/g, '').replace(/\.\
 const escTxt = (s) => String(s || '').replace(/\\/g, '\\\\').replace(/;/g, '\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
 function fold(line) { const out = []; while (line.length > 74) { out.push(line.slice(0, 74)); line = ' ' + line.slice(74); } out.push(line); return out.join('\r\n'); }
 
-function buildIcs({ uid, start, end, summary, description, location, organizerName, organizerEmail, attendeeName, attendeeEmail, method = 'REQUEST', sequence = 0, cancelled = false, url }) {
+function buildIcs({ uid, start, end, summary, description, location, organizerName, organizerEmail, attendeeName, attendeeEmail, guests = [], method = 'REQUEST', sequence = 0, cancelled = false, url }) {
   const lines = [
     'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Availvo//Scheduling//EN', 'CALSCALE:GREGORIAN', `METHOD:${cancelled ? 'CANCEL' : method}`,
     'BEGIN:VEVENT', `UID:${uid}`, `DTSTAMP:${fmt(Date.now())}`, `DTSTART:${fmt(start)}`, `DTEND:${fmt(end)}`, `SEQUENCE:${sequence}`,
@@ -11,6 +11,7 @@ function buildIcs({ uid, start, end, summary, description, location, organizerNa
     url ? `URL:${escTxt(url)}` : null,
     organizerEmail ? `ORGANIZER;CN=${escTxt(organizerName)}:mailto:${organizerEmail}` : null,
     attendeeEmail ? `ATTENDEE;CN=${escTxt(attendeeName)};ROLE=REQ-PARTICIPANT;RSVP=FALSE:mailto:${attendeeEmail}` : null,
+    ...guests.map((email) => `ATTENDEE;ROLE=OPT-PARTICIPANT;RSVP=FALSE:mailto:${email}`),
     `STATUS:${cancelled ? 'CANCELLED' : 'CONFIRMED'}`,
     'BEGIN:VALARM', 'TRIGGER:-PT15M', 'ACTION:DISPLAY', 'DESCRIPTION:Reminder', 'END:VALARM',
     'END:VEVENT', 'END:VCALENDAR',

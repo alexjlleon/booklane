@@ -308,7 +308,7 @@
           const head = day !== lastDay ? `<tr><th colspan="${isAdminRole ? 6 : 5}" style="background:#faf9f7">${esc(day)}</th></tr>` : ''; lastDay = day;
           return `${head}<tr>${isAdminRole ? pick.cell(b.id) : ''}<td style="width:120px"><b>${esc(A.dt(b.start_utc, { month: undefined, day: undefined }))}</b></td>
             <td><span class="pill" style="background:${esc(b.color || '#eee')}22;color:${esc(b.color || '#444')}">${esc(b.event_name || 'Call')}</span><div class="small muted" style="margin-top:4px">with ${b.host_user_id && isAdminRole ? `<a href="#/team-stats/${b.host_user_id}">${esc(b.host || '-')}</a>` : esc(b.host || '-')}${b.synced ? ' · on calendar' : ''}</div></td>
-            <td><b>${b.lead_id ? `<a href="#/leads/${b.lead_id}">${esc(b.name || b.email)}</a>` : esc(b.name || b.email)}</b><div class="small muted">${esc([b.email, b.phone].filter(Boolean).join(' · '))}</div></td>
+            <td><b>${b.lead_id ? `<a href="#/leads/${b.lead_id}">${esc(b.name || b.email)}</a>` : esc(b.name || b.email)}</b><div class="small muted">${esc([b.email, b.phone].filter(Boolean).join(' · '))}</div>${(b.guests || []).length ? `<div class="small muted">Guests: ${esc(b.guests.join(', '))}</div>` : ''}</td>
             <td class="small">${esc(b.location || '')}${b.cancel_reason ? `<div class="muted">Reason: ${esc(b.cancel_reason)}</div>` : ''}</td>
             <td class="num" style="white-space:nowrap">${action(b)}</td></tr>`;
         }).join('')}</tbody></table></div>` : `<div class="empty-state"><h3>No ${scope} bookings</h3><p>${scope === 'upcoming' ? 'Share your booking page to fill your calendar.' : ''}</p></div>`}</div>`;

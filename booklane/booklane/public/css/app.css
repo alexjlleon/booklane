@@ -462,3 +462,15 @@ body.form-page.is-embed.has-custom-bg { background-color: var(--bg); }
 .site-foot a { color: var(--ink-2); text-decoration: none; } .site-foot a:hover { text-decoration: underline; }
 .powered a { color: inherit; }
 @media (max-width: 640px) { .home-grid { grid-template-columns: 1fr; } .home-card h1 { font-size: 38px; } }
+
+/* Guests a customer invites to their call */
+.guests { margin: 4px 0 14px; text-align: left; }
+.guests-manage { margin: 0 0 22px; }
+.guests-manage h3 { font-size: 15px; margin-bottom: 8px; }
+.guests .btn-sm { padding: 4px 6px; font-size: 13px; }
+.guests .guest-open { padding-left: 0; font-weight: 600; }
+.guest-list { list-style: none; margin: 0 0 12px; padding: 0; }
+.guest-list li { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 4px 0; font-size: 14px; border-bottom: 1px solid var(--line); }
+.guest-list li span { overflow-wrap: anywhere; }
+.guest-add { display: flex; gap: 8px; }
+.guest-add .input { flex: 1; min-width: 0; }
