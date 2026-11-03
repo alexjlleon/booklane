@@ -207,6 +207,7 @@ function scheduleFor(booking, trigger, { now = Date.now() } = {}) {
     for (const channel of channelsOf(a)) {
       const to = channel === 'sms' ? sms.normalizeNumber(booking.phone) : (isEmail(booking.email) ? booking.email : null);
       if (!to) { result.skipped.push({ automation: a.id, channel, reason: channel === 'sms' ? 'no usable mobile number' : 'no email address' }); continue; }
+      if (channel === 'sms' && !B.canText(B.byId(booking.business_id))) { result.skipped.push({ automation: a.id, channel, reason: 'texting is not turned on for this company' }); continue; }
       if (channel === 'sms' && isOptedOut(booking.business_id, to)) { result.skipped.push({ automation: a.id, channel, reason: 'they replied STOP' }); continue; }
       if (channel === 'sms' && !(a.sms_body || '').trim()) { result.skipped.push({ automation: a.id, channel, reason: 'no text written' }); continue; }
       if (channel === 'email' && !(a.body_html || '').trim()) { result.skipped.push({ automation: a.id, channel, reason: 'no email written' }); continue; }
@@ -275,6 +276,10 @@ async function sendOne(msg) {
 
   try {
     if (msg.channel === 'sms') {
+      if (!B.canText(business)) {
+        db.run("UPDATE scheduled_messages SET status = 'skipped', skip_reason = ? WHERE id = ?", 'texting is not turned on for this company', msg.id);
+        return 'skipped';
+      }
       // Re-check the opt-out list at send time, not just when it was queued.
       if (isOptedOut(business.id, msg.to_addr)) {
         db.run("UPDATE scheduled_messages SET status = 'skipped', skip_reason = ? WHERE id = ?", 'they replied STOP', msg.id);
@@ -385,6 +390,7 @@ async function sendTest(business, a, { to, channel }) {
   const auto = hydrateAutomation({ ...a });
   const ctx = sampleContext(business);
   if (channel === 'sms') {
+    if (!B.canText(business)) throw new Error('Texting is not turned on for this company yet.');
     const number = sms.normalizeNumber(to);
     if (!number) throw new Error('Enter a mobile number to test with.');
     const body = render(auto.sms_body, ctx).text.trim();
@@ -474,7 +480,7 @@ function summary(businessId) {
   const failed = db.get("SELECT COUNT(*) c FROM scheduled_messages WHERE business_id = ? AND status = 'failed'", businessId).c;
   const optouts = db.get('SELECT COUNT(*) c FROM sms_optouts WHERE business_id = ?', businessId).c;
   const texts7 = db.get("SELECT COALESCE(SUM(segments),0) s FROM sms_log WHERE business_id = ? AND direction = 'out' AND status != 'failed' AND created_at >= datetime('now','-7 day')", businessId).s;
-  return { queued: q, sent_7d: sent7, failed, optouts, sms_segments_7d: texts7, sms_ready: sms.configured(), quiet_hours: { from: QUIET_END(), to: QUIET_START() } };
+  return { queued: q, sent_7d: sent7, failed, optouts, sms_segments_7d: texts7, sms_ready: sms.configured() && B.canText(B.byId(businessId)), quiet_hours: { from: QUIET_END(), to: QUIET_START() } };
 }
 
 module.exports = {

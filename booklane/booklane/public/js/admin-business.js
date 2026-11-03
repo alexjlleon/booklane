@@ -308,6 +308,11 @@
   async function domainTab() {
     const d = await api('GET', '/business/domain');
     A.cache.domain = d;
+    if (d.locked) {
+      return `<div class="panel stack"><h2>Your domain and email</h2>
+        <p class="desc">Your pages are at <b>${esc(d.page_url)}</b> and emails go out from ${esc(d.email_from_effective || 'Availvo')} with your company's name on them.</p>
+        <p class="desc">Using your own domain, your own send-from address and text messages are turned on after your account is approved. Email <a href="mailto:${esc((window.__BL__ || {}).supportEmail || '')}">support</a> to ask.</p></div>`;
+    }
     const owner = A.me.business.role === 'owner';
     const st = d.email_domain ? (STATUS_WORDS[d.email_domain.status] || ['partial', d.email_domain.status]) : null;
     const recs = (d.email_domain && d.email_domain.records) || [];

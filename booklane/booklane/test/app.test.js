@@ -28,8 +28,12 @@ async function req(method, url, body, { cookie, headers = {} } = {}) {
   return { status: res.status, data, cookie: (res.headers.get('set-cookie') || '').split(';')[0] };
 }
 
+// For the many tests about something else: a company that has already confirmed and been approved.
 async function signup(email, business) {
-  const r = await req('POST', '/api/admin/auth/signup', { name: 'Owner ' + business, email, password: 'password123', business_name: business, timezone: 'America/Chicago' });
+  require('../src/lib/security').resetRateLimits();
+  const r = await req('POST', '/api/admin/auth/signup', { name: 'Owner ' + business, email, password: 'password123', business_name: business, timezone: 'America/Chicago', accept_terms: true });
+  db.run('UPDATE users SET email_verified = 1 WHERE email = ?', email);
+  db.run("UPDATE businesses SET activated = 1, access = 'full' WHERE id IN (SELECT business_id FROM memberships m JOIN users u ON u.id = m.user_id WHERE u.email = ?)", email);
   assert.equal(r.status, 200, JSON.stringify(r.data));
   return r.cookie;
 }
@@ -2277,7 +2281,7 @@ test('a host can pass their own call to a free teammate on the same page, at the
   const open = await req('GET', `/api/public/b/${bizSlug}/e/${et.slug}/slots?from=${from}&to=${T.addDays(from, 10)}&tz=America/Chicago`);
   const times = Object.values(open.data.days).flat().map((x) => x.start || x).sort();
   const made = await req('POST', `/api/public/b/${bizSlug}/e/${et.slug}/book`,
-    { start: times[0], timezone: 'America/Chicago', contact: { first_name: 'Pass', last_name: 'Along', email: 'pass.along@example.com', phone: '7135550166' } });
+    { start: times[times.length - 1], timezone: 'America/Chicago', contact: { first_name: 'Pass', last_name: 'Along', email: 'pass.along@example.com', phone: '7135550166' } });
   assert.equal(made.status, 200, JSON.stringify(made.data));
   const bk = db.get('SELECT * FROM bookings WHERE token = ?', made.data.token);
   db.run('UPDATE bookings SET host_user_id = ? WHERE id = ?', pat, bk.id);
@@ -2690,7 +2694,7 @@ test('leads and bookings can be deleted several at once, quietly, and only your 
   const mailsBefore = db.get("SELECT COUNT(*) c FROM email_log WHERE to_addr LIKE '%clearout%'").c;
 
   // Someone else's ids are skipped, not deleted.
-  const other = await signup('clearout-other@test.dev', 'Other Biz');
+  const other = await signup('emptying-other@test.dev', 'Other Biz');
   const theirs = await req('POST', '/api/admin/bookings/delete', { ids: [bk.id] }, { cookie: other });
   assert.equal(theirs.data.deleted, 0);
   assert.ok(db.get('SELECT 1 FROM bookings WHERE id = ?', bk.id), 'still there');
@@ -2816,3 +2820,132 @@ test('guests get the day-before reminder even when automations remind the custom
   assert.equal(m.filter((x) => x.to_addr === 'rae@example.com').length, 0, 'their automation handles the customer');
   assert.ok(!m.find((x) => x.to_addr === 'gus@example.com').html.includes('remind-token-1234'));
 });
+
+// ---------- Company sign-up ----------
+const FORM = (email, business, extra = {}) => ({ name: 'New Owner', email, password: 'password123', business_name: business, timezone: 'America/Chicago', accept_terms: true, ...extra });
+const tokenFrom = (to, kind) => {
+  const row = db.get('SELECT html FROM email_log WHERE to_addr = ? ORDER BY id DESC LIMIT 1', to);
+  return new RegExp(`#/${kind}/([A-Za-z0-9_-]+)`).exec(row.html)[1];
+};
+async function pageStatus(slug) {
+  const page = await req('GET', `/b/${slug}`);
+  const api = await req('GET', `/api/public/b/${slug}/e/discovery-call/slots?from=2030-01-01&to=2030-01-02&tz=America/Chicago`);
+  assert.equal(page.status, api.status, 'the page and its API agree');
+  return api.status;
+}
+async function freshCompany(email, business) {
+  require('../src/lib/security').resetRateLimits();
+  const r = await req('POST', '/api/admin/auth/signup', FORM(email, business));
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  return { cookie: r.cookie, id: db.get('SELECT id FROM businesses WHERE name = ?', business).id, slug: db.get('SELECT slug FROM businesses WHERE name = ?', business).slug };
+}
+
+test('sign-up needs the terms ticked, and a hidden field stops bots', async () => {
+  require('../src/lib/security').resetRateLimits();
+  const noTerms = await req('POST', '/api/admin/auth/signup', FORM('no.terms@test.dev', 'No Terms Co', { accept_terms: false }));
+  assert.equal(noTerms.status, 422);
+  assert.ok(noTerms.data.details.accept_terms || JSON.stringify(noTerms.data).includes('accept_terms'));
+  const bot = await req('POST', '/api/admin/auth/signup', FORM('bot@test.dev', 'Bot Co', { website: 'http://spam.example' }));
+  assert.equal(bot.status, 422);
+  assert.equal(db.get('SELECT COUNT(*) c FROM users WHERE email IN (?,?)', 'no.terms@test.dev', 'bot@test.dev').c, 0);
+});
+
+test('sign-ups from one address are limited', async () => {
+  require('../src/lib/security').resetRateLimits();
+  let last;
+  for (let i = 0; i < 6; i++) last = await req('POST', '/api/admin/auth/signup', FORM(`flood${i}@test.dev`, `Flood ${i}`));
+  assert.equal(last.status, 429);
+});
+
+test('a new company stays offline until its owner confirms, then goes live and the platform hears', async () => {
+  const c = await freshCompany('confirm@test.dev', 'Confirm Plumbing');
+  const me = (await req('GET', '/api/admin/auth/me', null, { cookie: c.cookie })).data;
+  assert.equal(me.business.live, false);
+  assert.equal(me.business.access, 'starter');
+  assert.equal(me.platform_admin, false);
+  assert.equal(await pageStatus(c.slug), 404);
+  const steps = JSON.parse(db.get('SELECT steps FROM event_types WHERE business_id = ?', c.id).steps);
+  assert.ok(!JSON.stringify(steps).toLowerCase().match(/venue|interested in/), 'a plain form, not wedding questions');
+  const t = tokenFrom('confirm@test.dev', 'verify');
+  assert.equal((await req('POST', '/api/admin/auth/verify', { token: 'wrong' })).status, 404);
+  assert.equal((await req('POST', '/api/admin/auth/verify', { token: t })).status, 200);
+  assert.equal(await pageStatus(c.slug), 200);
+  assert.equal((await req('POST', '/api/admin/auth/verify', { token: t })).status, 404, 'single use');
+  assert.ok(db.get("SELECT 1 x FROM email_log WHERE subject LIKE '%Confirm Plumbing%' AND to_addr = ?", process.env.SUPPORT_EMAIL || 'alex@weddingsunlimited.com'));
+  assert.ok(db.get("SELECT terms_accepted_at t FROM users WHERE email = 'confirm@test.dev'").t);
+});
+
+test('a company owner cannot touch the shared keys, and only the platform admin sees them', async () => {
+  const c = await freshCompany('keys@test.dev', 'Key Thief Co');
+  assert.equal((await req('GET', '/api/admin/integrations/providers', null, { cookie: c.cookie })).status, 403);
+  assert.equal((await req('PUT', '/api/admin/integrations/providers/resend', { RESEND_API_KEY: 're_stolen' }, { cookie: c.cookie })).status, 403);
+  assert.equal((await req('PUT', '/api/admin/integrations/providers/twilio', { TWILIO_FROM_NUMBER: '+15550000000' }, { cookie: c.cookie })).status, 403);
+  assert.equal((await req('POST', '/api/admin/integrations/providers/resend/send-test', { to: 'x@test.dev' }, { cookie: c.cookie })).status, 403);
+  assert.equal(require('../src/lib/config').get('RESEND_API_KEY') === 're_stolen', false);
+  assert.equal((await req('GET', '/api/admin/integrations/providers', null, { cookie: ownerCookie })).status, 200);
+});
+
+test('a new company cannot take a domain, send as someone else, or text until approved', async () => {
+  const c = await freshCompany('limits@test.dev', 'Limits Co');
+  const put = (b) => req('PUT', '/api/admin/business/domain', b, { cookie: c.cookie });
+  assert.equal((await put({ email_from: 'WU <bookings@alerts.weddingsunlimited.com>' })).status, 403);
+  assert.equal((await put({ custom_domain: 'book.other.test' })).status, 403);
+  const auto = await req('POST', '/api/admin/automations', { name: 'Text', channel: 'sms', sms_body: 'hi', trigger: 'booking_created', active: true }, { cookie: c.cookie });
+  assert.equal(auto.status, 422, JSON.stringify(auto.data));
+  const list = (await req('GET', '/api/admin/automations', null, { cookie: c.cookie })).data;
+  assert.equal(list.sms.locked, true);
+
+  assert.equal((await req('PATCH', `/api/admin/platform/companies/${c.id}`, { access: 'full' }, { cookie: c.cookie })).status, 403);
+  assert.equal((await req('GET', '/api/admin/platform/companies', null, { cookie: c.cookie })).status, 403);
+  const ok = await req('PATCH', `/api/admin/platform/companies/${c.id}`, { access: 'full' }, { cookie: ownerCookie });
+  assert.equal(ok.status, 200);
+  assert.ok(ok.data.companies.some((x) => x.id === c.id && x.owner_email === 'limits@test.dev'));
+  assert.equal((await put({ email_from: 'Limits <hi@limits.test>' })).status, 200);
+  assert.equal((await put({ custom_domain: new URL(require('../src/lib/util').baseUrl()).hostname + '.example' })).status, 200);
+});
+
+test('a new company has a daily email allowance, and a suspended one goes dark', async () => {
+  const c = await freshCompany('cap@test.dev', 'Cap Co');
+  const { sendEmail } = require('../src/lib/email');
+  process.env.STARTER_EMAILS_PER_DAY = '2';
+  try {
+    assert.notEqual((await sendEmail({ to: 'a@test.dev', subject: 'x', html: 'x', businessId: c.id })).status, 'failed');
+    assert.notEqual((await sendEmail({ to: 'a@test.dev', subject: 'x', html: 'x', businessId: c.id })).status, 'failed');
+    assert.equal((await sendEmail({ to: 'a@test.dev', subject: 'x', html: 'x', businessId: c.id })).status, 'failed');
+  } finally { delete process.env.STARTER_EMAILS_PER_DAY; }
+  await req('POST', '/api/admin/auth/verify', { token: tokenFrom('cap@test.dev', 'verify') });
+  assert.equal(await pageStatus(c.slug), 200);
+  assert.equal((await req('PATCH', `/api/admin/platform/companies/${c.id}`, { suspended: true }, { cookie: ownerCookie })).status, 200);
+  assert.equal(await pageStatus(c.slug), 404);
+  assert.equal((await sendEmail({ to: 'a@test.dev', subject: 'y', html: 'y', businessId: c.id })).status, 'failed');
+  assert.equal((await req('PATCH', `/api/admin/platform/companies/${c.id}`, { suspended: false }, { cookie: ownerCookie })).status, 200);
+  assert.equal(await pageStatus(c.slug), 200);
+});
+
+test('existing companies and people are untouched by the upgrade', () => {
+  const cols = db.raw.prepare('PRAGMA table_info(businesses)').all();
+  assert.equal(cols.find((c) => c.name === 'access').dflt_value, "'full'");
+  assert.equal(cols.find((c) => c.name === 'activated').dflt_value, '1');
+  assert.equal(db.raw.prepare('PRAGMA table_info(users)').all().find((c) => c.name === 'email_verified').dflt_value, '1');
+});
+
+test('forgot password does not reveal who has an account, and a reset logs everyone out', async () => {
+  const c = await freshCompany('reset@test.dev', 'Reset Co');
+  const unknown = await req('POST', '/api/admin/auth/forgot', { email: 'nobody.here@test.dev' });
+  const known = await req('POST', '/api/admin/auth/forgot', { email: 'reset@test.dev' });
+  assert.deepEqual([unknown.status, unknown.data], [known.status, known.data]);
+  const t = tokenFrom('reset@test.dev', 'reset');
+  assert.equal((await req('POST', '/api/admin/auth/reset', { token: t, password: 'short' })).status, 422);
+  assert.equal((await req('POST', '/api/admin/auth/reset', { token: t, password: 'newpassword1' })).status, 200);
+  assert.equal((await req('POST', '/api/admin/auth/reset', { token: t, password: 'newpassword2' })).status, 404);
+  assert.equal((await req('GET', '/api/admin/auth/me', null, { cookie: c.cookie })).status, 401);
+  assert.equal((await req('POST', '/api/admin/auth/login', { email: 'reset@test.dev', password: 'password123' })).status, 401);
+  assert.equal((await req('POST', '/api/admin/auth/login', { email: 'reset@test.dev', password: 'newpassword1' })).status, 200);
+});
+
+test('the sign-up screens are in the admin bundle and the Companies screen loads', () => {
+  const main = fs.readFileSync(path.join(__dirname, '../public/js/admin-main.js'), 'utf8');
+  for (const s of ["'/forgot'", "'/reset/:token'", "'/verify/:token'", 'accept_terms']) assert.ok(main.includes(s), s);
+  assert.ok(fs.readFileSync(path.join(__dirname, '../src/server.js'), 'utf8').includes("'admin-platform.js'"));
+});
+

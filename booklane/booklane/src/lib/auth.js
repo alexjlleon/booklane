@@ -23,7 +23,7 @@ function loadSession(req) {
   if (!t) return;
   const s = db.get('SELECT * FROM sessions WHERE token = ?', t);
   if (!s || s.expires_at < Date.now()) return;
-  const user = db.get('SELECT id, email, name, timezone, phone, is_super_admin FROM users WHERE id = ?', s.user_id);
+  const user = db.get('SELECT id, email, name, timezone, phone, is_super_admin, email_verified FROM users WHERE id = ?', s.user_id);
   if (!user) return;
   req.session = s;
   req.user = user;
@@ -48,4 +48,11 @@ function requireRole(min = 'host') {
   };
 }
 
-module.exports = { createSession, destroySession, loadSession, requireAuth, requireRole, ROLE_RANK, COOKIE };
+// Whoever runs Availvo itself, as opposed to the owner of one company on it.
+const isPlatformAdmin = (user) => !!(user && user.is_super_admin);
+function requirePlatformAdmin(req) {
+  requireAuth(req);
+  if (!isPlatformAdmin(req.user)) throw new HttpError(403, 'Only the Availvo platform admin can do that');
+}
+
+module.exports = { createSession, destroySession, loadSession, requireAuth, requireRole, requirePlatformAdmin, isPlatformAdmin, ROLE_RANK, COOKIE };

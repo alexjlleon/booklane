@@ -3,7 +3,7 @@ const db = require('../db');
 const T = require('../lib/time');
 const { HttpError } = require('../lib/router');
 const { hashPassword, verifyPassword, token, rateLimit } = require('../lib/security');
-const { createSession, destroySession, requireAuth, requireRole, ROLE_RANK } = require('../lib/auth');
+const { createSession, destroySession, requireAuth, requireRole, requirePlatformAdmin, isPlatformAdmin, ROLE_RANK } = require('../lib/auth');
 const { isEmail, clampStr, int, num, bool, slugify, deepMerge, baseUrl } = require('../lib/util');
 const { sendEmail, layout } = require('../lib/email');
 const { BUSINESS_SETTINGS, DEFAULT_STEPS, QUICK_DATE_STEPS, SESSION_SETTINGS, SESSION_STEPS, LOCATION_TYPES } = require('../defaults');
@@ -27,15 +27,18 @@ const sms = require('../lib/sms');
 const appConfig = require('../lib/config');
 const providers = require('../services/providers');
 const { createBusiness, uniqueSlug, ensureDefaultAvailability, seedSessions } = require('../services/setup');
+const ACCOUNTS = require('../services/accounts');
 
 const authLimit = rateLimit({ windowMs: 15 * 60000, max: 25 });
+const signupLimit = rateLimit({ windowMs: 60 * 60000, max: 5 });
+const emailLimit = rateLimit({ windowMs: 60 * 60000, max: 6 });
 const SECRET_MASK = '••••••••';
 const bid = (req) => req.membership.id;
 const isAdmin = (req) => ROLE_RANK[req.membership?.role] >= ROLE_RANK.admin;
 
 function meResponse(req) {
   const cur = req.membership ? B.byId(req.membership.id) : null;
-  return { user: req.user, business: req.membership ? { ...req.membership, custom_domain: cur.custom_domain || null, public_base: B.baseFor(cur), page_url: B.pageUrl(cur, '') } : null, businesses: req.memberships || [],
+  return { user: req.user, platform_admin: isPlatformAdmin(req.user), business: req.membership ? { ...req.membership, access: cur.access, live: B.isLive(cur), suspended: !!cur.suspended_at, custom_domain: cur.custom_domain || null, public_base: B.baseFor(cur), page_url: B.pageUrl(cur, '') } : null, businesses: req.memberships || [],
     calendar_alerts: require('../services/calendar-health').problemsFor(req.user.id, req.membership),
     app: { base_url: baseUrl(), calendars: Object.fromEntries(Object.entries(calendars.PROVIDERS).map(([k, p]) => [k, { label: p.label, configured: calendars.isConfigured(k) }])), email_provider: appConfig.get('RESEND_API_KEY') ? 'resend' : 'log' } };
 }
@@ -124,27 +127,71 @@ function maskBusiness(b, req) {
 
 module.exports = function adminRoutes(app) {
   // ---------- Auth ----------
-  app.post('/api/admin/auth/signup', (req, res) => {
+  app.post('/api/admin/auth/signup', async (req, res) => {
     // A company's own domain is that company's front door, not a place to open a new account.
     if (req.hostBusiness) throw new HttpError(403, 'Sign up on the Availvo site, not on a company\'s own address.');
     authLimit(req);
-    const { name, email, password, business_name, timezone } = req.body || {};
+    signupLimit(req);
+    const { name, email, password, business_name, timezone, website, accept_terms } = req.body || {};
+    // A hidden field people never see. Only a bot fills it in.
+    if (website) throw new HttpError(422, 'Please try again');
     if (process.env.ALLOW_SIGNUP === 'false' && db.get('SELECT 1 FROM users LIMIT 1')) throw new HttpError(403, 'Sign ups are closed. Ask an admin to invite you.');
     const errors = {};
     if (!String(name || '').trim()) errors.name = 'Required';
     if (!isEmail(email)) errors.email = 'Enter a valid email';
     if (String(password || '').length < 8) errors.password = 'Use at least 8 characters';
     if (!String(business_name || '').trim()) errors.business_name = 'Required';
+    if (!bool(accept_terms)) errors.accept_terms = 'Please accept to continue';
     if (Object.keys(errors).length) throw new HttpError(422, 'Please fix the highlighted fields', errors);
     if (db.get('SELECT 1 FROM users WHERE email = ?', email.trim())) throw new HttpError(409, 'An account with that email already exists. Log in instead.');
     const tz = T.isValidTz(timezone) ? timezone : 'America/Chicago';
     const isFirst = !db.get('SELECT 1 FROM users LIMIT 1');
     const out = db.tx(() => {
-      const u = db.run('INSERT INTO users (email, name, password_hash, timezone, is_super_admin) VALUES (?,?,?,?,?)', email.trim().toLowerCase(), clampStr(name.trim(), 120), hashPassword(password), tz, isFirst ? 1 : 0);
-      const b = createBusiness({ name: clampStr(business_name.trim(), 120), timezone: tz, email: email.trim().toLowerCase(), ownerId: u.lastId });
+      // The very first account is whoever installed this, so it starts confirmed and fully approved.
+      const u = db.run("INSERT INTO users (email, name, password_hash, timezone, is_super_admin, email_verified, terms_accepted_at) VALUES (?,?,?,?,?,?,datetime('now'))", email.trim().toLowerCase(), clampStr(name.trim(), 120), hashPassword(password), tz, isFirst ? 1 : 0, isFirst ? 1 : 0);
+      const b = createBusiness({ name: clampStr(business_name.trim(), 120), timezone: tz, email: email.trim().toLowerCase(), ownerId: u.lastId, access: isFirst ? 'full' : 'starter', activated: isFirst, neutral: !isFirst });
       return { userId: u.lastId, businessId: b.id };
     });
     createSession(res, out.userId, out.businessId);
+    if (!isFirst) await ACCOUNTS.sendVerification(db.get('SELECT * FROM users WHERE id = ?', out.userId));
+    return { ok: true };
+  });
+
+  // Confirming proves the address is theirs, and puts their company's pages live.
+  app.post('/api/admin/auth/verify', async (req) => {
+    authLimit(req);
+    const userId = ACCOUNTS.consume('verify', (req.body || {}).token);
+    if (!userId) throw new HttpError(404, 'This link has expired or was already used');
+    await ACCOUNTS.markVerified(userId);
+    return { ok: true };
+  });
+  app.post('/api/admin/auth/resend-verification', async (req) => {
+    requireAuth(req);
+    emailLimit(req);
+    if (req.user.email_verified) return { ok: true, already: true };
+    await ACCOUNTS.sendVerification(req.user);
+    return { ok: true };
+  });
+
+  // The same answer whether or not the address has an account, so this cannot be used to find out.
+  app.post('/api/admin/auth/forgot', async (req) => {
+    emailLimit(req);
+    const email = String((req.body || {}).email || '').trim();
+    if (!isEmail(email)) throw new HttpError(422, 'Enter a valid email', { email: 'Enter a valid email' });
+    const u = db.get("SELECT * FROM users WHERE email = ? AND password_hash != '!'", email);
+    if (u) await ACCOUNTS.sendReset(u);
+    return { ok: true };
+  });
+  app.post('/api/admin/auth/reset', async (req) => {
+    authLimit(req);
+    const { token: t, password } = req.body || {};
+    if (String(password || '').length < 8) throw new HttpError(422, 'Use at least 8 characters', { password: 'Use at least 8 characters' });
+    const userId = ACCOUNTS.consume('reset', t);
+    if (!userId) throw new HttpError(404, 'This link has expired or was already used');
+    db.run('UPDATE users SET password_hash = ? WHERE id = ?', hashPassword(password), userId);
+    // Anyone logged in with the old password is logged out, and the email link proved the inbox.
+    db.run('DELETE FROM sessions WHERE user_id = ?', userId);
+    await ACCOUNTS.markVerified(userId);
     return { ok: true };
   });
 
@@ -186,9 +233,34 @@ module.exports = function adminRoutes(app) {
     requireAuth(req);
     const name = String(req.body?.name || '').trim();
     if (!name) throw new HttpError(422, 'Business name is required', { name: 'Required' });
-    const b = createBusiness({ name: clampStr(name, 120), timezone: req.user.timezone, email: req.user.email, ownerId: req.user.id });
+    if (!req.user.email_verified) throw new HttpError(403, 'Confirm your email before adding another business');
+    // Someone already approved keeps that standing; anyone else starts where a new sign-up does.
+    const approved = isPlatformAdmin(req.user) || !!db.get("SELECT 1 x FROM memberships m JOIN businesses b ON b.id = m.business_id WHERE m.user_id = ? AND m.role = 'owner' AND b.access = 'full'", req.user.id);
+    if (!approved && db.get("SELECT COUNT(*) c FROM memberships WHERE user_id = ? AND role = 'owner'", req.user.id).c >= 3) throw new HttpError(422, 'That is the most businesses a new account can have. Ask support for more.');
+    const b = createBusiness({ name: clampStr(name, 120), timezone: req.user.timezone, email: req.user.email, ownerId: req.user.id, access: approved ? 'full' : 'starter', neutral: !approved });
     db.run('UPDATE sessions SET business_id = ? WHERE token = ?', b.id, req.session.token);
     return { ok: true, id: b.id };
+  });
+
+  // ---------- Platform: every company on Availvo ----------
+  app.get('/api/admin/platform/companies', (req) => {
+    requirePlatformAdmin(req);
+    return { companies: ACCOUNTS.listCompanies() };
+  });
+  app.patch('/api/admin/platform/companies/:id', (req) => {
+    requirePlatformAdmin(req);
+    const b = B.byId(int(req.params.id, 0));
+    if (!b) throw new HttpError(404, 'Company not found');
+    const body = req.body || {};
+    if (body.access !== undefined) {
+      if (!['full', 'starter'].includes(body.access)) throw new HttpError(422, 'Unknown access level');
+      db.run('UPDATE businesses SET access = ? WHERE id = ?', body.access, b.id);
+    }
+    if (body.suspended !== undefined) {
+      if (bool(body.suspended) && req.memberships.some((m) => m.id === b.id)) throw new HttpError(422, 'You cannot suspend a company you belong to');
+      db.run(`UPDATE businesses SET suspended_at = ${bool(body.suspended) ? "datetime('now')" : 'NULL'} WHERE id = ?`, b.id);
+    }
+    return { ok: true, companies: ACCOUNTS.listCompanies() };
   });
 
   // ---------- Business ----------
@@ -469,7 +541,8 @@ module.exports = function adminRoutes(app) {
       email_from: stored ? own : '',
       email_from_effective: effective,
       email_from_is_own: !!stored,
-      email_domain: sendDomain ? await providers.resendDomainStatus(sendDomain) : null,
+      email_domain: sendDomain && b.access === 'full' ? await providers.resendDomainStatus(sendDomain) : null,
+      locked: b.access !== 'full',
     };
   };
   app.get('/api/admin/business/domain', async (req) => {
@@ -480,12 +553,16 @@ module.exports = function adminRoutes(app) {
     requireRole('owner')(req);
     const b = B.byId(bid(req));
     const body = req.body || {};
+    // A custom send-from uses the platform's shared Resend account, where every domain it holds is
+    // usable, so an unapproved company could otherwise send as someone else's address.
+    if (b.access !== 'full') throw new HttpError(403, 'Your own domain and send-from address are turned on after your account is approved.');
     // Check everything before writing anything, so a bad email never leaves a half-saved domain.
     let domain; let from;
     if (body.custom_domain !== undefined) {
       domain = B.normalizeDomain(body.custom_domain);
       if (domain) {
         if (!B.isDomain(domain)) throw new HttpError(422, 'That does not look like a domain. Use something like book.yourcompany.com', { custom_domain: 'Not a domain' });
+        if (domain === B.platformHost()) throw new HttpError(422, 'That address belongs to Availvo', { custom_domain: 'Not available' });
         const taken = db.get('SELECT id FROM businesses WHERE custom_domain = ? AND id != ?', domain, b.id);
         if (taken) throw new HttpError(409, 'Another company on Availvo already uses that domain', { custom_domain: 'Already in use' });
       }
@@ -1062,14 +1139,15 @@ module.exports = function adminRoutes(app) {
   });
 
   // ---------- Integrations: Twilio, Resend ----------
-  // Reading status needs admin. Writing a credential needs owner: a saved key lets someone send
-  // texts and email as this business.
+  // These are the one shared set of keys the whole platform runs on, so only the platform admin
+  // sees or touches them. An owner of one company must never be able to swap them.
   app.get('/api/admin/integrations/providers', (req) => {
-    requireRole('admin')(req);
+    requirePlatformAdmin(req);
     return providers.status();
   });
 
   app.put('/api/admin/integrations/providers/:provider', (req) => {
+    requirePlatformAdmin(req);
     requireRole('owner')(req);
     const provider = String(req.params.provider);
     if (!['twilio', 'resend'].includes(provider)) throw new HttpError(404, 'Unknown integration');
@@ -1090,7 +1168,7 @@ module.exports = function adminRoutes(app) {
   });
 
   app.post('/api/admin/integrations/providers/:provider/check', async (req) => {
-    requireRole('admin')(req);
+    requirePlatformAdmin(req);
     try {
       return await providers.check(String(req.params.provider));
     } catch (e) {
@@ -1099,6 +1177,7 @@ module.exports = function adminRoutes(app) {
   });
 
   app.post('/api/admin/integrations/providers/:provider/send-test', async (req) => {
+    requirePlatformAdmin(req);
     requireRole('admin')(req);
     const provider = String(req.params.provider);
     const business = B.byId(bid(req));
@@ -1144,6 +1223,7 @@ module.exports = function adminRoutes(app) {
       // Refuse to switch on something that would send nothing, or nothing sendable.
       if ((channel === 'email' || channel === 'both') && !out.body_html.trim()) throw new HttpError(422, 'Write the email before switching this on', { body_html: 'Required' });
       if ((channel === 'sms' || channel === 'both') && !out.sms_body.trim()) throw new HttpError(422, 'Write the text before switching this on', { sms_body: 'Required' });
+      if ((channel === 'sms' || channel === 'both') && !B.canText(B.byId(bid(req)))) throw new HttpError(422, 'Texting is not turned on for your company yet, so this cannot send texts.', { channel: 'Texts are not turned on' });
       if ((channel === 'sms' || channel === 'both') && !sms.configured()) throw new HttpError(422, 'Text messaging is not connected yet, so this cannot send texts.', { channel: 'Texts are not set up' });
     }
     return out;
@@ -1162,7 +1242,8 @@ module.exports = function adminRoutes(app) {
       calendars: SESS.listCalendars(businessId, { includeInactive: true }).map((c) => ({ id: c.id, name: c.name, kind: c.kind })),
       services: db.all('SELECT name FROM services WHERE business_id = ? AND active = 1 ORDER BY sort, id', businessId).map((r) => r.name),
       sms: {
-        ready: sms.configured(),
+        ready: sms.configured() && B.canText(B.byId(businessId)),
+        locked: !B.canText(B.byId(businessId)),
         inbound_url: `${baseUrl()}/api/public/sms/inbound`,
         needs: sms.configured() ? [] : ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM_NUMBER or TWILIO_MESSAGING_SERVICE_SID'],
       },

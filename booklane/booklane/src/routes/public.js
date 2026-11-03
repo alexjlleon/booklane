@@ -29,6 +29,7 @@ const bookLimit = rateLimit({ windowMs: 10 * 60000, max: 15 });
 function getBusiness(slug) {
   const b = B.bySlug(slug);
   if (!b) throw new HttpError(404, 'Business not found');
+  if (!B.isLive(b)) throw new HttpError(404, 'This page is not available yet');
   return b;
 }
 function getEventType(business, slug) {

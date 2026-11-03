@@ -159,6 +159,15 @@
       <a class="btn btn-sm btn-primary" href="${esc(first.screen)}">Reconnect</a></div>`;
   }
 
+  // Until the owner confirms their email their pages stay offline, so this sits on every screen.
+  function accountBanner(me) {
+    if (me.business && me.business.suspended) return '<div class="cal-alert" role="alert"><div><b>This company is suspended.</b><span>Its pages are offline and it cannot send messages. Contact support to sort this out.</span></div></div>';
+    if (me.user.email_verified) return '';
+    return `<div class="cal-alert" role="alert"><div><b>Confirm your email to go live.</b>
+      <span>Your booking pages stay offline until you press the link we sent to ${esc(me.user.email)}.</span></div>
+      <button type="button" class="btn btn-sm btn-primary" data-resend-verify>Send it again</button></div>`;
+  }
+
   function shell(active) {
     const me = A.me;
     const biz = me.business;
@@ -166,15 +175,15 @@
     <div class="layout"><nav class="sidebar" aria-label="Main">
       <div class="brand-row"><div class="logo-mark"></div>${esc((window.__BL__ || {}).appName || 'Availvo')}</div>
       <div class="biz-switch"><label class="sr-only" for="bizsel">Business</label><select id="bizsel">${me.businesses.map((b) => `<option value="${b.id}" ${biz && b.id === biz.id ? 'selected' : ''}>${esc(b.name)}</option>`).join('')}<option value="__new">+ Add a business</option></select></div>
-      <div class="nav">${NAV.filter((n) => n[3] !== 'admin' || ['owner', 'admin'].includes((A.me && A.me.business || {}).role)).map((n) => n[1] === null ? `<div class="nav-sec">${n[0]}</div>` : `<a href="#${n[0]}" class="${active === n[0] ? 'active' : ''}">${n[2]}<span>${n[1]}</span></a>`).join('')}</div>
+      <div class="nav">${NAV.concat(A.me.platform_admin ? [['Platform', null], ['/companies', 'Companies', ICON('<path d="M3 21h18M5 21V7l7-4 7 4v14M9 9h1M14 9h1M9 13h1M14 13h1M9 17h1M14 17h1"/>')]] : []).filter((n) => n[3] !== 'admin' || ['owner', 'admin'].includes((A.me && A.me.business || {}).role)).map((n) => n[1] === null ? `<div class="nav-sec">${n[0]}</div>` : `<a href="#${n[0]}" class="${active === n[0] ? 'active' : ''}">${n[2]}<span>${n[1]}</span></a>`).join('')}</div>
       <div class="sidebar-foot">${biz ? `<a href="/b/${esc(biz.slug)}" target="_blank" rel="noopener">View booking page ↗</a>` : ''}<a href="#/account">${esc(me.user.name)} · Account</a><button type="button" data-logout>Log out</button></div>
-    </nav><main class="main">${calendarBanner(me)}<div id="view"></div></main></div>`;
+    </nav><main class="main">${accountBanner(me)}${calendarBanner(me)}<div id="view"></div></main></div>`;
   }
 
   A.render = async () => {
     const { path, query } = A.parseHash();
     const app = document.getElementById('app');
-    if (!A.me && !['/login', '/signup'].includes(path) && !path.startsWith('/accept/')) {
+    if (!A.me && !['/login', '/signup', '/forgot'].includes(path) && !/^\/(accept|reset|verify)\//.test(path)) {
       try { A.me = await A.api('GET', '/auth/me'); } catch (e) { location.hash = '#/login'; return; }
     }
     let match = null, params = {};

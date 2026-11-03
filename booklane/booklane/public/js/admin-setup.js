@@ -406,13 +406,14 @@
       const shortEt = d.event_types.find((e) => e.active && (e.steps || []).some((x) => x.type === 'availability')) || d.event_types.find((e) => e.active) || {};
       const cta = `<div data-booklane-cta="b/${b.slug}/${shortEt.slug || 'discovery-call'}"\n     data-field="event_date"\n     data-label="See if your date is open"\n     data-button="Check my date"\n     data-color="${b.brand_color || '#5b3df5'}"></div>\n<script src="${url}/embed.js" async></script>`;
       const checklist = [
+        ...(A.me.user.email_verified ? [] : [[false, 'Confirm your email', '#/share']]),
         [me.has_hours, 'Set your weekly hours', '#/availability'],
         [(me.calendars || []).length > 0, 'Connect Google or Outlook calendar', '#/calendars'],
         [services.length > 0, 'Add services and prices to your quote catalog', '#/catalog'],
         [team.length > 1, 'Invite your team', '#/team'],
       ];
-      return `<div class="topbar"><div><h1>${q.welcome ? 'You are live!' : 'Share & embed'}</h1><div class="sub">Send these links anywhere, or drop the booking flow into your website.</div></div></div>
-        ${q.welcome || checklist.some((c) => !c[0]) ? `<div class="panel"><h2>Finish setting up</h2><div class="stack" style="gap:8px;margin-top:12px">${checklist.map(([done, label, href]) => `<a href="${href}" class="row" style="text-decoration:none;color:inherit"><span class="pill ${done ? 'booked' : 'partial'}">${done ? 'Done' : 'To do'}</span><b>${esc(label)}</b></a>`).join('')}</div></div>` : ''}
+      return `<div class="topbar"><div><h1>${q.welcome ? (A.me.business.live ? 'You are live!' : 'Check your email') : 'Share & embed'}</h1><div class="sub">${q.welcome && !A.me.business.live ? 'Press the link we just sent you and these pages go live. You can set everything up in the meantime.' : 'Send these links anywhere, or drop the booking flow into your website.'}</div></div></div>
+        ${q.welcome || checklist.some((c) => !c[0]) ? `<div class="panel"><h2>Finish setting up</h2><div class="stack" style="gap:8px;margin-top:12px">${checklist.map(([done, label, href]) => `<a href="${href}" class="row" style="text-decoration:none;color:inherit;flex-wrap:nowrap"><span class="pill ${done ? 'booked' : 'partial'}">${done ? 'Done' : 'To do'}</span><b>${esc(label)}</b></a>`).join('')}</div></div>` : ''}
         <div class="cols-even"><div class="panel"><h2>Links</h2><p class="desc">Your main page lets people choose between booking a call and building a quote.</p>
           ${link('Main page', '')}${link('Quote builder', 'quote')}${d.event_types.filter((e) => e.active).map((e) => link(e.name, e.slug)).join('')}
           <p class="help">Tip: add <code>?utm_source=instagram</code> to any link and it shows on the lead.</p></div>

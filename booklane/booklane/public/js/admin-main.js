@@ -8,30 +8,39 @@
   // On a company's own domain this is that company's login: no sign-up, and its name on the page.
   const company = () => (window.__BL__ || {}).companyDomain || null;
   const signupOpen = () => (window.__BL__ || {}).allowSignup !== false;
+  const authShell = (title, sub, inner) => `<div class="auth"><div class="panel"><div class="logo-mark" style="margin:0;width:44px;height:44px;border-radius:12px"></div>
+    <h1>${title}</h1><p class="muted" style="margin-top:0">${sub}</p>${inner}</div></div>`;
   function authView(mode) {
+    const signup = mode === 'signup';
     return {
-      public: true, title: mode === 'login' ? 'Log in' : 'Sign up',
-      render: () => `<div class="auth"><div class="panel"><div class="logo-mark" style="margin:0;width:44px;height:44px;border-radius:12px"></div>
-        <h1>${mode === 'login' ? 'Welcome back' : 'Create your booking page'}</h1>
-        <p class="muted" style="margin-top:0">${mode === 'login' ? (company() ? `Log in to the ${esc(company().name)} dashboard.` : 'Log in to your dashboard.') : 'Takes about a minute. You can add more businesses later.'}</p>
-        <div id="auth-err"></div>
+      public: true, title: signup ? 'Sign up' : 'Log in',
+      render() {
+        if (signup && !signupOpen()) return authShell('Sign ups are closed', 'Ask your company admin for an invite.', '<a class="btn btn-ghost" href="#/login">Log in</a>');
+        return authShell(signup ? 'Create your company account' : 'Welcome back',
+          signup ? 'Set up booking pages for your business in about a minute.' : (company() ? `Log in to the ${esc(company().name)} dashboard.` : 'Log in to your dashboard.'),
+          `<div id="auth-err"></div>
         <form id="auth-form" novalidate>
-          ${mode === 'signup' ? A.field('Your name', '<input class="input" name="name" autocomplete="name">') + A.field('Business name', '<input class="input" name="business_name" autocomplete="organization">') : ''}
-          ${A.field('Email', '<input class="input" name="email" type="email" autocomplete="email">')}
-          ${A.field('Password', `<input class="input" name="password" type="password" autocomplete="${mode === 'login' ? 'current-password' : 'new-password'}">`)}
-          <button class="btn btn-primary btn-lg btn-block" type="submit">${mode === 'login' ? 'Log in' : 'Create account'}</button>
+          ${signup ? A.field('Company name', '<input class="input" name="business_name" autocomplete="organization" required>') + A.field('Your name', '<input class="input" name="name" autocomplete="name" required>') : ''}
+          ${A.field(signup ? 'Work email' : 'Email', '<input class="input" name="email" type="email" autocomplete="email" required>')}
+          ${A.field('Password', `<input class="input" name="password" type="password" autocomplete="${signup ? 'new-password' : 'current-password'}" required>`, signup ? 'At least 8 characters.' : '')}
+          ${signup ? `<div class="hp" aria-hidden="true"><label>Leave this empty<input name="website" tabindex="-1" autocomplete="off"></label></div>
+          <div class="field"><label class="check-line"><input type="checkbox" name="accept_terms" value="true"><span>I agree to the <a href="/terms" target="_blank" rel="noopener">terms of service</a> and <a href="/privacy" target="_blank" rel="noopener">privacy policy</a>.</span></label></div>` : ''}
+          <button class="btn btn-primary btn-lg btn-block" type="submit">${signup ? 'Create account' : 'Log in'}</button>
         </form>
-        <p class="small muted" style="text-align:center;margin-top:18px">${mode === 'login' ? (signupOpen() ? 'New here? <a href="#/signup">Create an account</a>' : '') : 'Already have an account? <a href="#/login">Log in</a>'}</p></div></div>`,
+        <p class="small muted" style="text-align:center;margin-top:18px">${signup ? 'Already have an account? <a href="#/login">Log in</a>' : `<a href="#/forgot">Forgot your password?</a>${signupOpen() ? '<br>New here? <a href="#/signup">Create a company account</a>' : ''}`}</p>`);
+      },
       mount(root) {
-        $('#auth-form', root).addEventListener('submit', async (e) => {
+        const form = $('#auth-form', root);
+        if (!form) return;
+        form.addEventListener('submit', async (e) => {
           e.preventDefault();
           const body = Object.fromEntries(new FormData(e.target));
-          if (mode === 'signup') { try { body.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (x) { /* ignore */ } }
+          if (signup) { try { body.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (x) { /* ignore */ } }
           const btn = $('button[type=submit]', root); btn.disabled = true;
           try {
             await api('POST', `/auth/${mode}`, body);
             A.me = await api('GET', '/auth/me');
-            location.hash = mode === 'signup' ? '#/share?welcome=1' : '#/';
+            location.hash = signup ? '#/share?welcome=1' : '#/';
           } catch (err) {
             $('#auth-err', root).innerHTML = `<div class="form-error">${esc(err.message)}</div>`;
             A.showErrors(root, err.details); btn.disabled = false;
@@ -40,6 +49,55 @@
       },
     };
   }
+
+  A.route('/forgot', {
+    public: true, title: 'Reset password',
+    render: () => authShell('Reset your password', 'Enter your email and we will send you a link.', `<div id="auth-err"></div>
+      <form id="forgot-form" novalidate>${A.field('Email', '<input class="input" name="email" type="email" autocomplete="email" required>')}
+      <button class="btn btn-primary btn-lg btn-block" type="submit">Send reset link</button></form>
+      <p class="small muted" style="text-align:center;margin-top:18px"><a href="#/login">Back to log in</a></p>`),
+    mount(root) {
+      $('#forgot-form', root).addEventListener('submit', async (e) => {
+        e.preventDefault();
+        try {
+          await api('POST', '/auth/forgot', Object.fromEntries(new FormData(e.target)));
+          $('.panel', root).innerHTML = '<h1>Check your email</h1><p class="muted">If that address has an account, a reset link is on its way. It works for 1 hour.</p><a class="btn btn-ghost" href="#/login">Back to log in</a>';
+        } catch (err) { $('#auth-err', root).innerHTML = `<div class="form-error">${esc(err.message)}</div>`; A.showErrors(root, err.details); }
+      });
+    },
+  });
+  A.route('/reset/:token', {
+    public: true, title: 'Choose a new password',
+    render: () => authShell('Choose a new password', 'You will log in with it from now on.', `<div id="auth-err"></div>
+      <form id="reset-form" novalidate>${A.field('New password', '<input class="input" name="password" type="password" autocomplete="new-password" required>', 'At least 8 characters.')}
+      <button class="btn btn-primary btn-lg btn-block" type="submit">Save password</button></form>`),
+    mount(root, p) {
+      $('#reset-form', root).addEventListener('submit', async (e) => {
+        e.preventDefault();
+        try {
+          await api('POST', '/auth/reset', { token: p.token, password: new FormData(e.target).get('password') });
+          A.me = null;
+          $('.panel', root).innerHTML = '<h1>Password saved</h1><p class="muted">You can log in with it now.</p><a class="btn btn-primary" href="#/login">Log in</a>';
+        } catch (err) { $('#auth-err', root).innerHTML = `<div class="form-error">${esc(err.message)}</div>`; A.showErrors(root, err.details); }
+      });
+    },
+  });
+  A.route('/verify/:token', {
+    public: true, title: 'Confirm your email',
+    async render(p) {
+      try { await api('POST', '/auth/verify', { token: p.token }); } catch (e) {
+        return authShell('That link did not work', `${esc(e.message)}. Log in to get a new one.`, '<a class="btn btn-ghost" href="#/login">Log in</a>');
+      }
+      try { A.me = await api('GET', '/auth/me'); } catch (e) { A.me = null; }
+      return authShell('You are live!', 'Your email is confirmed and your booking pages are open.', `<a class="btn btn-primary btn-lg btn-block" href="${A.me ? '#/share?welcome=1' : '#/login'}">${A.me ? 'Finish setting up' : 'Log in'}</a>`);
+    },
+  });
+  document.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-resend-verify]');
+    if (!btn) return;
+    btn.disabled = true;
+    try { await api('POST', '/auth/resend-verification', {}); A.toast('Sent. Check your inbox and junk folder.'); } catch (err) { A.toast(err.message, true); btn.disabled = false; }
+  });
   A.route('/accept/:token', {
     public: true, title: 'Join team',
     async render(p) {

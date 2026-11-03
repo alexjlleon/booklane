@@ -17,6 +17,8 @@
   // Rendered into a placeholder on the existing Integrations tab.
   A.renderProviders = async function renderProviders(host) {
     if (!host) return;
+    // Twilio and Resend are shared by the whole platform, so a company's owner has nothing to set here.
+    if (!A.me.platform_admin) { host.innerHTML = ''; return; }
     host.innerHTML = '<div class="panel"><div class="empty-state"><span class="spinner"></span></div></div>';
     let s;
     try {

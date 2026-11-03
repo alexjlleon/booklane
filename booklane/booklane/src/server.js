@@ -82,8 +82,8 @@ require('./routes/site')(app);
 
 app.get('/app', (req, res) => res.html(page({ title: `${req.hostBusiness ? `${req.hostBusiness.name} · ` : ''}${APP_NAME} dashboard`,
   // On a company's own domain the login screen is that company's, so it does not offer sign-up.
-  data: { companyDomain: req.hostBusiness ? { name: req.hostBusiness.name } : null, allowSignup: process.env.ALLOW_SIGNUP !== 'false' && !req.hostBusiness },
-  scripts: ['pricing.js', 'admin-core.js', 'admin-main.js', 'admin-setup.js', 'admin-business.js', 'admin-org.js', 'admin-sessions.js', 'admin-forms.js', 'admin-messaging.js', 'admin-integrations.js', 'admin-team.js'], styles: ['app.css', 'admin.css'], bodyClass: 'admin' })));
+  data: { companyDomain: req.hostBusiness ? { name: req.hostBusiness.name } : null, allowSignup: process.env.ALLOW_SIGNUP !== 'false' && !req.hostBusiness, supportEmail: process.env.SUPPORT_EMAIL || 'alex@weddingsunlimited.com' },
+  scripts: ['pricing.js', 'admin-core.js', 'admin-main.js', 'admin-setup.js', 'admin-business.js', 'admin-org.js', 'admin-sessions.js', 'admin-forms.js', 'admin-messaging.js', 'admin-integrations.js', 'admin-team.js', 'admin-platform.js'], styles: ['app.css', 'admin.css'], bodyClass: 'admin' })));
 
 // The form builder's live preview. Same page and script as a real form, but fed the unsaved form
 // by the builder over postMessage, so new and switched-off forms preview too. Nothing it does is

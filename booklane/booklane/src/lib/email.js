@@ -8,9 +8,27 @@ const config = require('./config');
 const from = (businessId) => config.get('EMAIL_FROM', businessId) || 'Availvo <onboarding@resend.dev>';
 const apiKey = () => (config.get('RESEND_API_KEY') || '').trim();
 
+// New companies send through the platform's own address, so one bad actor would hurt everyone's
+// delivery. A suspended company sends nothing; one not yet approved gets a daily allowance.
+function holdReason(businessId) {
+  if (!businessId) return null;
+  const b = db.get('SELECT access, suspended_at FROM businesses WHERE id = ?', businessId);
+  if (!b) return null;
+  if (b.suspended_at) return 'This company is suspended';
+  if (b.access === 'full') return null;
+  const cap = Number(process.env.STARTER_EMAILS_PER_DAY) || 100;
+  const sent = db.get("SELECT COUNT(*) c FROM email_log WHERE business_id = ? AND status IN ('sent','logged') AND created_at >= datetime('now','-1 day')", businessId).c;
+  return sent >= cap ? `Daily email limit of ${cap} reached for a new company` : null;
+}
+
 async function sendEmail({ to, subject, html, text, attachments, replyTo, businessId, fromName }) {
   const recipients = [].concat(to || []).map((s) => String(s).trim()).filter(Boolean);
   if (!recipients.length) return { status: 'skipped' };
+  const held = holdReason(businessId);
+  if (held) {
+    db.run('INSERT INTO email_log (business_id, to_addr, subject, html, status, provider, error) VALUES (?,?,?,?,?,?,?)', businessId, recipients.join(', '), subject, html, 'held', 'none', held);
+    return { status: 'failed', error: held };
+  }
   let status = 'logged', provider = 'log', error = null;
   const key = apiKey();
   if (key) {

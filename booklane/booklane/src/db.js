@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL, timezone TEXT NOT NULL DEFAULT 'America/Chicago', phone TEXT,
   is_super_admin INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS auth_tokens (
+  token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL, expires_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS sessions (
   token TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   business_id INTEGER, expires_at INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -245,6 +249,12 @@ CREATE TABLE IF NOT EXISTS sms_optouts (
 raw.exec(SCHEMA);
 // Lightweight migrations for databases created by earlier versions
 for (const sql of [
+  // Everyone already here counts as confirmed and fully approved. Self sign-ups write 0 and 'starter'.
+  'ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 1',
+  'ALTER TABLE users ADD COLUMN terms_accepted_at TEXT',
+  "ALTER TABLE businesses ADD COLUMN access TEXT NOT NULL DEFAULT 'full'",
+  'ALTER TABLE businesses ADD COLUMN activated INTEGER NOT NULL DEFAULT 1',
+  'ALTER TABLE businesses ADD COLUMN suspended_at TEXT',
   "ALTER TABLE memberships ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
   'ALTER TABLE memberships ADD COLUMN invite_token TEXT',
   // 'call' is a plain scheduled call; 'session' is booked on a market or designer calendar.

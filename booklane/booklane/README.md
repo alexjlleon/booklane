@@ -27,10 +27,19 @@ The seed can be configured with `SEED_EMAIL=you@company.com SEED_PASSWORD=... np
 1. Push this folder to a GitHub repo and create a Railway service from it. Railway uses the `Dockerfile`.
 2. Add a **Volume** mounted at `/data`. The SQLite database lives there.
 3. Set the variables from `.env.example`. At minimum set `BASE_URL`, `APP_SECRET` and `DATA_DIR=/data`. For real emails, also set `RESEND_API_KEY` and `EMAIL_FROM`.
-4. Deploy, open `/app#/signup` and create your account. Then set `ALLOW_SIGNUP=false` if this is only for your businesses.
+4. Deploy, open `/app#/signup` and create your account. The first account is the platform admin. Leave `ALLOW_SIGNUP` unset to let other companies sign up, or set it to `false` to keep it invite-only. See **Company sign-ups** below.
 5. Optional: set `HOME_REDIRECT=business` so your domain root opens your booking page.
 
 Keep **1 replica**. SQLite and the background job (partial-lead alerts, reminders) run inside the single process.
+
+## Company sign-ups
+
+With `ALLOW_SIGNUP` on, any company can create an account at `/app#/signup`:
+
+- Their pages stay offline until the owner presses the link in the confirmation email.
+- A new company can use booking pages, forms, quotes, calendars and up to `STARTER_EMAILS_PER_DAY` emails a day (default 100).
+- Texting, its own domain and its own send-from address use the platform's shared accounts, so they stay off until the platform admin presses **Approve** on the **Companies** screen. **Suspend** takes a company offline and stops its messages.
+- Twilio and Resend keys can only be seen and changed by the platform admin.
 
 ## Connect calendars
 

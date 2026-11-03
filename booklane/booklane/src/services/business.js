@@ -132,5 +132,10 @@ function pageUrl(business, rest = '') {
 /** A link that is not under /b/ (a booking's manage page, a quote, the admin), on this company's domain. */
 const linkFor = (business, path) => `${baseFor(business)}${path.startsWith('/') ? path : `/${path}`}`;
 
-module.exports = { conform, hydrate, bySlug, byId, teamEmails, contractEmails, partialEmails, logActivity, publicSettings,
+// Texts go out on the platform's one Twilio account, so they are for approved companies only.
+const canText = (business) => !!business && business.access === 'full' && !business.suspended_at;
+// Public pages open once the owner has confirmed their email, and close if the company is suspended.
+const isLive = (business) => !!business && !!business.activated && !business.suspended_at;
+
+module.exports = { canText, isLive, conform, hydrate, bySlug, byId, teamEmails, contractEmails, partialEmails, logActivity, publicSettings,
   normalizeDomain, isDomain, platformHost, byDomain, baseFor, pageUrl, linkFor };
