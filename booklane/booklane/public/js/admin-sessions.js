@@ -136,6 +136,7 @@
         ${A.field('Intro text', A.textarea('session.intro_blurb', s.intro_blurb, 'rows="2"'), 'Optional, shown under the heading')}
         ${A.field('Button before the calendar', A.input('session.book_cta', s.book_cta))}
         ${A.field('Final button', A.input('session.confirm_cta', s.confirm_cta || 'Confirm my session', 'maxlength="40"'))}
+        ${A.field('Guest invite heading', A.input('session.guest_label', s.guest_label || 'Invite someone to this session', 'maxlength="60"'))}
       </div>
 
       <div class="row between" style="margin-top:16px">

@@ -288,7 +288,7 @@ module.exports = function publicRoutes(app) {
     const summary = `${et?.name || 'Call'} with ${business.name}`;
     return { token: bk.token, status: bk.status, start: bk.start_utc, end: bk.end_utc, timezone: bk.invitee_tz, name: bk.name, email: bk.email, location: bk.location,
       host: host?.name, event_name: et?.name, duration_min: et?.duration_min, cancel_reason: bk.cancel_reason,
-      guests: BK.guestsOf(bk), guests_allowed: BK.guestsAllowed(et), max_guests: BK.MAX_GUESTS, is_past: start < Date.now(),
+      guests: BK.guestsOf(bk), guests_allowed: BK.guestsAllowed(et), guest_label: et?.kind === 'session' ? (et.settings?.session?.guest_label || 'Invite someone to this session') : (et?.settings?.guest_label || ''), max_guests: BK.MAX_GUESTS, is_past: start < Date.now(),
       google_link: googleCalendarLink({ start, end, summary, location: bk.location, description: B.linkFor(business, `/booking/${bk.token}`) }), ics_url: `/api/public/bookings/${bk.token}/ics` };
   }
 

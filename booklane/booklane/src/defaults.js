@@ -127,6 +127,7 @@ const SESSION_SETTINGS = {
   intro_blurb: '',
   book_cta: 'Pick a time',
   confirm_cta: 'Confirm my session',
+  guest_label: 'Invite someone to this session',
 };
 
 const SESSION_STEPS = () => [

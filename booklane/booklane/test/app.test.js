@@ -2965,3 +2965,20 @@ test('each booking page can word its final button, and clearing it goes back to 
   assert.match(fs.readFileSync(path.join(__dirname, '../public/js/booking.js'), 'utf8'), /esc\(\(et\.settings \|\| \{\}\)\.book_button \|\| 'Book my call'\)/);
 });
 
+test('each booking page can word its guest invite heading, and sessions say session', async () => {
+  require('../src/lib/security').resetRateLimits();
+  const cookie = await signup('guestlabel@test.dev', 'Guest Label Co');
+  const biz = db.get("SELECT id, slug FROM businesses WHERE name = 'Guest Label Co'");
+  const et = db.get('SELECT * FROM event_types WHERE business_id = ?', biz.id);
+  const set = (v) => req('PATCH', `/api/admin/event-types/${et.id}`, { guest_label: v }, { cookie });
+  assert.equal((await set('  Bring your partner  ')).status, 200);
+  const stored = () => db.json(db.get('SELECT settings FROM event_types WHERE id = ?', et.id).settings, {});
+  assert.equal(stored().guest_label, 'Bring your partner');
+  const tok = 'guestlabeltoken';
+  db.run("INSERT INTO bookings (business_id, event_type_id, host_user_id, token, start_utc, end_utc, invitee_tz, name, email, status) VALUES (?,?,?,?,?,?,?,?,?,'confirmed')",
+    biz.id, et.id, db.get("SELECT id FROM users WHERE email = 'guestlabel@test.dev'").id, tok, '2030-01-07T15:00:00.000Z', '2030-01-07T15:20:00.000Z', 'America/Chicago', 'A B', 'ab@example.com');
+  assert.match((await req('GET', `/booking/${tok}`)).data, /"guest_label":"Bring your partner"/);
+  db.run("UPDATE event_types SET kind = 'session', settings = '{}' WHERE id = ?", et.id);
+  assert.match((await req('GET', `/booking/${tok}`)).data, /"guest_label":"Invite someone to this session"/);
+});
+

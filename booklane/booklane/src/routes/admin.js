@@ -683,11 +683,12 @@ module.exports = function adminRoutes(app) {
     };
     // Page-level display choices live in settings. Only what this save sends is changed, so a
     // screen that does not know about a setting never resets it.
-    if (b.show_progress !== undefined || b.allow_guests !== undefined || b.book_button !== undefined) {
+    if (b.show_progress !== undefined || b.allow_guests !== undefined || b.book_button !== undefined || b.guest_label !== undefined) {
       const settings = existing ? db.json(existing.settings, {}) : {};
       if (b.show_progress !== undefined) settings.show_progress = bool(b.show_progress);
       if (b.allow_guests !== undefined) settings.allow_guests = bool(b.allow_guests);
       if (b.book_button !== undefined) settings.book_button = clampStr(String(b.book_button || '').trim(), 40);
+      if (b.guest_label !== undefined) settings.guest_label = clampStr(String(b.guest_label || '').trim(), 60);
       f.settings = JSON.stringify(settings);
     }
     let id = existing?.id;

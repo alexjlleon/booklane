@@ -28,7 +28,7 @@
     if (!list.length && !canAdd) return '';
     return `<div class="guests guests-manage"><h3>Guests</h3>
       ${list.length ? `<ul class="guest-list">${list.map((g) => `<li><span>${esc(g)}</span>${editable ? `<button type="button" class="btn btn-link btn-sm" data-guest-remove="${esc(g)}">Remove</button>` : ''}</li>`).join('')}</ul>` : ''}
-      ${canAdd ? `<div class="field ${guestError ? 'has-error' : ''}"><label for="f-guest">Invite someone to this call</label>
+      ${canAdd ? `<div class="field ${guestError ? 'has-error' : ''}"><label for="f-guest">${esc(bk.guest_label || 'Invite someone to this call')}</label>
         <div class="guest-add"><input class="input" id="f-guest" type="text" inputmode="email" placeholder="guest@example.com" value="${esc(guestDraft)}">
         <button type="button" class="btn btn-ghost" data-guest-add ${busy ? 'disabled' : ''}>Invite</button></div>${guestError ? `<div class="field-error">${esc(guestError)}</div>` : ''}</div>
       <p class="muted small">They get the invite and reminders. Only you can reschedule or cancel. You can invite up to ${bk.max_guests}.</p>` : ''}</div>`;
