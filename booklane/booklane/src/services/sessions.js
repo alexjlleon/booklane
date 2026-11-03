@@ -162,7 +162,7 @@ function publicSession(et, business) {
     labels: {
       choose_label: s.choose_label, choose_hint: s.choose_hint,
       booking_number_label: s.booking_number_label, booking_number_hint: s.booking_number_hint,
-      intro_heading: s.intro_heading || '', intro_blurb: s.intro_blurb || '', book_cta: s.book_cta,
+      intro_heading: s.intro_heading || '', intro_blurb: s.intro_blurb || '', book_cta: s.book_cta, confirm_cta: s.confirm_cta,
     },
     ask_booking_number: !!s.ask_booking_number,
     booking_number_required: !!(s.ask_booking_number && s.booking_number_required),

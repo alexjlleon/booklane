@@ -813,6 +813,7 @@ test('saving a session drops any price or checkout setting left from before', as
   assert.equal(create.status, 200, JSON.stringify(create.data));
   const s = create.data.session;
   assert.equal(s.book_cta, 'Find a time');
+  assert.equal(s.confirm_cta, 'Confirm my session', 'the final button has its own default');
   for (const k of ['price_cents', 'hold_minutes', 'pay_cta', 'currency']) assert.equal(s[k], undefined, `${k} is not kept`);
 
   const slot = await firstSlot(create.data.slug, 'houston');
@@ -2947,5 +2948,20 @@ test('the sign-up screens are in the admin bundle and the Companies screen loads
   const main = fs.readFileSync(path.join(__dirname, '../public/js/admin-main.js'), 'utf8');
   for (const s of ["'/forgot'", "'/reset/:token'", "'/verify/:token'", 'accept_terms']) assert.ok(main.includes(s), s);
   assert.ok(fs.readFileSync(path.join(__dirname, '../src/server.js'), 'utf8').includes("'admin-platform.js'"));
+});
+
+test('each booking page can word its final button, and clearing it goes back to the default', async () => {
+  const et = db.get("SELECT * FROM event_types WHERE kind = 'call' AND business_id = (SELECT id FROM businesses WHERE slug = ?) LIMIT 1", bizSlug);
+  const set = (v) => req('PATCH', `/api/admin/event-types/${et.id}`, { book_button: v }, { cookie: ownerCookie });
+  const stored = () => db.json(db.get('SELECT settings FROM event_types WHERE id = ?', et.id).settings, {});
+  assert.equal((await set('  Reserve my spot  ')).status, 200);
+  assert.equal(stored().book_button, 'Reserve my spot');
+  const page = await req('GET', `/b/${bizSlug}/${et.slug}`);
+  assert.match(typeof page.data === 'string' ? page.data : '', /"book_button":"Reserve my spot"/);
+  await set('x'.repeat(60));
+  assert.equal(stored().book_button.length, 40);
+  await set('');
+  assert.equal(stored().book_button, '');
+  assert.match(fs.readFileSync(path.join(__dirname, '../public/js/booking.js'), 'utf8'), /esc\(\(et\.settings \|\| \{\}\)\.book_button \|\| 'Book my call'\)/);
 });
 

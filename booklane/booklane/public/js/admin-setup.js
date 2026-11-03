@@ -80,6 +80,7 @@
                 <button type="button" class="btn btn-ghost btn-sm" data-add-place>+ Another way</button></div>
               <div id="place-list" class="stack" style="gap:8px"></div>
             </div>
+            ${A.field('Final button text', `<input class="input" data-bind="book_button" maxlength="40" value="${esc((et.settings && et.settings.book_button) || '')}" placeholder="Book my call">`, 'What the button says on the last step, like Book my consultation or Reserve my spot. Leave it empty for Book my call.')}
             ${A.toggle('active', et.active, 'Page is live')}
             ${A.toggle('show_progress', !(et.settings && et.settings.show_progress === false), 'Show the progress bar')}
             ${A.toggle('allow_guests', !(et.settings && et.settings.allow_guests === false), 'Let customers invite guests')}

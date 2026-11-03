@@ -134,7 +134,8 @@
         ${A.toggle('session.booking_number_required', s.booking_number_required, 'Require it before they can continue')}
         ${A.field('Heading above the calendar', A.input('session.intro_heading', s.intro_heading), 'Optional. Defaults to the session name')}
         ${A.field('Intro text', A.textarea('session.intro_blurb', s.intro_blurb, 'rows="2"'), 'Optional, shown under the heading')}
-        ${A.field('Button', A.input('session.book_cta', s.book_cta))}
+        ${A.field('Button before the calendar', A.input('session.book_cta', s.book_cta))}
+        ${A.field('Final button', A.input('session.confirm_cta', s.confirm_cta || 'Confirm my session', 'maxlength="40"'))}
       </div>
 
       <div class="row between" style="margin-top:16px">

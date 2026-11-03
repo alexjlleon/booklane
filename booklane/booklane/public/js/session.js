@@ -119,7 +119,7 @@
   };
 
   function ctaLabel() {
-    if (isLast()) return 'Confirm my session';
+    if (isLast()) return L.confirm_cta || 'Confirm my session';
     // The step before the calendar leads into it, so it carries the business's own wording.
     return st.i === steps().length - 2 ? (L.book_cta || 'Pick a time') : 'Continue';
   }

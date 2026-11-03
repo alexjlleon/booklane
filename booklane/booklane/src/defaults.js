@@ -126,6 +126,7 @@ const SESSION_SETTINGS = {
   intro_heading: '',
   intro_blurb: '',
   book_cta: 'Pick a time',
+  confirm_cta: 'Confirm my session',
 };
 
 const SESSION_STEPS = () => [

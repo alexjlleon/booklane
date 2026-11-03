@@ -217,7 +217,7 @@
         <div class="step-nav">
           <div>${prevIndex(st.i) >= 0 ? `<button type="button" class="btn btn-link" data-back>${icons.left} Back</button>` : `<span class="save-state ${st.saveState}">${st.saveState === 'saved' ? 'Progress saved' : ''}</span>`}</div>
           ${prevIndex(st.i) >= 0 ? `<span class="save-state ${st.saveState}">${st.saveState === 'saved' ? 'Progress saved' : ''}</span>` : ''}
-          <button type="button" class="btn btn-primary btn-lg" data-next ${st.busy ? 'disabled' : ''}>${st.busy ? '<span class="spinner"></span>' : ''}${isLast() ? 'Book my call' : step.type === 'availability' ? (step.cta || 'Set up a call') : 'Continue'} ${isLast() || st.busy ? '' : icons.right}</button>
+          <button type="button" class="btn btn-primary btn-lg" data-next ${st.busy ? 'disabled' : ''}>${st.busy ? '<span class="spinner"></span>' : ''}${isLast() ? esc((et.settings || {}).book_button || 'Book my call') : step.type === 'availability' ? (step.cta || 'Set up a call') : 'Continue'} ${isLast() || st.busy ? '' : icons.right}</button>
         </div>
       </main></div></div>${BL.powered()}`;
     if (step.type === 'schedule') {
