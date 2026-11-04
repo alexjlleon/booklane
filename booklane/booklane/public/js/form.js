@@ -377,6 +377,10 @@
     BL.Scheduler({
       root: $('#scheduler'), tz: st.tz, selected: st.slot, maxDaysAhead: 180,
       slotsUrl: `/api/public/b/${encodeURIComponent(biz.slug)}/f/${encodeURIComponent(form.slug)}/slots`,
+      dateCheck: { business: biz, onEvent: (date, available) => {
+        st.answers.event_date = date;
+        capture({ answers: { event_date: date, date_available: available ? 'yes' : 'already booked' } }, true);
+      } },
       onTzChange: (tz) => { st.tz = tz; },
       onSelect: (iso) => {
         st.slot = iso; st.error = null;

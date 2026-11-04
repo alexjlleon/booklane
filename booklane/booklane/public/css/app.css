@@ -114,6 +114,17 @@ h1, h2, h3 { line-height: 1.2; margin: 0; letter-spacing: -0.01em; }
 .slot:hover { border-color: var(--brand); }
 .slot.sel { background: var(--brand); color: #fff; border-color: var(--brand); }
 .tz-row { display: flex; align-items: center; gap: 8px; margin-top: 16px; font-size: 13px; color: var(--ink-2); }
+.dc { margin-top: 20px; padding: 14px 16px; border: 1px solid var(--line-2); border-radius: 12px; }
+.dc-title { display: block; font-size: 15px; margin-bottom: 8px; }
+.dc-types { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+.dc-type { border: 1px solid var(--line-2); background: var(--surface); color: inherit; border-radius: 999px; padding: 6px 14px; font: inherit; font-size: 14px; cursor: pointer; }
+.dc-type.on { border-color: var(--brand); background: var(--brand-soft); color: var(--brand); font-weight: 600; }
+.dc-hint { margin: 0 0 8px; }
+.dc-row { display: flex; gap: 8px; align-items: stretch; }
+.dc-row .input { flex: 1; min-width: 0; }
+.dc-result { margin-top: 10px; padding: 10px 12px; border-radius: 10px; font-size: 14px; line-height: 1.45; }
+.dc-result.good { background: var(--brand-soft); }
+.dc-result.warn { background: #fdf1e7; color: #8a4f0a; }
 .tz-row select { border: 1px solid var(--line-2); border-radius: 8px; padding: 6px 8px; background: var(--surface); max-width: 260px; }
 .empty { text-align: center; color: var(--muted); padding: 28px 10px; font-size: 14px; }
 .skeleton { background: linear-gradient(90deg, var(--line) 25%, #f3f0eb 50%, var(--line) 75%); background-size: 200% 100%; animation: shimmer 1.2s infinite; border-radius: 10px; }

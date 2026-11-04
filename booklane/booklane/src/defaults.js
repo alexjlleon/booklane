@@ -8,6 +8,14 @@ const BUSINESS_SETTINGS = {
   trust_points: ['Instant confirmation', 'No pressure', 'Your info is safe'],
   sms_consent_text: 'I agree to receive text messages about my inquiry. Msg & data rates may apply. Reply STOP to opt out.',
   privacy_note: 'We never share your details.',
+  // The "Check a date" box under the booking calendar. Off until a company turns it on, because the
+  // event check answers from the booked dates list and an empty list says every date is open.
+  date_check: {
+    meeting: false,
+    event: false,
+    available_text: '',
+    taken_text: '',
+  },
   leads: {
     abandoned_after_min: 30,
     notify_team_on_partial: true,

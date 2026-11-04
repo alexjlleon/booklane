@@ -221,7 +221,13 @@
         ${A.field('Urgency message (optional)', A.input('settings.urgency_text', s.urgency_text, 'placeholder="Only 4 spots left this week"'))}
         ${A.field('Trust points (one per line)', `<textarea class="textarea" rows="3" data-bind="settings.trust_points" data-type="lines">${esc(lines(s.trust_points))}</textarea>`)}
         ${A.field('Privacy note', A.input('settings.privacy_note', s.privacy_note))}
-        ${A.field('SMS consent text', A.textarea('settings.sms_consent_text', s.sms_consent_text, 'rows="3"'))}</div></div>`;
+        ${A.field('SMS consent text', A.textarea('settings.sms_consent_text', s.sms_consent_text, 'rows="3"'))}</div>
+        <div class="panel"><h2>Check a date</h2><p class="desc">Adds a box under the calendar on booking pages and forms, so people can check one date without booking.</p>
+        <div class="stack" style="margin-bottom:12px">${A.toggle('settings.date_check.meeting', s.date_check.meeting, 'Check a date for a meeting')}
+        ${A.toggle('settings.date_check.event', s.date_check.event, 'Check a date for an event')}</div>
+        <p class="help">Meetings use your real open times. Events use the booked event dates on the <a href="#/availability">Availability</a> page, so any date not on that list comes back as open. Keep the list up to date before turning this on.</p>
+        ${A.field('When an event date is open (optional)', A.input('settings.date_check.available_text', s.date_check.available_text, 'maxlength="300"'), 'Use {date} for the date they picked.')}
+        ${A.field('When an event date is booked (optional)', A.input('settings.date_check.taken_text', s.date_check.taken_text, 'maxlength="300"'), 'Leave these empty to use the standard wording.')}</div></div>`;
     } else if (tab === 'leads') {
       const L = s.leads, N = s.notifications;
       body = `<div class="cols-even"><div class="panel"><h2>Partial leads</h2><p class="desc">When someone stops partway, we keep what they entered and can alert you.</p>

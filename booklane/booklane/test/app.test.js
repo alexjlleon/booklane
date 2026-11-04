@@ -634,7 +634,7 @@ test('short date-first form: date, phone, availability verdict, then a time', as
   await req('POST', '/api/admin/blocked-dates', { dates: '2027-05-15, 2027-06-12, garbage', note: 'Smith wedding' }, { cookie: ownerCookie });
   const taken = await req('GET', `/api/public/b/${bizSlug}/date-check?date=2027-05-15`);
   assert.equal(taken.data.available, false);
-  assert.equal(taken.data.note, 'Smith wedding');
+  assert.equal(taken.data.note, undefined, 'the admin note can name a client and stays private');
   assert.equal((await req('GET', `/api/public/b/${bizSlug}/date-check?date=2027-06-12`)).data.available, false);
   assert.equal((await req('GET', `/api/public/b/${bizSlug}/date-check?date=2027-07-04`)).data.available, true, 'unlisted dates stay available');
   assert.equal((await req('GET', `/api/public/b/${bizSlug}/date-check?date=nonsense`)).status, 400);
@@ -2982,3 +2982,17 @@ test('each booking page can word its guest invite heading, and sessions say sess
   assert.match((await req('GET', `/booking/${tok}`)).data, /"guest_label":"Invite someone to this session"/);
 });
 
+
+test('Check a date box: off by default, turned on per company, public sees only the switches', async () => {
+  const before = await req('GET', '/api/admin/business', null, { cookie: ownerCookie });
+  assert.equal(before.data.settings.date_check.meeting, false);
+  assert.equal(before.data.settings.date_check.event, false);
+  const saved = await req('PATCH', '/api/admin/business', { settings: { date_check: { meeting: true, event: true, available_text: '{date} is open' } } }, { cookie: ownerCookie });
+  assert.equal(saved.status, 200, JSON.stringify(saved.data));
+  const after = await req('GET', '/api/admin/business', null, { cookie: ownerCookie });
+  assert.equal(after.data.settings.date_check.meeting, true);
+  assert.equal(after.data.settings.date_check.available_text, '{date} is open');
+  const pageHtml = (await req('GET', `/b/${bizSlug}`)).data;
+  assert.match(String(pageHtml), /"date_check":\{"meeting":true,"event":true/);
+  await req('PATCH', '/api/admin/business', { settings: { date_check: { meeting: false, event: false, available_text: '' } } }, { cookie: ownerCookie });
+});

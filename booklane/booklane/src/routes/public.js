@@ -470,8 +470,9 @@ module.exports = function publicRoutes(app) {
     const b = getBusiness(req.params.slug);
     const date = String(req.query.date || '');
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new HttpError(400, 'Pick a date first.');
-    const hit = db.get('SELECT note FROM blocked_dates WHERE business_id = ? AND date = ?', b.id, date);
-    return { date, available: !hit, note: hit ? String(hit.note || '').slice(0, 200) : '' };
+    // The note stays in the admin: it can hold a client's name, and this answer is public.
+    const hit = db.get('SELECT 1 FROM blocked_dates WHERE business_id = ? AND date = ?', b.id, date);
+    return { date, available: !hit };
   });
 
   // ---------- Embed script ----------

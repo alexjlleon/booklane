@@ -101,7 +101,7 @@
     st.avail = { loading: true, date: when };
     try {
       const r = await fetch(`/api/public/b/${encodeURIComponent(biz.slug)}/date-check?date=${when}`).then((x) => x.json());
-      st.avail = { date: when, available: !!r.available, note: r.note || '' };
+      st.avail = { date: when, available: !!r.available };
       capture({ answers: { date_available: r.available ? 'yes' : 'already booked' } }, true);
     } catch (e) {
       // If the check fails, say nothing rather than claiming a date is taken.
@@ -222,6 +222,10 @@
       </main></div></div>${BL.powered()}`;
     if (step.type === 'schedule') {
       BL.Scheduler({ root: $('#scheduler'), slug: biz.slug, eventSlug: bookingEt().slug, tz: st.tz, selected: st.slot, maxDaysAhead: bookingEt().max_days_ahead,
+        dateCheck: { business: biz, onEvent: (date, available) => {
+          st.answers.event_date = date;
+          capture({ answers: { event_date: date, date_available: available ? 'yes' : 'already booked' } }, true);
+        } },
         onTzChange: (tz) => { st.tz = tz; },
         onSelect: (iso) => {
           st.slot = iso; st.error = null;

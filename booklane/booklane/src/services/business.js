@@ -89,7 +89,7 @@ function publicSettings(b) {
   const s = b.settings;
   return {
     tagline: s.tagline, about: s.about, urgency_text: s.urgency_text, trust_points: s.trust_points,
-    sms_consent_text: s.sms_consent_text, privacy_note: s.privacy_note,
+    sms_consent_text: s.sms_consent_text, privacy_note: s.privacy_note, date_check: s.date_check,
     quote: {
       enabled: s.quote.enabled, title: s.quote.title, intro: s.quote.intro, currency: s.quote.currency, tax_rate: s.quote.tax_rate,
       deposit_type: s.quote.deposit_type, deposit_value: s.quote.deposit_value, bundle_discounts: s.quote.bundle_discounts, bundles: s.quote.bundles,
