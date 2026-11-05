@@ -1,10 +1,10 @@
-/* Month calendar + time slot picker */
+/* Month calendar + time slot picker. Phones get a row of days and a grid of times instead. */
 (function () {
   'use strict';
   const { esc, api, icons } = BL;
 
   BL.Scheduler = function (opts) {
-    const st = { tz: opts.tz, month: null, day: null, selected: opts.selected || null, cache: {}, loading: false, autoJumped: false };
+    const st = { tz: opts.tz, month: null, day: null, selected: opts.selected || null, cache: {}, loading: false, autoJumped: false, allDates: false, stripTo: '', center: true, extending: false };
     // Booking pages and forms can add a "Check a date" box. It sits beside the calendar rather than
     // inside it, so redrawing the month never wipes a date someone is typing.
     const dc = opts.dateCheck ? opts.dateCheck.business.settings.date_check || {} : {};
@@ -41,11 +41,26 @@
       return st.cache[key];
     }
 
+    // The row of days runs unbroken from today, so every month up to the one on show has to be in,
+    // plus the one after it: otherwise the row would stop dead at the end of the month.
+    function loadStrip(month) {
+      const next = addMonths(month, 1);
+      const end = next <= maxMonth() ? next : month;
+      if (end > st.stripTo) st.stripTo = end;
+      const months = [];
+      for (let m = monthOf(today()); m <= st.stripTo; m = addMonths(m, 1)) months.push(m);
+      return Promise.all(months.map(load));
+    }
+
     async function show(month, day) {
       st.month = month;
+      if (day) { st.allDates = false; st.center = true; }
       st.loading = true; render();
       let days;
-      try { days = await load(month); } catch (e) { st.loading = false; root.innerHTML = `<div class="form-error">${esc(e.message)}</div>`; return; }
+      try {
+        if (BL.isPhone()) await loadStrip(month);
+        days = await load(month);
+      } catch (e) { st.loading = false; root.innerHTML = `<div class="form-error">${esc(e.message)}</div>`; return; }
       st.loading = false;
       const avail = Object.keys(days).filter((d) => days[d].length).sort();
       if (!avail.length && !st.autoJumped && month < maxMonth()) { return show(addMonths(month, 1)); }
@@ -59,7 +74,8 @@
       render();
     }
 
-    function render() {
+    /** The month grid. The phone layout shows it too, behind "All dates". */
+    function monthHtml() {
       const month = st.month;
       const days = st.cache[cacheKey(month)] || {};
       const [y, mo] = month.split('-').map(Number);
@@ -76,21 +92,119 @@
         const cls = ['cal-day', has ? 'avail' : '', ds === st.day ? 'sel' : '', ds === t ? 'today' : ''].join(' ');
         cells += `<button type="button" class="${cls}" data-day="${ds}" ${has ? '' : 'disabled'} aria-label="${esc(BL.fmtDateStr(ds))}${has ? ', available' : ''}">${d}</button>`;
       }
+      return `<div class="cal-head"><strong>${esc(title)}</strong><div class="cal-nav">
+            <button type="button" class="icon-btn" data-nav="-1" aria-label="Previous month" ${month <= monthOf(t) ? 'disabled' : ''}>${icons.left}</button>
+            <button type="button" class="icon-btn" data-nav="1" aria-label="Next month" ${month >= maxMonth() ? 'disabled' : ''}>${icons.right}</button></div></div>
+          <div class="cal-grid">${cells}</div>`;
+    }
+
+    const noTimes = () => `<div class="empty">No open times this month.${st.month < maxMonth() ? `<br><button type="button" class="btn btn-link" data-nav="1">Check next month ${icons.right}</button>` : ''}</div>`;
+
+    function render() {
+      syncBar();
+      if (BL.isPhone()) return renderPhone();
+      const days = st.cache[cacheKey(st.month)] || {};
       const slots = st.day && days[st.day] ? days[st.day] : [];
       const slotsHtml = st.loading
         ? Array.from({ length: 6 }, () => '<div class="skeleton" style="height:44px"></div>').join('')
-        : !st.day ? `<div class="empty">No open times this month.<br><button type="button" class="btn btn-link" data-nav="1">Check next month ${icons.right}</button></div>`
+        : !st.day ? noTimes()
           : slots.map((iso) => `<button type="button" class="slot${iso === st.selected ? ' sel' : ''}" data-slot="${iso}">${esc(BL.fmtTime(iso, st.tz))}</button>`).join('');
       root.innerHTML = `<div class="sched">
         <div>
-          <div class="cal-head"><strong>${esc(title)}</strong><div class="cal-nav">
-            <button type="button" class="icon-btn" data-nav="-1" aria-label="Previous month" ${month <= monthOf(t) ? 'disabled' : ''}>${icons.left}</button>
-            <button type="button" class="icon-btn" data-nav="1" aria-label="Next month" ${month >= maxMonth() ? 'disabled' : ''}>${icons.right}</button></div></div>
-          <div class="cal-grid">${cells}</div>
+          ${monthHtml()}
           <div class="tz-row">${icons.clock.replace('<svg', '<svg width="16" height="16"')}<label class="sr-only" for="tz">Time zone</label><select id="tz">${BL.tzOptions(st.tz)}</select></div>
         </div>
         <div><div class="slots-title">${st.day ? esc(BL.fmtDateStr(st.day, { year: undefined })) : 'Times'}</div><div class="slots" role="list">${slotsHtml}</div></div>
       </div>`;
+    }
+
+    // ---------- Phones: days across the top, times in a grid, less scrolling ----------
+    const slotsOn = (ds) => (st.cache[cacheKey(monthOf(ds))] || {})[ds] || [];
+    const lastBookable = () => new Date(Date.parse(today() + 'T12:00:00Z') + (opts.maxDaysAhead || 60) * 86400000).toISOString().slice(0, 10);
+    const fullTime = (iso) => BL.fmtTime(iso, st.tz).replace(/(am|pm)$/, ' $1').toUpperCase();
+    const hourOf = (iso) => Number(new Intl.DateTimeFormat('en-US', { timeZone: st.tz, hour: 'numeric', hourCycle: 'h23' }).format(new Date(iso)));
+    function tzName(tz) {
+      try { return new Intl.DateTimeFormat('en-US', { timeZone: tz, timeZoneName: 'longGeneric' }).formatToParts(new Date()).find((p) => p.type === 'timeZoneName').value; }
+      catch (e) { return tz; }
+    }
+
+    function dayTile(ds) {
+      const open = slotsOn(ds).length;
+      const on = ds === st.day;
+      const dt = new Date(ds + 'T12:00:00Z');
+      const dow = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 'short' }).format(dt);
+      return `<button type="button" class="day-tile${open ? '' : ' full'}${on ? ' sel' : ''}" data-day="${ds}" ${open ? '' : 'disabled'} aria-pressed="${on}" aria-label="${esc(BL.fmtDateStr(ds))}, ${open ? `${open} open` : 'full'}"><span class="d-dow">${dow}</span><span class="d-num">${dt.getUTCDate()}</span><span class="d-open">${open ? `${open} open` : 'Full'}</span></button>`;
+    }
+
+    /** Every day from `from` to the end of the month `to`, stopping at the booking window. */
+    function tiles(from, to) {
+      const end = lastDay(to) < lastBookable() ? lastDay(to) : lastBookable();
+      let html = '';
+      for (let t = Date.parse(from + 'T12:00:00Z'); ; t += 86400000) {
+        const ds = new Date(t).toISOString().slice(0, 10);
+        if (ds > end) return html;
+        html += dayTile(ds);
+      }
+    }
+
+    function timesHtml() {
+      if (st.loading) return '<div class="time-grid">' + Array.from({ length: 6 }, () => '<div class="skeleton" style="height:44px"></div>').join('') + '</div>';
+      if (!st.day) return noTimes();
+      const groups = [['Morning', 0, 12], ['Afternoon', 12, 17], ['Evening', 17, 24]];
+      return groups.map(([label, from, to]) => {
+        const list = slotsOn(st.day).filter((iso) => { const h = hourOf(iso); return h >= from && h < to; });
+        if (!list.length) return '';
+        return `<div class="time-label">${label}</div><div class="time-grid">${list.map((iso) => `<button type="button" class="slot${iso === st.selected ? ' sel' : ''}" data-slot="${iso}">${esc(fullTime(iso))}</button>`).join('')}</div>`;
+      }).join('');
+    }
+
+    function renderPhone() {
+      const old = root.querySelector('[data-strip]');
+      const left = old ? old.scrollLeft : 0;
+      const ready = !!st.cache[cacheKey(st.month)];
+      const row = ready ? tiles(today(), st.stripTo || st.month) : Array.from({ length: 5 }, () => '<div class="skeleton day-tile-sk"></div>').join('');
+      root.innerHTML = `<div class="sched-m">
+        <section class="sched-card">
+          <div class="sched-card-head"><strong>Pick a day</strong><button type="button" class="sched-link" data-all aria-expanded="${st.allDates}">${st.allDates ? 'Fewer dates' : 'All dates'} ${icons.right}</button></div>
+          ${st.allDates ? monthHtml() : `<div class="day-strip" data-strip>${row}</div>`}
+        </section>
+        <section class="sched-card">
+          <div class="sched-card-head"><strong>Pick a time</strong><span class="tz-pick"><span>${esc(tzName(st.tz))}${st.tz === BL.guessTz() ? ' · your zone' : ''}</span><label class="sr-only" for="tz">Time zone</label><select id="tz">${BL.tzOptions(st.tz)}</select></span></div>
+          ${timesHtml()}
+        </section>
+      </div>`;
+      const strip = root.querySelector('[data-strip]');
+      if (!strip) return;
+      const sel = strip.querySelector('.sel');
+      if (st.center && sel) { strip.scrollLeft = sel.offsetLeft - sel.offsetWidth - 8; st.center = false; } else strip.scrollLeft = left;
+    }
+
+    // More days arrive as they swipe, added to the row in place so the swipe is not interrupted.
+    async function extendStrip(strip) {
+      if (st.extending || !st.stripTo || st.stripTo >= maxMonth()) return;
+      st.extending = true;
+      const tz = st.tz, next = addMonths(st.stripTo, 1);
+      try {
+        await load(next);
+        if (tz === st.tz) { st.stripTo = next; strip.insertAdjacentHTML('beforeend', tiles(next + '-01', next)); }
+      } catch (e) { /* The next swipe tries again. */ }
+      st.extending = false;
+    }
+
+    /** Phones choose a time, then press Continue, so the page's own button waits for a time. */
+    function syncBar() {
+      const body = root.closest('.step-body');
+      const nav = body && body.parentElement.querySelector(':scope > .step-nav');
+      const next = nav && nav.querySelector('[data-next]');
+      if (!next) return;
+      let hint = nav.querySelector('.sched-hint');
+      const phone = BL.isPhone();
+      if (!next.querySelector('.spinner')) next.disabled = phone && !st.selected;
+      nav.classList.toggle('sched-nav', phone);
+      if (!phone) { if (hint) hint.remove(); return; }
+      if (!hint) { nav.insertAdjacentHTML('afterbegin', '<div class="sched-hint" role="status"></div>'); hint = nav.querySelector('.sched-hint'); }
+      const text = st.selected ? `${BL.fmtDate(st.selected, st.tz, { weekday: 'short', month: 'short' })} at ${fullTime(st.selected)}` : 'Select a time to continue';
+      if (hint.textContent !== text) hint.textContent = text;
     }
 
     function renderDateCheck() {
@@ -163,16 +277,35 @@
       const nav = e.target.closest('[data-nav]');
       if (nav && !nav.disabled) { st.day = null; st.autoJumped = true; return show(addMonths(st.month, Number(nav.dataset.nav))); }
       const day = e.target.closest('[data-day]');
-      if (day && !day.disabled) { st.day = day.dataset.day; render(); return; }
+      if (day && !day.disabled) {
+        st.day = day.dataset.day;
+        if (BL.isPhone()) { st.month = monthOf(st.day); if (st.allDates) { st.allDates = false; st.center = true; } }
+        render(); return;
+      }
+      if (e.target.closest('[data-all]')) { st.allDates = !st.allDates; st.center = true; render(); return; }
       const slot = e.target.closest('[data-slot]');
       if (slot) { st.selected = slot.dataset.slot; render(); opts.onSelect && opts.onSelect(st.selected); }
     });
     root.addEventListener('change', (e) => {
-      if (e.target.id === 'tz') { st.tz = e.target.value; st.day = null; st.autoJumped = false; opts.onTzChange && opts.onTzChange(st.tz); show(st.selected ? monthOf(new Intl.DateTimeFormat('en-CA', { timeZone: st.tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(st.selected))) : monthOf(today())); }
+      if (e.target.id === 'tz') { st.tz = e.target.value; st.day = null; st.autoJumped = false; st.stripTo = ''; st.center = true; opts.onTzChange && opts.onTzChange(st.tz); show(st.selected ? monthOf(new Intl.DateTimeFormat('en-CA', { timeZone: st.tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(st.selected))) : monthOf(today())); }
     });
+
+    root.addEventListener('scroll', (e) => {
+      const strip = e.target;
+      if (strip.matches && strip.matches('[data-strip]') && strip.scrollWidth - strip.scrollLeft - strip.clientWidth < 240) extendStrip(strip);
+    }, true);
+
+    // Turning a tablet can cross the line between the two layouts.
+    const media = window.matchMedia(BL.PHONE_QUERY);
+    const onResize = () => {
+      if (!root.isConnected) return media.removeEventListener('change', onResize);
+      st.center = true;
+      show(st.month, st.day || undefined);
+    };
+    media.addEventListener('change', onResize);
 
     const startMonth = st.selected ? new Intl.DateTimeFormat('en-CA', { timeZone: st.tz, year: 'numeric', month: '2-digit' }).format(new Date(st.selected)).slice(0, 7) : monthOf(today());
     show(startMonth);
-    return { get tz() { return st.tz; }, get selected() { return st.selected; }, refresh() { st.cache = {}; show(st.month); } };
+    return { get tz() { return st.tz; }, get selected() { return st.selected; }, refresh() { st.cache = {}; st.stripTo = ''; show(st.month); } };
   };
 })();

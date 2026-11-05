@@ -65,6 +65,7 @@
       ${st.slot ? `<div class="selected-time">${icons.cal.replace('<svg', '<svg width="16" height="16" style="vertical-align:-3px;margin-right:6px"')}${esc(BL.fmtDate(st.slot, st.tz, { weekday: 'short', month: 'short' }))}, ${esc(BL.fmtTime(st.slot, st.tz))}</div>` : ''}
       ${biz.settings.urgency_text ? `<div class="urgency">${esc(biz.settings.urgency_text)}</div>` : ''}
       <ul class="trust">${(biz.settings.trust_points || []).map((t) => `<li>${esc(t)}</li>`).join('')}</ul>
+      ${BL.about([routeTarget() ? '' : et.description], biz.settings.trust_points)}
     </aside>`;
   }
 
@@ -234,7 +235,8 @@
           capture({ answers: { requested_time: label } }, true);
           const sideEl = $('.booker-side');
           if (sideEl) sideEl.outerHTML = side();
-          setTimeout(() => go(1), 180);
+          // On a phone they press Continue, as the bar under the times says.
+          if (!BL.isPhone()) setTimeout(() => go(1), 180);
         },
       });
     }

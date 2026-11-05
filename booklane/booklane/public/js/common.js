@@ -39,6 +39,15 @@
   BL.locIcon = (t) => (t === 'phone' ? BL.icons.phone : t === 'in_person' ? BL.icons.pin : BL.icons.video);
 
   // ---- Time helpers ----
+  // The same width the page layout in app.css switches at.
+  BL.PHONE_QUERY = '(max-width: 860px)';
+  BL.isPhone = () => window.matchMedia(BL.PHONE_QUERY).matches;
+  /** On phones the description and trust points fold away under "About" to leave room for the calendar. */
+  BL.about = (texts, trust) => {
+    const t = (texts || []).filter(Boolean), points = trust || [];
+    if (!t.length && !points.length) return '';
+    return `<details class="side-about"><summary>About</summary>${t.map((x) => `<p class="muted">${BL.esc(x)}</p>`).join('')}${points.length ? `<ul class="trust">${points.map((x) => `<li>${BL.esc(x)}</li>`).join('')}</ul>` : ''}</details>`;
+  };
   BL.guessTz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Chicago'; } catch (e) { return 'America/Chicago'; } };
   BL.fmtTime = (iso, tz) => new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' }).format(new Date(iso)).toLowerCase().replace(' ', '');
   BL.fmtDate = (iso, tz, o) => new Intl.DateTimeFormat('en-US', Object.assign({ timeZone: tz, weekday: 'long', month: 'long', day: 'numeric' }, o || {})).format(new Date(iso));

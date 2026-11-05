@@ -141,6 +141,7 @@
       ${S.show_title !== false || (S.show_description !== false && form.description) ? `<div>${S.show_title !== false ? `<h1 class="event-title">${esc(form.name)}</h1>` : ''}${S.show_description !== false && form.description ? `<p class="muted desc" style="margin:8px 0 0">${esc(form.description)}</p>` : ''}</div>` : ''}
       ${st.slot ? `<div class="selected-time">${esc(BL.fmtDate(st.slot, st.tz, { weekday: 'short', month: 'short' }))}, ${esc(BL.fmtTime(st.slot, st.tz))}</div>` : ''}
       ${S.show_trust !== false ? `<ul class="trust">${(biz.settings.trust_points || []).map((t) => `<li>${esc(t)}</li>`).join('')}</ul>` : ''}
+      ${BL.about([S.show_description !== false ? form.description : ''], S.show_trust !== false ? biz.settings.trust_points : [])}
     </aside>`;
   }
 

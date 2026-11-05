@@ -70,6 +70,7 @@
       ${st.slot ? `<div class="selected-time">${icons.cal.replace('<svg', '<svg width="16" height="16" style="vertical-align:-3px;margin-right:6px"')}${esc(BL.fmtDate(st.slot, st.tz, { weekday: 'short', month: 'short' }))}, ${esc(BL.fmtTime(st.slot, st.tz))}</div>` : ''}
       ${biz.settings.urgency_text ? `<div class="urgency">${esc(biz.settings.urgency_text)}</div>` : ''}
       <ul class="trust">${(biz.settings.trust_points || []).map((t) => `<li>${esc(t)}</li>`).join('')}</ul>
+      ${BL.about([sess.description, L.intro_blurb], biz.settings.trust_points)}
     </aside>`;
   }
 
