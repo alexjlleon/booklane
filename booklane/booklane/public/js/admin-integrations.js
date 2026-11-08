@@ -150,4 +150,44 @@
       }
     });
   }
+
+  // ------------------------------------------------------------ booked in BoothBook, via a Zap
+  // A private address a Zap posts each new BoothBook booking to. Availvo finds the customer by
+  // email or phone and marks their call "booked on the call", which stops the sales follow-ups.
+  A.renderCrmBooked = async function renderCrmBooked(host) {
+    if (!host) return;
+    let d;
+    try { d = await A.api('GET', '/integrations/crm-booked'); } catch (e) { host.innerHTML = ''; return; }
+    const esc = A.esc;
+    host.innerHTML = `<div class="panel">
+      <h2>Mark customers booked from BoothBook</h2>
+      <p class="desc">When someone books in BoothBook, their call here is marked <b>booked on the call</b>: no-show and "not booked yet" follow-ups stop, and any "booked on the call" automations start. Customers are matched by email or phone.</p>
+      ${d.enabled ? `
+        <div class="field"><label>Your private address</label>
+          <div class="row" style="gap:8px"><input class="input code" readonly value="${esc(d.url)}" style="flex:1;min-width:0"><button type="button" class="btn btn-ghost btn-sm" data-copy="${esc(d.url)}">Copy</button></div>
+          <div class="help">Keep it private: anyone with it can mark customers booked. Make a new one if it leaks; the old one stops working.</div></div>
+        <ol class="small" style="margin:6px 0 12px 18px;padding:0;line-height:1.6">
+          <li>In Zapier, make a Zap: <b>BoothBook, New Booking</b>.</li>
+          <li>Action: <b>Webhooks by Zapier, POST</b>. URL: the address above. Payload type: JSON.</li>
+          <li>Data: <code class="code">email</code>, <code class="code">phone</code>, <code class="code">first_name</code>, <code class="code">last_name</code>, <code class="code">booking_id</code>, <code class="code">event_date</code>, <code class="code">total</code> from the BoothBook booking. Email or phone is required.</li>
+          <li>Test it and turn the Zap on.</li>
+        </ol>
+        <div class="row" style="gap:8px"><button type="button" class="btn btn-ghost btn-sm" data-crm="rotate">Make a new address</button><button type="button" class="btn btn-link btn-sm" data-crm="off">Turn off</button></div>
+        <h3 style="font-size:14px;margin:16px 0 6px">Recently received</h3>
+        ${d.recent.length ? `<ul class="small" style="margin:0;padding-left:18px">${d.recent.map((r) => `<li><span class="muted">${esc(A.dt(r.created_at.replace(' ', 'T') + 'Z', { weekday: 'short' }))}</span> ${esc(r.message)}</li>`).join('')}</ul>` : '<p class="small muted" style="margin:0">Nothing yet.</p>'}`
+    : '<button type="button" class="btn btn-primary btn-sm" data-crm="on">Turn on and get the address</button>'}
+    </div>`;
+    host.onclick = async (e) => {
+      const b = e.target.closest('[data-crm]');
+      if (!b) return;
+      const act = b.dataset.crm;
+      if (act === 'rotate' && !confirm('Make a new address? The old one stops working, so update the Zap with the new one.')) return;
+      if (act === 'off' && !confirm('Turn this off? The Zap will stop marking customers booked.')) return;
+      b.disabled = true;
+      try {
+        await A.guard(() => A.api('POST', '/integrations/crm-booked', { enabled: act !== 'off' }), act === 'off' ? 'Turned off' : act === 'rotate' ? 'New address made' : 'Turned on');
+        await A.renderCrmBooked(host);
+      } catch (err) { b.disabled = false; }
+    };
+  };
 })();

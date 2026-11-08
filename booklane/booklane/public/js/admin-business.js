@@ -273,7 +273,7 @@
       const BB = s.integrations.boothbook, W = s.integrations.webhook;
       // Twilio and Resend live above BoothBook. They are global credentials with their own
       // save buttons, so they are filled in after paint rather than riding the settings form.
-      providerHost = '<div id="provider-cards"></div>';
+      providerHost = '<div id="provider-cards"></div><div id="crm-booked"></div>';
       const events = ['lead.partial', 'lead.completed', 'booking.created', 'booking.cancelled', 'quote.submitted', 'contract.requested', 'callback.requested'];
       body = `${providerHost}<div class="cols-even"><div class="panel"><h2>BoothBook</h2><p class="desc">Send contract requests to BoothBook as leads. BoothBook's API is invite only, so confirm the endpoint and field names with BoothBook support, then test here.</p>
         <div class="stack" style="margin-bottom:12px">${A.toggle('settings.integrations.boothbook.enabled', BB.enabled, 'Push contract requests to BoothBook')}</div>
@@ -397,6 +397,7 @@
     // The provider cards manage global credentials with their own endpoints, so they are painted
     // separately and never travel with this form's PATCH.
     if (tab === 'integrations' && A.renderProviders) A.renderProviders($('#provider-cards', root));
+    if (tab === 'integrations' && A.renderCrmBooked) A.renderCrmBooked($('#crm-booked', root));
     if (tab === 'domain') {
       root.addEventListener('click', async (e) => {
         const btn = e.target.closest('[data-save-domain]');

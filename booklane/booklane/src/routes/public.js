@@ -19,6 +19,7 @@ const FSTYLE = require('../services/form-style');
 const UP = require('../services/uploads');
 const fs = require('fs');
 const MSG = require('../services/messaging');
+const CRM = require('../services/crm-sync');
 const sms = require('../lib/sms');
 const { LOCATION_TYPES } = require('../defaults');
 
@@ -244,6 +245,18 @@ module.exports = function publicRoutes(app) {
   // Twilio posts replies here. A STOP must be honoured, so the signature is checked first:
   // without it, anyone could post a forged STOP and silence our messages to a real customer,
   // or a forged reply that looks like it came from them.
+  // A Zap (BoothBook "New Booking") telling us a customer booked. Keyed per company; a wrong or
+  // missing key looks exactly like a company that has not switched this on.
+  const crmLimit = rateLimit({ windowMs: 60000, max: 60 });
+  app.post('/api/public/hooks/crm-booked/:slug', (req) => {
+    crmLimit(req);
+    const business = B.bySlug(req.params.slug);
+    const key = req.query.key || req.headers['x-availvo-key'];
+    if (!business || !CRM.keyMatches(business.id, key)) throw new HttpError(404, 'Not found');
+    const body = req.body && Object.keys(req.body).length ? req.body : (req.rawBody ? Object.fromEntries(new URLSearchParams(req.rawBody)) : {});
+    return { ok: true, ...CRM.markBooked(business, body) };
+  });
+
   app.post('/api/public/sms/inbound', (req, res) => {
     const params = req.rawBody ? Object.fromEntries(new URLSearchParams(req.rawBody)) : {};
     try {

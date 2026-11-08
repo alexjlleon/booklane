@@ -3325,3 +3325,62 @@ test('a call marked not valid never gets a message, even one queued or scheduled
   assert.deepEqual([m.status, m.skip_reason], ['skipped', 'marked not a valid call']);
   await req('DELETE', `/api/admin/automations/${a.data.id}`, null, { cookie: ownerCookie });
 }));
+
+test('a BoothBook booking sent by a Zap marks the customer booked and stops the chasing', () => withAnyHour(async () => {
+  freshLimits(); stubTwilio();
+  const { bizId, id } = pastCall(60 * 24);
+  await req('POST', '/api/admin/automations/templates', { group: 'not_booked' }, { cookie: ownerCookie });
+  await req('POST', `/api/admin/bookings/${id}/outcome`, { outcome: 'not_booked' }, { cookie: ownerCookie });
+  assert.ok(queuedFor(id, 'not_booked').length > 0, 'nudges are waiting');
+
+  // Off until switched on: the address does not exist.
+  const post = (url, body, type = 'application/json') => fetch(url, { method: 'POST', headers: { 'Content-Type': type }, body: type === 'application/json' ? JSON.stringify(body) : new URLSearchParams(body).toString() }).then(async (r) => ({ status: r.status, data: await r.json().catch(() => null) }));
+  assert.equal((await post(`${base}/api/public/hooks/crm-booked/${bizSlug}?key=guess`, { email: 'dana.out@example.com' })).status, 404);
+
+  const on = await req('POST', '/api/admin/integrations/crm-booked', {}, { cookie: ownerCookie });
+  assert.equal(on.data.enabled, true);
+  const url = on.data.url.replace(/^https?:\/\/[^/]+/, base);
+  assert.equal((await post(url.replace(/key=[^&]+/, 'key=wrong'), { email: 'dana.out@example.com' })).status, 404, 'a wrong key looks like nothing is there');
+
+  // Zapier field names, nested and oddly spelled; matched by phone alone.
+  let r = await post(url, { 'Client': { 'Mobile Telephone': '(713) 555-0199' }, 'Booking ID': 'BB-5521', 'Event Date': '2027-05-01', 'Grand Total': '$4,250' });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.equal(r.data.matched, true);
+  assert.equal(r.data.booking_id, id);
+  assert.equal(db.get('SELECT outcome FROM bookings WHERE id = ?', id).outcome, 'booked');
+  assert.deepEqual(queuedFor(id, 'not_booked'), [], 'the not-booked nudges stopped');
+  const lead = db.get('SELECT lead_id FROM bookings WHERE id = ?', id).lead_id;
+  assert.ok(db.all("SELECT message FROM activity WHERE lead_id = ? AND type = 'crm_sync'", lead).some((a) => /Booked in BoothBook \(#BB-5521\), event 2027-05-01, \$4,250/.test(a.message)));
+
+  // Again (Zapier retries): harmless.
+  r = await post(url, { email: 'DANA.OUT@example.com' });
+  assert.equal(r.data.already, true);
+
+  // Form-encoded works too; a stranger matches nothing but is still a 200 so the Zap does not error.
+  r = await post(url, { email: 'nobody@example.com' }, 'application/x-www-form-urlencoded');
+  assert.equal(r.status, 200);
+  assert.equal(r.data.matched, false);
+  r = await post(url, { name: 'No contact' });
+  assert.equal(r.data.matched, false);
+
+  const view = await req('GET', '/api/admin/integrations/crm-booked', null, { cookie: ownerCookie });
+  assert.ok(view.data.recent.some((x) => /matched no call/.test(x.message)));
+
+  // A call already answered is not asked about again.
+  db.run("UPDATE bookings SET host_check_sent_at = NULL WHERE id = ?", id);
+  await req('PUT', '/api/admin/automations/host-check', { enabled: true, after_min: 0 }, { cookie: ownerCookie });
+  db.run("UPDATE bookings SET end_utc = ? WHERE id = ?", new Date(Date.now() - 600000).toISOString(), id);
+  const before = sentTexts.length;
+  await MSG.sendHostChecks();
+  assert.equal(db.get('SELECT host_check_sent_at FROM bookings WHERE id = ?', id).host_check_sent_at, null, 'no host question once the outcome is known');
+  assert.equal(sentTexts.length, before);
+  await req('PUT', '/api/admin/automations/host-check', { enabled: false, after_min: 10 }, { cookie: ownerCookie });
+
+  // Rotating kills the old address; turning off removes it.
+  const rotated = await req('POST', '/api/admin/integrations/crm-booked', {}, { cookie: ownerCookie });
+  assert.notEqual(rotated.data.url, on.data.url);
+  assert.equal((await post(url, { email: 'dana.out@example.com' })).status, 404);
+  const off = await req('POST', '/api/admin/integrations/crm-booked', { enabled: false }, { cookie: ownerCookie });
+  assert.equal(off.data.enabled, false);
+  db.run('DELETE FROM message_automations WHERE business_id = ? AND template_key IS NOT NULL', bizId);
+}));

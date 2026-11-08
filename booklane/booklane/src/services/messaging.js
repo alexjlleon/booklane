@@ -517,7 +517,7 @@ async function sendHostChecks({ now = Date.now() } = {}) {
     const after = int(cfg.after_min, 10, 0, 720) * 60000;
     const rows = db.all(`SELECT b.*, u.phone host_phone, u.timezone host_tz, u.name host_name, u.is_resource FROM bookings b
       JOIN users u ON u.id = b.host_user_id
-      WHERE b.business_id = ? AND b.status = 'confirmed' AND b.host_check_sent_at IS NULL AND b.end_utc <= ? AND b.end_utc >= ?`,
+      WHERE b.business_id = ? AND b.status = 'confirmed' AND b.outcome IS NULL AND b.host_check_sent_at IS NULL AND b.end_utc <= ? AND b.end_utc >= ?`,
     id, new Date(now - after).toISOString(), new Date(now - HOST_CHECK_WINDOW_MS).toISOString());
     for (const b of rows) {
       const to = sms.normalizeNumber(b.host_phone);

@@ -24,6 +24,7 @@ const FSTYLE = require('../services/form-style');
 const UP = require('../services/uploads');
 const MSG = require('../services/messaging');
 const TPL = require('../services/message-templates');
+const CRM = require('../services/crm-sync');
 const sms = require('../lib/sms');
 const appConfig = require('../lib/config');
 const providers = require('../services/providers');
@@ -1627,6 +1628,20 @@ module.exports = function adminRoutes(app) {
   });
 
   // ---------- Integrations & emails ----------
+  // ---------- "Booked in BoothBook" coming back in through a Zap ----------
+  const crmView = (businessId) => {
+    const b = B.byId(businessId);
+    const key = CRM.keyFor(businessId);
+    return { enabled: !!key, url: key ? CRM.hookUrl(b, key) : null, recent: CRM.recent(businessId) };
+  };
+  app.get('/api/admin/integrations/crm-booked', (req) => { requireRole('admin')(req); return crmView(bid(req)); });
+  app.post('/api/admin/integrations/crm-booked', (req) => {
+    requireRole('admin')(req);
+    if (req.body && req.body.enabled === false) CRM.removeKey(bid(req));
+    else CRM.rotateKey(bid(req), req.user.id);
+    return crmView(bid(req));
+  });
+
   app.post('/api/admin/integrations/test', async (req) => {
     requireRole('admin')(req);
     const business = B.byId(bid(req));
