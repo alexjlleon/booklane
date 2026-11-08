@@ -14,6 +14,8 @@
   'use strict';
   const bridge = !!(window.androidBridge || (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridge));
   window.AvailvoApp = { native: false };
+  // Opened from the Home Screen (no browser bars): keep clear of the notch and home indicator too.
+  if (window.navigator.standalone || (window.matchMedia && matchMedia('(display-mode: standalone)').matches)) document.documentElement.classList.add('in-app');
   if (!bridge) return;
 
   const s = document.createElement('script');

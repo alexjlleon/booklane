@@ -83,7 +83,9 @@ require('./routes/site')(app);
 app.get('/app', (req, res) => res.html(page({ title: `${req.hostBusiness ? `${req.hostBusiness.name} · ` : ''}${APP_NAME} dashboard`,
   // On a company's own domain the login screen is that company's, so it does not offer sign-up.
   data: { companyDomain: req.hostBusiness ? { name: req.hostBusiness.name } : null, allowSignup: process.env.ALLOW_SIGNUP !== 'false' && !req.hostBusiness, supportEmail: process.env.SUPPORT_EMAIL || 'alex@weddingsunlimited.com' },
-  scripts: ['pricing.js', 'admin-core.js', 'admin-main.js', 'admin-setup.js', 'admin-business.js', 'admin-org.js', 'admin-sessions.js', 'admin-forms.js', 'admin-messaging.js', 'admin-integrations.js', 'admin-team.js', 'admin-platform.js', 'app-native.js'], styles: ['app.css', 'admin.css'], bodyClass: 'admin' })));
+  scripts: ['pricing.js', 'admin-core.js', 'admin-main.js', 'admin-setup.js', 'admin-business.js', 'admin-org.js', 'admin-sessions.js', 'admin-forms.js', 'admin-messaging.js', 'admin-integrations.js', 'admin-team.js', 'admin-platform.js', 'app-native.js'], styles: ['app.css', 'admin.css'], bodyClass: 'admin',
+  // "Add to Home Screen" on a phone opens this as a full-screen app with the Availvo icon.
+  head: '<link rel="manifest" href="/static/app.webmanifest"><link rel="apple-touch-icon" href="/static/img/availvo-180.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Availvo">' })));
 
 // The phone app hands a logged-in person to the phone's real browser (for Google sign-in, which
 // refuses to run inside an app). The link is single use and lasts a minute; anything wrong just
