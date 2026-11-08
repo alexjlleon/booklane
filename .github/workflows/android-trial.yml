@@ -27,7 +27,9 @@ jobs:
       - name: Install
         run: npm ci
       - name: Mark this build as having no notifications
-        run: sed -i 's#"appendUserAgent": "AvailvoApp/1.0"#"appendUserAgent": "AvailvoApp/1.0 AvailvoTrial NoPush"#' capacitor.config.json && grep appendUserAgent capacitor.config.json
+        run: |
+          sed -i 's#"appendUserAgent": "AvailvoApp/1.0"#"appendUserAgent": "AvailvoApp/1.0 AvailvoTrial NoPush"#' capacitor.config.json
+          grep appendUserAgent capacitor.config.json
       - name: Sync
         run: npx cap sync android
       - name: Build the .apk
