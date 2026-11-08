@@ -79,6 +79,8 @@ function listOrTeam(b, key) {
 }
 const contractEmails = (b) => listOrTeam(b, 'contract_emails');
 const partialEmails = (b) => listOrTeam(b, 'partial_emails');
+// A customer texting back ("PROPOSAL", a question) is a sales conversation restarting.
+const replyEmails = (b) => listOrTeam(b, 'reply_emails');
 
 function logActivity(businessId, leadId, type, message, meta = {}) {
   db.run('INSERT INTO activity (business_id, lead_id, type, message, meta) VALUES (?,?,?,?,?)', businessId, leadId || null, type, message, JSON.stringify(meta));
@@ -137,5 +139,5 @@ const canText = (business) => !!business && business.access === 'full' && !busin
 // Public pages open once the owner has confirmed their email, and close if the company is suspended.
 const isLive = (business) => !!business && !!business.activated && !business.suspended_at;
 
-module.exports = { canText, isLive, conform, hydrate, bySlug, byId, teamEmails, contractEmails, partialEmails, logActivity, publicSettings,
+module.exports = { canText, isLive, conform, hydrate, bySlug, byId, teamEmails, contractEmails, partialEmails, replyEmails, logActivity, publicSettings,
   normalizeDomain, isDomain, platformHost, byDomain, baseFor, pageUrl, linkFor };

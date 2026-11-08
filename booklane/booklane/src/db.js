@@ -327,6 +327,10 @@ for (const sql of [
   'ALTER TABLE bookings ADD COLUMN host_check_sent_at TEXT',
   'ALTER TABLE bookings ADD COLUMN host_check_to TEXT',
   'ALTER TABLE bookings ADD COLUMN host_check_answer TEXT',
+  // How the call went: 'booked' (they booked on the call), 'not_booked' (they showed up but have not
+  // booked yet) or 'no_show'. Set by the host's text reply or from Bookings; drives the follow-ups.
+  'ALTER TABLE bookings ADD COLUMN outcome TEXT',
+  'ALTER TABLE bookings ADD COLUMN outcome_at TEXT',
 ]) { try { raw.exec(sql); } catch { /* column already exists */ } }
 
 // Booklane no longer takes payments. Drop what the shop, the paid sessions and the card providers

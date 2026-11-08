@@ -280,3 +280,6 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
 /* Ready-made reminder templates on Automations */
 .tpl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; margin-top: 12px; }
 .tpl-card { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; background: var(--card, #fff); }
+/* How a past call went */
+.outcome-ctl { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+.select.select-sm { padding: 4px 26px 4px 8px; font-size: 12.5px; height: auto; width: auto; }

@@ -18,7 +18,15 @@ const B = require('./business');
 const QUIET_START = () => int(process.env.SMS_QUIET_START_HOUR, 8, 0, 23);   // do not text before
 const QUIET_END = () => int(process.env.SMS_QUIET_END_HOUR, 21, 1, 24);      // or after
 const MAX_ATTEMPTS = 4;
-const TRIGGERS = { booked: 'When it is booked', before: 'Before the appointment', after: 'After the appointment', cancelled: 'When it is cancelled', rescheduled: 'When it is moved' };
+const TRIGGERS = {
+  booked: 'When it is booked', before: 'Before the appointment', after: 'After the appointment', cancelled: 'When it is cancelled', rescheduled: 'When it is moved',
+  // Set after the call, by the host's text reply or from Bookings. Timed from the moment it is marked.
+  no_show: 'When marked a no-show', not_booked: 'When they showed up but have not booked yet', won: 'When they booked on the call',
+};
+// The outcome each of those triggers waits for, and the triggers tied to a call's outcome.
+const OUTCOME_OF = { no_show: 'no_show', not_booked: 'not_booked', won: 'booked' };
+const TRIGGER_OF = { no_show: 'no_show', not_booked: 'not_booked', booked: 'won' };
+const OUTCOMES = ['booked', 'not_booked', 'no_show'];
 
 // ---------------------------------------------------------------- merge fields
 
@@ -42,6 +50,7 @@ const VARIABLES = [
   ['services', 'Services they showed interest in'],
   ['booking_number', 'Their booking number, when they gave one'],
   ['manage_url', 'Link to reschedule or cancel'],
+  ['rebook_url', 'Link to book a new time on the same booking page'],
   ['quote_url', 'Link to their quote, when they have one'],
   ['business_name', 'Your business name'],
   ['business_phone', 'Your phone number'],
@@ -101,6 +110,7 @@ function contextFor(booking) {
     services: serviceList.join(', '),
     booking_number: answers.booking_number ? String(answers.booking_number) : '',
     manage_url: B.linkFor(business, `/booking/${booking.token}`),
+    rebook_url: et ? B.pageUrl(business, et.kind === 'session' ? `s/${et.slug}` : et.slug) : B.pageUrl(business),
     quote_url: quote ? B.linkFor(business, `/q/${quote.token}`) : '',
     business_name: business.name,
     business_phone: business.phone || '',
@@ -167,7 +177,7 @@ function matches(a, ctx) {
 function dueAt(a, ctx, now = Date.now()) {
   const start = ctx._start;
   switch (a.trigger) {
-    case 'booked': case 'cancelled': case 'rescheduled': return now + Math.max(0, a.offset_min) * 60000;
+    case 'booked': case 'cancelled': case 'rescheduled': case 'no_show': case 'not_booked': case 'won': return now + Math.max(0, a.offset_min) * 60000;
     case 'before': return start - Math.max(0, a.offset_min) * 60000;
     case 'after': return start + Math.max(0, a.offset_min) * 60000;
     default: return now;
@@ -270,7 +280,13 @@ async function sendOne(msg) {
     db.run("UPDATE scheduled_messages SET status = 'skipped', skip_reason = ? WHERE id = ?", 'the automation or booking was deleted', msg.id);
     return 'skipped';
   }
-  if (booking.status !== 'confirmed' && a.trigger !== 'cancelled') {
+  // Outcome messages only go while the call's outcome is still the one they were written for: a
+  // no-show later marked "they booked" must not get "sorry we missed you".
+  if (OUTCOME_OF[a.trigger] && booking.outcome !== OUTCOME_OF[a.trigger]) {
+    db.run("UPDATE scheduled_messages SET status = 'skipped', skip_reason = ? WHERE id = ?", 'the call outcome changed', msg.id);
+    return 'skipped';
+  }
+  if (booking.status !== 'confirmed' && a.trigger !== 'cancelled' && !(a.trigger === 'no_show' && booking.status === 'no_show')) {
     db.run("UPDATE scheduled_messages SET status = 'skipped', skip_reason = ? WHERE id = ?", 'the booking is no longer confirmed', msg.id);
     return 'skipped';
   }
@@ -350,7 +366,7 @@ function sampleContext(business) {
     time: T.formatTime(start, tz), weekday: new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'long' }).format(new Date(start)), timezone: tz,
     market: 'Houston', location: 'Hermann Park, Houston', host: 'Houston', services: 'Photography, Photo Booth',
     booking_number: 'WU-10432',
-    manage_url: B.linkFor(business, '/booking/sample'), quote_url: '',
+    manage_url: B.linkFor(business, '/booking/sample'), rebook_url: B.pageUrl(business, 'discovery-call'), quote_url: '',
     business_name: business.name, business_phone: business.phone || '', business_email: business.email || '', website: business.website || '',
   };
 }
@@ -390,6 +406,9 @@ function describeTiming(a) {
     case 'after': return `${human} after the appointment`;
     case 'cancelled': return mins ? `${human} after it is cancelled` : 'when it is cancelled';
     case 'rescheduled': return mins ? `${human} after it moves` : 'when it moves';
+    case 'no_show': return mins ? `${human} after it is marked a no-show` : 'when it is marked a no-show';
+    case 'not_booked': return mins ? `${human} after they are marked "not booked yet"` : 'when they are marked "not booked yet"';
+    case 'won': return mins ? `${human} after they are marked "booked on the call"` : 'when they are marked "booked on the call"';
     default: return human;
   }
 }
@@ -454,6 +473,9 @@ function handleInboundSms({ from, to, body, businessId, sid: providerSid }) {
     db.run('DELETE FROM sms_optouts WHERE phone = ?', number);
     return { action: 'opted_in', number };
   }
+  if (bizId && !word) {
+    try { const alerted = alertTeamOfReply(bizId, number, body); if (alerted) return alerted; } catch (e) { console.error('[reply alert]', e.message); }
+  }
   return { action: 'logged', number, keyword: word };
 }
 
@@ -472,7 +494,7 @@ function hostCheckText(booking, business, host) {
   const tz = host.timezone || business.timezone;
   const who = String(booking.name || booking.email || 'the customer').trim().slice(0, 40);
   return `${business.name}: did your ${T.formatTime(Date.parse(booking.start_utc), tz)} call with ${who}${et ? ` (${et.name})` : ''} happen? `
-    + 'Reply 1 if they picked up and the call was held, or 2 if it was a no-show.';
+    + 'Reply 1 if they booked on the call, 2 if they showed up but have not booked yet, or 3 if it was a no-show.';
 }
 
 /** Called from the job loop. Sends the after-call question for calls that have just ended. */
@@ -510,42 +532,116 @@ async function sendHostChecks({ now = Date.now() } = {}) {
   return { sent };
 }
 
-/** 'held', 'no_show' or null, from a host's reply. */
+/** 'booked', 'not_booked', 'no_show' or null, from a host's reply. */
 function hostAnswerOf(body) {
-  const t = String(body || '').trim().toLowerCase().replace(/[.!]+$/, '');
-  if (/^(1|y|yes|yep|yeah|held|done|picked up)$/.test(t)) return 'held';
-  if (/^(2|n|no|nope|no ?-?show|no answer|didn'?t pick up)$/.test(t)) return 'no_show';
+  const t = String(body || '').trim().toLowerCase().replace(/[.!]+$/, '').replace(/\s+/g, ' ');
+  if (/^(1|booked|they booked|booked on the call|won|signed)$/.test(t)) return 'booked';
+  if (/^(2|not booked|not yet|not booked yet|showed|showed up|held|thinking)$/.test(t)) return 'not_booked';
+  if (/^(3|no ?-?show|no show up|didn'?t show|did not show|no answer|didn'?t pick up|did not pick up)$/.test(t)) return 'no_show';
   return null;
+}
+
+const OUTCOME_LABEL = { booked: 'booked on the call', not_booked: 'showed up, not booked yet', no_show: 'a no-show' };
+
+/**
+ * Record how a call went and start the matching follow-ups. The one place an outcome changes, from
+ * the host's text reply and from Bookings alike.
+ *   - Messages waiting for a different outcome are cancelled (and "after the call" thank-yous too
+ *     for a no-show, since they never had the call).
+ *   - The new outcome's automations are queued, timed from now.
+ *   - A no-show also sets the booking's status, which the team numbers count.
+ * Passing null clears the outcome. Returns the updated booking.
+ */
+function setOutcome(bookingOrId, outcome, { by } = {}) {
+  const b = typeof bookingOrId === 'object' ? bookingOrId : db.get('SELECT * FROM bookings WHERE id = ?', bookingOrId);
+  if (!b) throw new Error('Booking not found');
+  const next = OUTCOMES.includes(outcome) ? outcome : null;
+  if ((b.outcome || null) === next && (next !== 'no_show' || b.status === 'no_show')) return b;
+  if (b.status === 'cancelled') throw new Error('A cancelled call has no outcome.');
+
+  // Messages for the old outcome are stale now.
+  const stale = Object.entries(TRIGGER_OF).filter(([o]) => o !== next).map(([, t]) => t);
+  db.run(`UPDATE scheduled_messages SET status = 'cancelled', skip_reason = 'the call outcome changed'
+    WHERE booking_id = ? AND status = 'queued' AND automation_id IN (SELECT id FROM message_automations WHERE trigger IN (${stale.map(() => '?').join(',')}))`, b.id, ...stale);
+  if (next === 'no_show') cancelQueued(b.id, 'they did not show up for the call');
+  // Let a re-marked outcome queue its messages again (the outbox key is automation + booking + channel).
+  db.run(`DELETE FROM scheduled_messages WHERE booking_id = ? AND status = 'cancelled' AND skip_reason = 'the call outcome changed'`, b.id);
+
+  const status = next === 'no_show' ? 'no_show' : (b.status === 'no_show' ? 'confirmed' : b.status);
+  db.run("UPDATE bookings SET outcome = ?, outcome_at = datetime('now'), status = ? WHERE id = ?", next, status, b.id);
+  const fresh = db.get('SELECT * FROM bookings WHERE id = ?', b.id);
+  let queued = 0;
+  if (next) queued = scheduleFor(fresh, TRIGGER_OF[next]).queued;
+  if (b.lead_id) {
+    try {
+      B.logActivity(b.business_id, b.lead_id, 'booking', next ? `Call marked ${OUTCOME_LABEL[next]}${by ? ` by ${by}` : ''}` : `Call outcome cleared${by ? ` by ${by}` : ''}`, { booking_id: b.id, outcome: next, queued });
+    } catch (e) { /* log only */ }
+  }
+  return { ...fresh, follow_ups_queued: queued };
 }
 
 /**
  * A reply from a host to the after-call question. Answers the most recent open question sent to
- * that number, then asks about the next one if more are waiting. Returns null when the text is
- * not an answer, or nobody asked this number anything, so normal inbound handling carries on.
+ * that number, then asks about the next one if more are waiting. Returns null when nobody asked
+ * this number anything, so normal inbound handling carries on.
  */
 function handleHostReply(number, body, now = Date.now()) {
-  const answer = hostAnswerOf(body);
-  if (!answer) return null;
   const open = () => db.all(`SELECT * FROM bookings WHERE host_check_to = ? AND host_check_answer IS NULL AND host_check_sent_at >= ?
     ORDER BY host_check_sent_at DESC, id DESC`, number, new Date(now - HOST_REPLY_WINDOW).toISOString());
   const pending = open();
   if (!pending.length) return null;
+  const answer = hostAnswerOf(body);
+  if (!answer) {
+    // A short reply that is not 1, 2 or 3 is almost certainly a fumbled answer: say how to answer.
+    if (String(body || '').trim().length <= 20 && !sms.keywordOf(body)) return { action: 'host_check_help', reply: 'Please reply 1 if they booked on the call, 2 if they showed up but have not booked yet, or 3 if it was a no-show.' };
+    return null;
+  }
   const b = pending[0];
-  const business = B.byId(b.business_id);
   const host = db.get('SELECT name FROM users WHERE id = ?', b.host_user_id);
   db.run('UPDATE bookings SET host_check_answer = ? WHERE id = ?', answer, b.id);
-  if (answer === 'no_show' && b.status === 'confirmed') {
-    db.run("UPDATE bookings SET status = 'no_show' WHERE id = ?", b.id);
-    try { cancelQueued(b.id, 'they did not show up for the call'); } catch (e) { console.error('[host check]', e.message); }
-  }
-  if (b.lead_id) {
-    try { B.logActivity(b.business_id, b.lead_id, 'booking', answer === 'no_show' ? `Marked as a no-show by ${host ? host.name : 'the host'} by text` : `${host ? host.name : 'The host'} confirmed the call was held`, { booking_id: b.id }); } catch (e) { /* log only */ }
-  }
+  if (b.status !== 'cancelled') setOutcome(b, answer, { by: host ? `${host.name} (by text)` : 'text' });
   const who = String(b.name || 'them').trim().split(/\s+/)[0];
-  let reply = answer === 'no_show' ? `Got it, ${who} is marked as a no-show.` : `Thanks, the call with ${who} is marked as held.`;
+  let reply = `Got it, ${who} is marked ${OUTCOME_LABEL[answer]}.`;
   const next = open()[0];
   if (next) reply += ` Next: ${hostCheckText(next, B.byId(next.business_id), { timezone: (db.get('SELECT timezone FROM users WHERE id = ?', next.host_user_id) || {}).timezone }).replace(/^[^:]*: /, '')}`;
-  return { action: 'host_check', booking_id: b.id, answer, business: business ? business.id : null, reply };
+  return { action: 'host_check', booking_id: b.id, answer, reply };
+}
+
+// ---------------------------------------------------------------- customers texting back
+
+const wantsProposal = (body) => /\bproposal\b/i.test(String(body || ''));
+
+/**
+ * A customer replied to one of our texts (not STOP or START). Emails the team so the conversation
+ * can pick back up, notes it on their lead, and, when they asked for a proposal, tells them it is
+ * on the way. Fire and forget: a slow email never holds up Twilio's webhook.
+ */
+function alertTeamOfReply(businessId, number, body) {
+  const business = B.byId(businessId);
+  if (!business) return null;
+  const booking = db.all("SELECT * FROM bookings WHERE business_id = ? AND phone IS NOT NULL AND phone != '' ORDER BY id DESC LIMIT 500", businessId)
+    .find((r) => sms.normalizeNumber(r.phone) === number) || null;
+  const lead = booking && booking.lead_id ? db.get('SELECT * FROM leads WHERE id = ?', booking.lead_id)
+    : db.all("SELECT * FROM leads WHERE business_id = ? AND phone IS NOT NULL ORDER BY id DESC LIMIT 500", businessId).find((l) => sms.normalizeNumber(l.phone) === number) || null;
+  const name = (booking && booking.name) || (lead && [lead.first_name, lead.last_name].filter(Boolean).join(' ')) || number;
+  const proposal = wantsProposal(body);
+  if (lead) { try { B.logActivity(businessId, lead.id, 'sms', `${proposal ? 'Asked for a proposal by text' : 'Texted back'}: ${clampStr(body, 300)}`, { from: number }); } catch (e) { /* log only */ } }
+  const { rows: kv } = require('../lib/email');
+  const to = B.replyEmails(business);
+  const outcome = booking && booking.outcome ? OUTCOME_LABEL[booking.outcome] : null;
+  if (to.length) {
+    sendEmail({
+      to, businessId, fromName: business.name,
+      subject: proposal ? `${name} asked for a proposal by text` : `Text reply from ${name}`,
+      html: layout(business, {
+        heading: proposal ? `${esc(name)} wants a proposal by text` : `${esc(name)} texted back`,
+        body: `<p style="margin:0 0 14px;white-space:pre-wrap">${esc(clampStr(body, 1000))}</p>` + kv([['From', number], ['Their call', booking ? T.formatDateTime(Date.parse(booking.start_utc), business.timezone) : null], ['How it went', outcome]]),
+        cta: lead ? { label: 'Open their lead', url: B.linkFor(business, `/app#/leads/${lead.id}`) } : undefined,
+      }),
+    }).catch((e) => console.error('[reply alert]', e.message));
+  }
+  return { action: proposal ? 'proposal_requested' : 'reply_alerted', number, lead_id: lead ? lead.id : null,
+    reply: proposal ? `Thanks! ${business.name} will text you a proposal shortly.` : null };
 }
 
 // ---------------------------------------------------------------- admin listing
@@ -591,7 +687,7 @@ function summary(businessId) {
 module.exports = {
   VARIABLES, TRIGGERS, contextFor, render, matches, hydrateAutomation, dueAt, holdForQuietHours,
   scheduleFor, cancelQueued, rescheduleQueued, processDue, sendOne, isOptedOut,
-  sendHostChecks, handleHostReply, hostAnswerOf, hostCheckText,
+  sendHostChecks, handleHostReply, hostAnswerOf, hostCheckText, setOutcome, OUTCOMES, alertTeamOfReply,
   preview, sampleContext, sendTest, describeTiming, handleInboundSms,
   listAutomations, listQueue, summary,
 };

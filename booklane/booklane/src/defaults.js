@@ -26,7 +26,7 @@ const BUSINESS_SETTINGS = {
   // Text the host a few minutes after each call ends to ask whether the customer picked up.
   // Replying 1 records it as held, 2 marks the booking a no-show.
   host_check: { enabled: false, after_min: 10 },
-  notifications: { team_emails: [], contract_emails: [], partial_emails: [], notify_on_booking: true, notify_on_contract: true, notify_on_callback: true, notify_on_quote: true },
+  notifications: { team_emails: [], contract_emails: [], partial_emails: [], reply_emails: [], notify_on_booking: true, notify_on_contract: true, notify_on_callback: true, notify_on_quote: true },
   quote: {
     enabled: true,
     title: 'Build your quote',

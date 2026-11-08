@@ -3104,74 +3104,165 @@ test('a reminder text is skipped when quiet hours would hold it past the call', 
   db.run('DELETE FROM message_automations WHERE id = ?', id);
 });
 
-// ---------------------------------------------------------------- after-call question to the host
-test('after the call the host is texted once, and replying 2 marks a no-show', async () => {
-  freshLimits(); stubTwilio();
+// ---------------------------------------------------------------- after the call: outcomes and follow-ups
+async function withAnyHour(fn) {
   const oldStart = process.env.SMS_QUIET_START_HOUR; const oldEnd = process.env.SMS_QUIET_END_HOUR;
   process.env.SMS_QUIET_START_HOUR = '0'; process.env.SMS_QUIET_END_HOUR = '24';   // whatever time the tests run
-  try {
-    const bizId = db.get('SELECT id FROM businesses WHERE slug = ?', bizSlug).id;
-    const owner = db.get("SELECT id FROM users WHERE email = 'owner@test.dev'");
-    db.run("UPDATE users SET phone = '(832) 555-7000' WHERE id = ?", owner.id);
-
-    // Off by default: nothing is sent.
-    let view = await req('GET', '/api/admin/automations', null, { cookie: ownerCookie });
-    assert.equal(view.data.host_check.enabled, false);
-    assert.match(view.data.host_check.sample, /Reply 1 .* or 2 if it was a no-show/);
-
-    const call = db.get(`SELECT b.* FROM bookings b JOIN event_types e ON e.id = b.event_type_id WHERE b.business_id = ? AND e.kind != 'session' AND b.status = 'confirmed' ORDER BY b.id DESC LIMIT 1`, bizId);
-    const keep = { start: call.start_utc, end: call.end_utc, host: call.host_user_id };
-    const ended = Date.now() - 20 * 60000;
-    db.run('UPDATE bookings SET start_utc = ?, end_utc = ?, host_user_id = ?, host_check_sent_at = NULL, host_check_answer = NULL WHERE id = ?',
-      new Date(ended - 1800000).toISOString(), new Date(ended).toISOString(), owner.id, call.id);
-    const queuedFollowUp = db.run("INSERT INTO scheduled_messages (business_id, booking_id, channel, to_addr, status, send_after) VALUES (?,?,'email','x@x.dev','queued',?)", bizId, call.id, Date.now() + 86400000).lastId;
-
-    assert.equal((await MSG.sendHostChecks()).sent, 0, 'not sent while switched off');
-
-    const on = await req('PUT', '/api/admin/automations/host-check', { enabled: true, after_min: 10 }, { cookie: ownerCookie });
-    assert.equal(on.status, 200, JSON.stringify(on.data));
-    assert.equal(on.data.enabled, true);
-
-    const first = await MSG.sendHostChecks();
-    assert.equal(first.sent, 1);
-    const mine = sentTexts.filter((t) => t.to === '+18325557000');
-    assert.equal(mine.length, 1);
-    assert.match(mine[0].body, /did your .* call with .* happen\? Reply 1 .* 2 if it was a no-show/);
-    assert.equal((await MSG.sendHostChecks()).sent, 0, 'never asked twice');
-
-    // Something that is not an answer is left to normal inbound handling.
-    assert.notEqual(MSG.handleInboundSms({ from: '+18325557000', body: 'who is this?' }).action, 'host_check');
-
-    // Reply through the real webhook, signed the way Twilio signs.
-    const params = { From: '+18325557000', To: '+18325550000', Body: '2', MessageSid: 'SM_hc_1' };
-    const crypto2 = require('node:crypto');
-    const url = `${base}/api/public/sms/inbound`;
-    const sig = crypto2.createHmac('sha1', process.env.TWILIO_AUTH_TOKEN).update(Buffer.from(Object.keys(params).sort().reduce((acc, k) => acc + k + params[k], url), 'utf8')).digest('base64');
-    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Twilio-Signature': sig }, body: new URLSearchParams(params).toString() });
-    assert.equal(res.status, 200);
-    assert.equal(res.headers.get('x-booklane-action'), 'host_check');
-    assert.match(await res.text(), /<Message>Got it, .* is marked as a no-show\.<\/Message>/);
-
-    const after = db.get('SELECT status, host_check_answer FROM bookings WHERE id = ?', call.id);
-    assert.equal(after.status, 'no_show');
-    assert.equal(after.host_check_answer, 'no_show');
-    assert.equal(db.get('SELECT status FROM scheduled_messages WHERE id = ?', queuedFollowUp).status, 'cancelled', 'follow-ups for a no-show are pulled');
-
-    // A second reply has nothing open to answer, so it does not change anything.
-    assert.notEqual(MSG.handleInboundSms({ from: '+18325557000', body: '1' }).action, 'host_check');
-
-    // "1" on a fresh question records it as held and leaves the booking confirmed.
-    db.run("UPDATE bookings SET status = 'confirmed', host_check_sent_at = NULL, host_check_answer = NULL WHERE id = ?", call.id);
-    await MSG.sendHostChecks();
-    const held = MSG.handleInboundSms({ from: '+18325557000', body: 'Yes' });
-    assert.equal(held.action, 'host_check');
-    assert.equal(held.answer, 'held');
-    assert.equal(db.get('SELECT status FROM bookings WHERE id = ?', call.id).status, 'confirmed');
-
-    await req('PUT', '/api/admin/automations/host-check', { enabled: false, after_min: 10 }, { cookie: ownerCookie });
-    db.run('UPDATE bookings SET start_utc = ?, end_utc = ?, host_user_id = ? WHERE id = ?', keep.start, keep.end, keep.host, call.id);
-  } finally {
+  try { return await fn(); } finally {
     if (oldStart === undefined) delete process.env.SMS_QUIET_START_HOUR; else process.env.SMS_QUIET_START_HOUR = oldStart;
     if (oldEnd === undefined) delete process.env.SMS_QUIET_END_HOUR; else process.env.SMS_QUIET_END_HOUR = oldEnd;
   }
-});
+}
+const twilioPost = async (params) => {
+  const crypto2 = require('node:crypto');
+  const url = `${base}/api/public/sms/inbound`;
+  const sig = crypto2.createHmac('sha1', process.env.TWILIO_AUTH_TOKEN).update(Buffer.from(Object.keys(params).sort().reduce((acc, k) => acc + k + params[k], url), 'utf8')).digest('base64');
+  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Twilio-Signature': sig }, body: new URLSearchParams(params).toString() });
+  return { status: res.status, action: res.headers.get('x-booklane-action'), body: await res.text() };
+};
+// A past call on the owner's calendar, with a fresh lead so "booked again since" checks start clean.
+function pastCall(minutesAgo = 20) {
+  const bizId = db.get('SELECT id FROM businesses WHERE slug = ?', bizSlug).id;
+  const owner = db.get("SELECT id FROM users WHERE email = 'owner@test.dev'");
+  const call = db.get(`SELECT b.* FROM bookings b JOIN event_types e ON e.id = b.event_type_id WHERE b.business_id = ? AND e.kind != 'session' AND b.status != 'cancelled' ORDER BY b.id DESC LIMIT 1`, bizId);
+  const ended = Date.now() - minutesAgo * 60000;
+  const leadId = db.run("INSERT INTO leads (business_id, token, source, status, first_name, email, phone) VALUES (?, ?, 'booking', 'booked', 'Dana', 'dana.out@example.com', '7135550199')", bizId, `lead-${Date.now()}-${Math.random()}`).lastId;
+  db.run(`UPDATE bookings SET start_utc = ?, end_utc = ?, host_user_id = ?, status = 'confirmed', outcome = NULL, host_check_sent_at = NULL, host_check_answer = NULL,
+    name = 'Dana Ruiz', email = 'dana.out@example.com', phone = '7135550199', lead_id = ? WHERE id = ?`,
+  new Date(ended - 1800000).toISOString(), new Date(ended).toISOString(), owner.id, leadId, call.id);
+  db.run('DELETE FROM scheduled_messages WHERE booking_id = ?', call.id);
+  return { bizId, owner, id: call.id, leadId };
+}
+const queuedFor = (bookingId, trigger) => db.all(`SELECT m.channel FROM scheduled_messages m JOIN message_automations a ON a.id = m.automation_id
+  WHERE m.booking_id = ? AND m.status = 'queued' AND a.trigger = ?`, bookingId, trigger).map((r) => r.channel).sort();
+
+test('after the call the host is texted once and answers 1, 2 or 3', () => withAnyHour(async () => {
+  freshLimits(); stubTwilio();
+  const { bizId, owner, id } = pastCall();
+  db.run("UPDATE users SET phone = '(832) 555-7000' WHERE id = ?", owner.id);
+
+  let view = await req('GET', '/api/admin/automations', null, { cookie: ownerCookie });
+  assert.equal(view.data.host_check.enabled, false, 'off by default');
+  assert.match(view.data.host_check.sample, /Reply 1 if they booked on the call, 2 if they showed up but have not booked yet, or 3 if it was a no-show/);
+  const followUp = db.run("INSERT INTO scheduled_messages (business_id, booking_id, channel, to_addr, status, send_after) VALUES (?,?,'email','x@x.dev','queued',?)", bizId, id, Date.now() + 86400000).lastId;
+
+  assert.equal((await MSG.sendHostChecks()).sent, 0, 'not sent while switched off');
+  const on = await req('PUT', '/api/admin/automations/host-check', { enabled: true, after_min: 10 }, { cookie: ownerCookie });
+  assert.equal(on.data.enabled, true);
+  assert.equal((await MSG.sendHostChecks()).sent, 1);
+  assert.equal(sentTexts.filter((t) => t.to === '+18325557000').length, 1);
+  assert.equal((await MSG.sendHostChecks()).sent, 0, 'never asked twice');
+
+  // A fumbled short answer gets told how to answer; nothing changes.
+  const help = await twilioPost({ From: '+18325557000', To: '+18325550000', Body: 'ok', MessageSid: 'SM_hc_0' });
+  assert.equal(help.action, 'host_check_help');
+  assert.match(help.body, /Please reply 1 .* 2 .* or 3/);
+
+  const r = await twilioPost({ From: '+18325557000', To: '+18325550000', Body: '3', MessageSid: 'SM_hc_1' });
+  assert.equal(r.status, 200);
+  assert.equal(r.action, 'host_check');
+  assert.match(r.body, /<Message>Got it, Dana is marked a no-show\.<\/Message>/);
+  const b = db.get('SELECT status, outcome, host_check_answer FROM bookings WHERE id = ?', id);
+  assert.deepEqual([b.status, b.outcome, b.host_check_answer], ['no_show', 'no_show', 'no_show']);
+  assert.equal(db.get('SELECT status FROM scheduled_messages WHERE id = ?', followUp).status, 'cancelled', 'after-call thank-yous are pulled for a no-show');
+  assert.notEqual(MSG.handleInboundSms({ from: '+18325557000', body: '1' }).action, 'host_check', 'nothing left open to answer');
+
+  // "2" on a fresh question: showed up, not booked yet.
+  db.run("UPDATE bookings SET status = 'confirmed', outcome = NULL, host_check_sent_at = NULL, host_check_answer = NULL WHERE id = ?", id);
+  await MSG.sendHostChecks();
+  const two = MSG.handleInboundSms({ from: '+18325557000', body: '2' });
+  assert.equal(two.answer, 'not_booked');
+  assert.deepEqual([db.get('SELECT status, outcome FROM bookings WHERE id = ?', id)].map((x) => [x.status, x.outcome])[0], ['confirmed', 'not_booked']);
+
+  await req('PUT', '/api/admin/automations/host-check', { enabled: false, after_min: 10 }, { cookie: ownerCookie });
+}));
+
+test('each outcome starts its own follow-ups and changing it stops the others', () => withAnyHour(async () => {
+  freshLimits(); stubTwilio();
+  const { bizId, id, leadId } = pastCall(90);
+  db.run('DELETE FROM message_automations WHERE business_id = ? AND template_key IS NOT NULL', bizId);
+  for (const group of ['no_show', 'not_booked']) {
+    const r = await req('POST', '/api/admin/automations/templates', { group }, { cookie: ownerCookie });
+    assert.equal(r.data.added, TPL.TEMPLATES.filter((t) => t.group === group).length, `${group} templates added`);
+  }
+  assert.ok(TPL.TEMPLATES.filter((t) => t.group !== 'before').every((t) => t.skip_if_rebooked === 1));
+
+  // Not yet happened: refused.
+  const future = db.get("SELECT id FROM bookings WHERE business_id = ? AND status = 'confirmed' AND start_utc > ? LIMIT 1", bizId, new Date().toISOString());
+  if (future) assert.equal((await req('POST', `/api/admin/bookings/${future.id}/outcome`, { outcome: 'booked' }, { cookie: ownerCookie })).status, 422);
+  assert.equal((await req('POST', `/api/admin/bookings/${id}/outcome`, { outcome: 'maybe' }, { cookie: ownerCookie })).status, 422);
+
+  // No-show: three emails and three texts, with a link to book again.
+  let r = await req('POST', `/api/admin/bookings/${id}/outcome`, { outcome: 'no_show' }, { cookie: ownerCookie });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.equal(r.data.status, 'no_show');
+  assert.equal(r.data.follow_ups_queued, 6);
+  assert.deepEqual(queuedFor(id, 'no_show'), ['email', 'email', 'email', 'sms', 'sms', 'sms']);
+
+  // The first no-show text goes out with its rebooking link filled in.
+  db.run("UPDATE scheduled_messages SET send_after = ? WHERE booking_id = ? AND status = 'queued' AND automation_id = (SELECT id FROM message_automations WHERE business_id = ? AND template_key = 'noshow-same-day') AND channel = 'sms'", Date.now() - 1000, id, bizId);
+  await MSG.processDue();
+  const sorry = sentTexts.find((t) => t.to === '+17135550199');
+  assert.ok(sorry, 'the sorry-we-missed-you text went');
+  assert.match(sorry.body, /sorry we missed you today! Pick a new time here: http\S+\/b\/[^/\s]+\/\S+ Or reply PROPOSAL/);
+
+  // They actually booked on the call: no-show messages stop, status goes back.
+  r = await req('POST', `/api/admin/bookings/${id}/outcome`, { outcome: 'booked' }, { cookie: ownerCookie });
+  assert.equal(r.data.status, 'confirmed');
+  assert.deepEqual(queuedFor(id, 'no_show'), []);
+
+  // Showed up, not booked yet: four nudges on each channel.
+  r = await req('POST', `/api/admin/bookings/${id}/outcome`, { outcome: 'not_booked' }, { cookie: ownerCookie });
+  assert.equal(r.data.follow_ups_queued, 8);
+  assert.equal(queuedFor(id, 'not_booked').length, 8);
+
+  // Something queued for an outcome that has since changed is skipped at send time too.
+  db.run("UPDATE bookings SET outcome = 'booked' WHERE id = ?", id);
+  db.run("UPDATE scheduled_messages SET send_after = ? WHERE booking_id = ? AND status = 'queued'", Date.now() - 1000, id);
+  await MSG.processDue();
+  assert.ok(db.all("SELECT skip_reason FROM scheduled_messages WHERE booking_id = ? AND status = 'skipped'", id).some((x) => x.skip_reason === 'the call outcome changed'));
+
+  // Marked twice the same way is a no-op; marked again after a change re-queues.
+  db.run("UPDATE bookings SET outcome = 'not_booked' WHERE id = ?", id);
+  db.run('DELETE FROM scheduled_messages WHERE booking_id = ?', id);
+  r = await req('POST', `/api/admin/bookings/${id}/outcome`, { outcome: null }, { cookie: ownerCookie });
+  assert.equal(r.data.outcome, null);
+  r = await req('POST', `/api/admin/bookings/${id}/outcome`, { outcome: 'not_booked' }, { cookie: ownerCookie });
+  assert.equal(r.data.follow_ups_queued, 8);
+  assert.ok(db.all("SELECT message FROM activity WHERE lead_id = ?", leadId).some((a) => /Call marked showed up, not booked yet/.test(a.message)));
+
+  // The old no-show button still works and runs through the same path.
+  r = await req('POST', `/api/admin/bookings/${id}/no-show`, { no_show: true }, { cookie: ownerCookie });
+  assert.equal(r.data.outcome, 'no_show');
+  assert.deepEqual(queuedFor(id, 'not_booked'), []);
+  r = await req('POST', `/api/admin/bookings/${id}/no-show`, { no_show: false }, { cookie: ownerCookie });
+  assert.equal(r.data.status, 'confirmed');
+  assert.equal(r.data.outcome, null);
+
+  db.run('DELETE FROM scheduled_messages WHERE booking_id = ?', id);
+  db.run('DELETE FROM message_automations WHERE business_id = ? AND template_key IS NOT NULL', bizId);
+}));
+
+test('a customer texting PROPOSAL alerts the team and gets a reply', () => withAnyHour(async () => {
+  freshLimits(); stubTwilio();
+  const { bizId, id, leadId } = pastCall(120);
+  await req('PATCH', '/api/admin/business', { settings: { notifications: { reply_emails: ['replies@test.dev'] } } }, { cookie: ownerCookie });
+  db.run("UPDATE bookings SET outcome = 'no_show', status = 'no_show' WHERE id = ?", id);
+  // We have texted them before, so the reply is matched to this company.
+  db.run("INSERT INTO sms_log (business_id, direction, to_addr, body, status) VALUES (?, 'out', '+17135550199', 'sorry we missed you', 'sent')", bizId);
+
+  const r = await twilioPost({ From: '+17135550199', To: '+18325550000', Body: 'Proposal please', MessageSid: 'SM_prop_1' });
+  assert.equal(r.action, 'proposal_requested');
+  assert.match(r.body, /<Message>Thanks! Acme Events will text you a proposal shortly\.<\/Message>/);
+  await new Promise((res) => setTimeout(res, 50));
+  const mail = db.get("SELECT * FROM email_log WHERE to_addr LIKE '%replies@test.dev%' ORDER BY id DESC LIMIT 1");
+  assert.ok(mail, 'the reply list was emailed');
+  assert.match(mail.subject, /Dana Ruiz asked for a proposal by text/);
+  assert.ok(db.all('SELECT message FROM activity WHERE lead_id = ?', leadId).some((a) => /Asked for a proposal by text: Proposal please/.test(a.message)));
+
+  // Any other reply alerts the team without an automatic answer.
+  const q = await twilioPost({ From: '+17135550199', To: '+18325550000', Body: 'Can we talk Tuesday instead?', MessageSid: 'SM_prop_2' });
+  assert.equal(q.action, 'reply_alerted');
+  assert.equal(q.body, '<Response/>');
+  await req('PATCH', '/api/admin/business', { settings: { notifications: { reply_emails: [] } } }, { cookie: ownerCookie });
+}));

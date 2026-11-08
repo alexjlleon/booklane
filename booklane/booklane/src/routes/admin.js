@@ -444,7 +444,7 @@ module.exports = function adminRoutes(app) {
     // pasted into the SQL, and an id from another business simply matches nothing.
     const hostId = req.query.mine === '1' ? Number(req.user.id) : (req.query.host ? int(req.query.host, 0) : 0);
     const mine = hostId ? ' AND b.host_user_id = ' + Number(hostId) : '';
-    return db.all(`SELECT b.id, b.token, b.start_utc, b.end_utc, b.invitee_tz, b.name, b.email, b.phone, b.location, b.status, b.answers, b.guests, b.cancel_reason, b.lead_id, b.external_events,
+    return db.all(`SELECT b.id, b.token, b.start_utc, b.end_utc, b.invitee_tz, b.name, b.email, b.phone, b.location, b.status, b.outcome, b.answers, b.guests, b.cancel_reason, b.lead_id, b.external_events,
         b.host_user_id, b.start_utc < ? is_past, e.name event_name, e.color, u.name host FROM bookings b LEFT JOIN event_types e ON e.id = b.event_type_id LEFT JOIN users u ON u.id = b.host_user_id
       WHERE b.business_id = ? AND ${cond}${mine} ORDER BY b.start_utc ${order} LIMIT 300`, now, bid(req), now)
       .map((r) => ({ ...r, answers: db.json(r.answers, {}), guests: db.json(r.guests, []), synced: db.json(r.external_events, []).length > 0, external_events: undefined }));
@@ -465,11 +465,23 @@ module.exports = function adminRoutes(app) {
     if (Date.parse(bk.start_utc) > Date.now()) throw new HttpError(422, 'That call has not happened yet.');
     if (!['confirmed', 'no_show'].includes(bk.status)) throw new HttpError(422, 'A cancelled call cannot be a no-show.');
     const noShow = req.body?.no_show !== false;
-    db.run('UPDATE bookings SET status = ? WHERE id = ?', noShow ? 'no_show' : 'confirmed', bk.id);
-    // A follow-up thanking them for the call would be wrong for someone who never turned up.
-    if (noShow) { try { MSG.cancelQueued(bk.id, 'they did not show up for the call'); } catch (e) { console.error('[no-show]', e.message); } }
-    if (bk.lead_id) B.logActivity(bid(req), bk.lead_id, 'booking', noShow ? `Marked as a no-show by ${req.user.name}` : `No-show cleared by ${req.user.name}`, { booking_id: bk.id });
-    return { ok: true, status: noShow ? 'no_show' : 'confirmed' };
+    // Through setOutcome, so a no-show also starts the no-show follow-ups (and cancels the rest).
+    // "They showed up" clears the outcome rather than guessing whether they booked.
+    const out = MSG.setOutcome(bk, noShow ? 'no_show' : (bk.outcome === 'no_show' ? null : bk.outcome), { by: req.user.name });
+    return { ok: true, status: out.status, outcome: out.outcome || null };
+  });
+
+  // How the call went: booked on the call, showed up but not booked yet, or no-show (null clears).
+  // Starts the matching follow-up automations and cancels ones meant for a different outcome.
+  app.post('/api/admin/bookings/:id/outcome', (req) => {
+    requireRole('host')(req);
+    const bk = ownBooking(req);
+    if (Date.parse(bk.start_utc) > Date.now()) throw new HttpError(422, 'That call has not happened yet.');
+    if (!['confirmed', 'no_show'].includes(bk.status)) throw new HttpError(422, 'A cancelled call has no outcome.');
+    const outcome = req.body?.outcome ?? null;
+    if (outcome !== null && !MSG.OUTCOMES.includes(outcome)) throw new HttpError(422, 'Pick booked, not_booked or no_show');
+    const out = MSG.setOutcome(bk, outcome, { by: req.user.name });
+    return { ok: true, status: out.status, outcome: out.outcome || null, follow_ups_queued: out.follow_ups_queued || 0 };
   });
 
   // Open times to move a call to: the same booking page's slots, with this booking's own time freed.
@@ -1245,6 +1257,7 @@ module.exports = function adminRoutes(app) {
       triggers: MSG.TRIGGERS,
       variables: MSG.VARIABLES,
       templates: templateList(businessId),
+      template_groups: TPL.GROUPS,
       host_check: hostCheckView(businessId),
       event_types: db.all('SELECT id, name, kind, team_id FROM event_types WHERE business_id = ? ORDER BY sort, id', businessId),
       teams: ORG.listTeams(businessId).map((t) => ({ id: t.id, name: t.name, color: t.color })),
@@ -1329,8 +1342,8 @@ module.exports = function adminRoutes(app) {
       if (!t || have.has(key)) continue;
       const sort = (db.get('SELECT MAX(sort) m FROM message_automations WHERE business_id = ?', businessId) || {}).m || 0;
       made.push(db.run(`INSERT INTO message_automations (business_id, name, channel, kind, trigger, offset_min, subject, body_html, sms_body,
-          active, sort, skip_if_late, calls_only, template_key) VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,?)`,
-      businessId, t.name, t.channel, t.kind, t.trigger, t.offset_min, t.subject, t.body_html, t.sms_body, sort + 1, t.skip_if_late, t.calls_only, t.key).lastId);
+          active, sort, skip_if_late, calls_only, skip_if_rebooked, template_key) VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,?,?)`,
+      businessId, t.name, t.channel, t.kind, t.trigger, t.offset_min, t.subject, t.body_html, t.sms_body, sort + 1, t.skip_if_late, t.calls_only, t.skip_if_rebooked, t.key).lastId);
       have.add(key);
     }
     return made;
@@ -1344,7 +1357,9 @@ module.exports = function adminRoutes(app) {
   app.post('/api/admin/automations/templates', (req) => {
     requireRole('admin')(req);
     const body = req.body || {};
-    const keys = Array.isArray(body.keys) ? body.keys.map(String) : body.key ? [String(body.key)] : TPL.TEMPLATES.map((t) => t.key);
+    const keys = Array.isArray(body.keys) ? body.keys.map(String) : body.key ? [String(body.key)]
+      : body.group ? TPL.TEMPLATES.filter((t) => t.group === body.group).map((t) => t.key) : TPL.TEMPLATES.map((t) => t.key);
+    if (!keys.length) throw new HttpError(404, 'That template group does not exist');
     const unknown = keys.filter((k) => !TPL.byKey(k));
     if (unknown.length) throw new HttpError(404, 'That template does not exist');
     const made = addTemplates(bid(req), keys);

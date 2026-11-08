@@ -91,10 +91,8 @@
     let actions = '';
     if (kind === 'upcoming') {
       actions = `<button class="btn btn-ghost btn-sm" data-resched="${b.id}">Reschedule</button> <button class="btn btn-ghost btn-sm" data-handoff="${b.id}">Pass on</button> <button class="btn btn-ghost btn-sm" data-cancel="${b.id}">Cancel</button>`;
-    } else if (b.status === 'confirmed') {
-      actions = `<span class="pill booked">Showed</span> <button class="btn btn-link btn-sm" data-noshow="${b.id}">Mark no-show</button>`;
-    } else if (b.status === 'no_show') {
-      actions = `<span class="pill lost">No-show</span> <button class="btn btn-link btn-sm" data-showed="${b.id}">They showed up</button>`;
+    } else if (b.status === 'confirmed' || b.status === 'no_show') {
+      actions = outcomeControl(b);
     } else {
       actions = A.pill(b.status);
     }
@@ -139,6 +137,7 @@
         if (rangeBtn) return A.go(`#/team-stats/${p.id}?range=${rangeBtn.dataset.range}`);
         A.bookingActions.handle(e, () => A.render());
       });
+      root.addEventListener('change', (e) => { A.bookingActions.handleChange(e, () => A.render()); });
     },
   });
 
@@ -243,8 +242,31 @@
     });
   }
 
+  // How a past call went. Picking one starts that outcome's follow-ups and stops the others.
+  const OUTCOMES = { booked: ['Booked on the call', 'won'], not_booked: ['Showed, not booked yet', 'quoted'], no_show: ['No-show', 'lost'] };
+  function outcomeControl(b) {
+    const cur = b.outcome || (b.status === 'no_show' ? 'no_show' : '');
+    const pill = cur ? `<span class="pill ${OUTCOMES[cur][1]}">${OUTCOMES[cur][0]}</span>` : '<span class="pill">How did it go?</span>';
+    return `<span class="outcome-ctl">${pill} <select class="select select-sm" data-outcome="${b.id}" aria-label="How the call went">
+      <option value="" ${cur ? '' : 'selected'}>${cur ? 'Clear' : 'Mark as...'}</option>
+      ${Object.entries(OUTCOMES).map(([k, [label]]) => `<option value="${k}" ${k === cur ? 'selected' : ''}>${label}</option>`).join('')}</select></span>`;
+  }
+  async function setOutcome(id, outcome) {
+    const r = await A.guard(() => api('POST', `/bookings/${id}/outcome`, { outcome: outcome || null }), null);
+    A.toast(outcome ? `Marked ${OUTCOMES[outcome][0].toLowerCase()}${r.follow_ups_queued ? `; ${r.follow_ups_queued} follow-up message${r.follow_ups_queued === 1 ? '' : 's'} scheduled` : ''}` : 'Cleared');
+    return r;
+  }
+
   A.bookingActions = {
-    reschedule, cancel, setNoShow, handoff,
+    reschedule, cancel, setNoShow, handoff, outcomeControl, setOutcome,
+    /** Wire the outcome picker (a change event, not a click). Returns true when it handled it. */
+    handleChange(e, done) {
+      const o = e.target.closest('[data-outcome]');
+      if (!o) return false;
+      o.disabled = true;
+      setOutcome(Number(o.dataset.outcome), o.value).then(done).catch(() => { o.disabled = false; });
+      return true;
+    },
     /** Wire the buttons any meeting list uses. Returns true when it handled the click. */
     handle(e, done) {
       const rs = e.target.closest('[data-resched]'); if (rs) { reschedule(Number(rs.dataset.resched), done); return true; }

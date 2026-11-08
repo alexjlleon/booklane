@@ -353,8 +353,7 @@
       let lastDay = '';
       const action = (b) => {
         if (scope === 'upcoming' && b.status === 'confirmed') return `<button class="btn btn-ghost btn-sm" data-resched="${b.id}">Reschedule</button> <button class="btn btn-ghost btn-sm" data-handoff="${b.id}">Pass on</button> <button class="btn btn-ghost btn-sm" data-cancel="${b.id}">Cancel</button>`;
-        if (scope === 'past' && b.status === 'confirmed') return `<span class="pill booked">Showed</span> <button class="btn btn-link btn-sm" data-noshow="${b.id}">Mark no-show</button>`;
-        if (scope === 'past' && b.status === 'no_show') return `<span class="pill lost">No-show</span> <button class="btn btn-link btn-sm" data-showed="${b.id}">They showed up</button>`;
+        if (scope === 'past' && (b.status === 'confirmed' || b.status === 'no_show')) return A.bookingActions.outcomeControl(b);
         return A.pill(b.status);
       };
       return `<div class="topbar"><div><h1>Bookings</h1><div class="sub">Calls booked through your pages.</div></div>
@@ -377,6 +376,7 @@
         const s = e.target.closest('[data-scope]'); if (s) return A.go(`#/bookings?scope=${s.dataset.scope}${filter()}`);
         A.bookingActions.handle(e, () => A.render());
       });
+      root.addEventListener('change', (e) => { A.bookingActions.handleChange(e, () => A.render()); });
       pick.mount(root, '/bookings/delete', 'The customer is not told. Any still on a calendar are taken off it.');
       root.addEventListener('change', (e) => {
         const scope = q.scope || 'upcoming';

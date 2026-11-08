@@ -70,7 +70,7 @@
           tpl.disabled = true;
           const key = tpl.dataset.addTemplate;
           try {
-            const r = await A.guard(() => api('POST', '/automations/templates', key === '*' ? {} : { key }), null);
+            const r = await A.guard(() => api('POST', '/automations/templates', key === '*' ? {} : key.startsWith('group:') ? { group: key.slice(6) } : { key }), null);
             A.toast(r.added
               ? `${r.added === 1 ? 'Added and switched on' : `${r.added} reminders added and switched on`}.${r.texting_ready ? '' : ' Emails start now; texts start once texting is connected.'}`
               : 'Those are already added');
@@ -118,10 +118,19 @@
           <div style="margin-top:6px"><b>Email:</b> ${esc(t.subject)}<div class="muted" style="white-space:pre-wrap;margin-top:2px">${esc(t.body_html)}</div></div>
         </details>
       </div>`;
+    const groups = (d.template_groups || [{ id: 'before', name: 'Templates', desc: '' }]).map((g) => {
+      const mine = list.filter((t) => (t.group || 'before') === g.id);
+      if (!mine.length) return '';
+      const missing = mine.filter((t) => !t.added).length;
+      return `<div class="tpl-group">
+        <div class="row between" style="gap:8px;align-items:flex-end;margin-top:14px"><div><h3 style="margin:0;font-size:15px">${esc(g.name)}</h3>${g.desc ? `<div class="small muted">${esc(g.desc)}</div>` : ''}</div>
+          ${missing && canAdd && missing < left ? `<button type="button" class="btn btn-ghost btn-sm" style="flex:none" data-add-template="group:${esc(g.id)}">Add these ${missing}</button>` : ''}</div>
+        <div class="tpl-grid">${mine.map(card).join('')}</div></div>`;
+    }).join('');
     return `<div class="panel">
-      <div class="panel-head"><div><h2>Ready-made reminders</h2><p class="desc" style="margin:0">Each one sends an email and a text on its own. They are for calls only, skip themselves when someone books too close to the call, and can be edited once added.</p></div>
+      <div class="panel-head"><div><h2>Ready-made follow-ups</h2><p class="desc" style="margin:0">Each one sends an email and a text on its own, for calls only, and can be edited once added. Before-call reminders skip themselves when someone books too close to the call; after-call ones start when the call is marked and stop if they book another call.</p></div>
         ${left && canAdd ? `<button type="button" class="btn btn-primary" data-add-template="*">Add all ${left === list.length ? list.length : `${left} remaining`}</button>` : ''}</div>
-      <div class="tpl-grid">${list.map(card).join('')}</div>
+      ${groups}
       ${d.sms && !d.sms.ready ? '<p class="small muted" style="margin:10px 0 0">Texting is not connected yet, so these send emails for now. Texts start on their own once it is.</p>' : ''}
     </div>`;
   }
@@ -132,7 +141,7 @@
     if (!h) return '';
     const canEdit = ['owner', 'admin'].includes(((A.me && A.me.business) || {}).role);
     return `<div class="panel" id="host-check">
-      <div class="panel-head"><div><h2>Ask the host if the call happened</h2><p class="desc" style="margin:0">A few minutes after each call ends, the host gets a text. Replying <b>1</b> records it as held; <b>2</b> marks it a no-show and cancels any follow-ups for it.</p></div></div>
+      <div class="panel-head"><div><h2>Ask the host if the call happened</h2><p class="desc" style="margin:0">A few minutes after each call ends, the host gets a text and replies <b>1</b> booked on the call, <b>2</b> showed up but not booked yet, or <b>3</b> no-show. The answer starts the matching follow-ups above. It can also be set by hand on Bookings.</p></div></div>
       <div class="row" style="gap:16px;align-items:center;flex-wrap:wrap">
         <label class="check"><input type="checkbox" name="hc_enabled" ${h.enabled ? 'checked' : ''} ${canEdit ? '' : 'disabled'}><span>Text the host after each call</span></label>
         <label class="row small" style="gap:6px">Send it <input class="input" style="max-width:80px" type="number" min="0" max="720" name="hc_after" value="${esc(String(h.after_min))}" ${canEdit ? '' : 'disabled'}> minutes after the call ends</label>
@@ -162,7 +171,7 @@
     sent: 'Most sent',
     custom: 'Order they were added',
   };
-  const WHENS = { all: 'Any time', booked: 'When booked', before: 'Before the appointment', after: 'After the appointment', cancelled: 'When cancelled', rescheduled: 'When moved' };
+  const WHENS = { all: 'Any time', booked: 'When booked', before: 'Before the appointment', after: 'After the appointment', won: 'Booked on the call', not_booked: 'Showed up, not booked yet', no_show: 'No-show', cancelled: 'When cancelled', rescheduled: 'When moved' };
 
   /**
    * The teams an automation belongs to. One set on the automation wins. Otherwise it is the teams of
@@ -180,9 +189,11 @@
     if (a.trigger === 'before') return -a.offset_min;
     if (a.trigger === 'after') return a.offset_min;
     if (a.trigger === 'booked') return -Infinity;
+    // Outcome follow-ups happen after the call, timed from when it is marked.
+    if (['won', 'not_booked', 'no_show'].includes(a.trigger)) return 100000 + a.offset_min;
     return null;
   }
-  const RANK = { booked: 0, before: 1, after: 2, rescheduled: 3, cancelled: 4 };
+  const RANK = { booked: 0, before: 1, after: 2, won: 3, not_booked: 4, no_show: 5, rescheduled: 6, cancelled: 7 };
 
   function filtered(d) {
     const q = view.q.trim().toLowerCase();
@@ -441,6 +452,9 @@
     if (trigger === 'after') return `→ ${human} after the appointment`;
     if (trigger === 'booked') return m ? `→ ${human} after they book` : '→ the moment they book';
     if (trigger === 'cancelled') return m ? `→ ${human} after it is cancelled` : '→ when it is cancelled';
+    if (trigger === 'no_show') return m ? `→ ${human} after it is marked a no-show` : '→ when it is marked a no-show';
+    if (trigger === 'not_booked') return m ? `→ ${human} after it is marked "not booked yet"` : '→ when it is marked "not booked yet"';
+    if (trigger === 'won') return m ? `→ ${human} after it is marked "booked on the call"` : '→ when it is marked "booked on the call"';
     return m ? `→ ${human} after it moves` : '→ when it moves';
   }
 
