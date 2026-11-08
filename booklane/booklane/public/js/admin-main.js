@@ -129,12 +129,66 @@
       <form class="panel" id="pw-form"><h2>Change password</h2><p class="desc">Use at least 8 characters.</p>
         ${A.field('Current password', '<input class="input" type="password" name="current_password" data-bind="current_password" autocomplete="current-password">')}
         ${A.field('New password', '<input class="input" type="password" name="new_password" data-bind="new_password" autocomplete="new-password">')}
-        <button class="btn btn-primary">Update password</button></form></div>`,
+        <button class="btn btn-primary">Update password</button></form></div>
+      <div class="panel" id="push-panel" style="margin-top:16px"><h2>Phone notifications</h2><div class="empty-state"><span class="spinner"></span></div></div>
+      <div class="panel" id="delete-panel" style="margin-top:16px"><h2>Delete your account</h2><div class="empty-state"><span class="spinner"></span></div></div>`,
     mount(root) {
       $('#me-form', root).addEventListener('submit', async (e) => { e.preventDefault(); await A.guard(() => api('PATCH', '/me', A.collect(e.target)), 'Saved'); A.me = await api('GET', '/auth/me'); });
       $('#pw-form', root).addEventListener('submit', async (e) => { e.preventDefault(); try { await api('PATCH', '/me', A.collect(e.target)); A.toast('Password updated'); e.target.reset(); } catch (err) { A.toast(err.message, true); A.showErrors(e.target, err.details); } });
+      renderPush($('#push-panel', root));
+      renderDelete($('#delete-panel', root));
     },
   });
+
+  // Which phones get notifications, and what about. Phones sign themselves up from inside the app.
+  const PUSH_KINDS = [['bookings', 'My calls', 'Booked, moved, cancelled, or passed to me'], ['leads', 'Contract requests', 'When I am on the contract-request alert list'], ['replies', 'Customer texts', 'When I am on the text-replies alert list']];
+  async function renderPush(host) {
+    let d;
+    try { d = await api('GET', '/push'); } catch (e) { host.innerHTML = `<h2>Phone notifications</h2><p class="desc">${esc(e.message)}</p>`; return; }
+    const inApp = !!(window.AvailvoApp && window.AvailvoApp.native);
+    host.innerHTML = `<h2>Phone notifications</h2>
+      <p class="desc">${d.devices.length ? 'These phones get a notification for the things switched on below.' : inApp ? 'Allow notifications when your phone asks, and this phone will show up here.' : 'Get the <b>Availvo</b> app for iPhone or Android, log in, and allow notifications. Your phone will show up here.'}</p>
+      <div class="stack">${PUSH_KINDS.map(([k, label, help]) => `<label class="row" style="gap:10px;align-items:flex-start"><input type="checkbox" data-pref="${k}" ${d.prefs[k] ? 'checked' : ''} style="margin-top:3px"><span><b>${esc(label)}</b><br><span class="small muted">${esc(help)}</span></span></label>`).join('')}</div>
+      ${d.devices.length ? `<h3 style="font-size:14px;margin:16px 0 6px">Your phones</h3><ul class="small" style="margin:0;padding-left:0;list-style:none">${d.devices.map((x) => `<li class="row between" style="padding:6px 0;border-top:1px solid var(--line)"><span>${x.platform === 'ios' ? 'iPhone' : 'Android'}${x.device_name ? ` · ${esc(x.device_name)}` : ''}<span class="muted"> · last seen ${esc(A.dt(x.last_seen_at.replace(' ', 'T') + 'Z'))}</span>${x.last_error ? `<br><span style="color:#b7791f">${esc(x.last_error)}</span>` : ''}</span><button type="button" class="btn btn-link btn-sm" data-unpush="${x.id}">Remove</button></li>`).join('')}</ul>
+        <button type="button" class="btn btn-ghost btn-sm" data-pushtest style="margin-top:10px">Send a test notification</button>` : ''}
+      ${inApp && !d.devices.length ? '<button type="button" class="btn btn-primary btn-sm" data-pushenable style="margin-top:12px">Turn on notifications</button>' : ''}`;
+    host.onchange = async (e) => {
+      const c = e.target.closest('[data-pref]');
+      if (c) await A.guard(() => api('PATCH', '/push/prefs', { [c.dataset.pref]: c.checked }), 'Saved');
+    };
+    host.onclick = async (e) => {
+      const rm = e.target.closest('[data-unpush]');
+      if (rm) { await A.guard(() => api('POST', '/push/devices/remove', { id: Number(rm.dataset.unpush) }), 'Removed'); return renderPush(host); }
+      if (e.target.closest('[data-pushtest]')) { await A.guard(() => api('POST', '/push/test', {}), 'Sent. Check your phone.'); return; }
+      if (e.target.closest('[data-pushenable]')) { await window.AvailvoApp.enablePush(true); setTimeout(() => renderPush(host), 1500); }
+    };
+  }
+
+  async function renderDelete(host) {
+    let plan;
+    try { plan = await api('GET', '/account/delete-plan'); } catch (e) { host.innerHTML = `<h2>Delete your account</h2><p class="desc">${esc(e.message)}</p>`; return; }
+    if (plan.blocked) { host.innerHTML = `<h2>Delete your account</h2><p class="desc">${esc(plan.blocked)}</p>`; return; }
+    const gone = plan.companies_deleted, kept = plan.companies_kept;
+    host.innerHTML = `<h2>Delete your account</h2>
+      <p class="desc">This permanently deletes your login and cannot be undone. Connected calendars are disconnected.</p>
+      ${gone.length ? `<div class="panel warn-box" style="padding:10px 12px;margin-bottom:12px"><div class="small"><b>You are the only owner of ${gone.map((b) => esc(b.name)).join(', ')}.</b> ${gone.length === 1 ? 'It' : 'They'} will be deleted too, with every booking page, booking (${gone.reduce((a, b) => a + b.bookings, 0)}), lead (${gone.reduce((a, b) => a + b.leads, 0)}), form and setting${gone.some((b) => b.other_people) ? ', and the teammates on it lose access' : ''}. To keep a company, make someone else an owner on People first.</div></div>` : ''}
+      ${kept.length ? `<p class="small muted">You will be removed from ${kept.map((b) => esc(b.name)).join(', ')}, which stay${kept.length === 1 ? 's' : ''} as they are.</p>` : ''}
+      <form id="del-form" novalidate>
+        ${A.field('Your password', '<input class="input" type="password" name="password" autocomplete="current-password">')}
+        ${A.field('Type DELETE to confirm', '<input class="input" name="confirm" autocomplete="off" autocapitalize="characters">')}
+        <button class="btn btn-danger">Delete my account</button></form>`;
+    $('#del-form', host).addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const body = Object.fromEntries(new FormData(e.target));
+      if (!confirm('Delete your account for good? This cannot be undone.')) return;
+      try {
+        await api('POST', '/account/delete', body);
+        if (window.AvailvoApp && window.AvailvoApp.native) { try { await window.AvailvoApp.forgetDevice(); } catch (x) { /* already gone with the account */ } }
+        A.me = null;
+        document.getElementById('app').innerHTML = `<div class="auth-wrap"><div class="card" style="max-width:420px;margin:60px auto;padding:28px;text-align:center"><h1 style="font-size:22px">Your account is deleted</h1><p class="muted">We sent a confirmation to ${esc(plan.email)}.</p><a class="btn btn-primary" href="#/login" onclick="location.reload()">Done</a></div></div>`;
+      } catch (err) { A.toast(err.message, true); A.showErrors(e.target, err.details); }
+    });
+  }
 
   // ---------- Dashboard ----------
   // Which page on the site the form was on when people started it.

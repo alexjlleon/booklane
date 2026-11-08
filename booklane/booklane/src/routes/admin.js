@@ -30,6 +30,7 @@ const appConfig = require('../lib/config');
 const providers = require('../services/providers');
 const { createBusiness, uniqueSlug, ensureDefaultAvailability, seedSessions } = require('../services/setup');
 const ACCOUNTS = require('../services/accounts');
+const PUSH = require('../services/push');
 
 const authLimit = rateLimit({ windowMs: 15 * 60000, max: 25 });
 const signupLimit = rateLimit({ windowMs: 60 * 60000, max: 5 });
@@ -231,6 +232,54 @@ module.exports = function adminRoutes(app) {
     return { ok: true };
   });
 
+  // ---------- Deleting your own account (App Store and Google Play both require it in the app) ----------
+  app.get('/api/admin/account/delete-plan', (req) => { requireAuth(req); return ACCOUNTS.deletionPlan(req.user.id); });
+  app.post('/api/admin/account/delete', async (req, res) => {
+    requireAuth(req);
+    authLimit(req);
+    const { password, confirm } = req.body || {};
+    const u = db.get('SELECT password_hash FROM users WHERE id = ?', req.user.id);
+    if (String(confirm || '').trim().toUpperCase() !== 'DELETE') throw new HttpError(422, 'Type DELETE to confirm', { confirm: 'Type DELETE' });
+    if (!verifyPassword(password || '', u.password_hash)) throw new HttpError(422, 'That password is wrong', { password: 'Wrong password' });
+    let plan;
+    try { plan = await ACCOUNTS.deleteAccount(req.user.id); } catch (e) { throw new HttpError(e.status || 500, e.message); }
+    destroySession(req, res);
+    return { ok: true, companies_deleted: plan.companies_deleted.map((b) => b.name) };
+  });
+
+  // ---------- Phone app: notifications, and opening the real browser already logged in ----------
+  app.get('/api/admin/push', (req) => {
+    requireAuth(req);
+    const me = db.get('SELECT push_prefs FROM users WHERE id = ?', req.user.id);
+    return { configured: PUSH.configured(), prefs: PUSH.prefsOf(me), devices: PUSH.devicesFor(req.user.id) };
+  });
+  app.post('/api/admin/push/devices', (req) => {
+    requireAuth(req);
+    const d = PUSH.register(req.user.id, req.body || {});
+    if (!d) throw new HttpError(422, 'That is not a device token this app can use');
+    return { ok: true, device: d };
+  });
+  app.post('/api/admin/push/devices/remove', (req) => {
+    requireAuth(req);
+    const b = req.body || {};
+    const n = b.id ? PUSH.removeDevice(req.user.id, int(b.id)) : PUSH.unregister(req.user.id, b.token);
+    return { ok: true, removed: n };
+  });
+  app.patch('/api/admin/push/prefs', (req) => { requireAuth(req); return { ok: true, prefs: PUSH.setPrefs(req.user.id, req.body || {}) }; });
+  app.post('/api/admin/push/test', async (req) => {
+    requireAuth(req);
+    if (!PUSH.devicesFor(req.user.id).length) throw new HttpError(422, 'Open the Availvo app on your phone and allow notifications first.');
+    const r = await PUSH.notifyUsers([req.user.id], null, { title: 'Availvo is connected', body: 'This is a test. New bookings will show up like this.', url: '/app#/account' });
+    if (!r.sent) throw new HttpError(422, `Nothing was delivered. ${PUSH.devicesFor(req.user.id).map((d) => d.last_error).filter(Boolean)[0] || 'Phone notifications are not set up on the server yet.'}`);
+    return { ok: true, ...r };
+  });
+  app.post('/api/admin/auth/handoff', (req) => {
+    requireAuth(req);
+    const next = String((req.body || {}).next || '/app');
+    if (!/^\/(app|oauth\/)/.test(next) || next.startsWith('//')) throw new HttpError(422, 'Unknown destination');
+    return { url: `${baseUrl()}/app/handoff?t=${encodeURIComponent(ACCOUNTS.issueHandoff(req.user.id))}&next=${encodeURIComponent(next)}` };
+  });
+
   app.post('/api/admin/businesses', (req) => {
     requireAuth(req);
     const name = String(req.body?.name || '').trim();
@@ -245,6 +294,12 @@ module.exports = function adminRoutes(app) {
   });
 
   // ---------- Platform: every company on Availvo ----------
+  // A login for Apple and Google app reviewers: a made-up company, never a real one. Each press
+  // gives a new password (shown once) and keeps its sample calls in the future.
+  app.post('/api/admin/platform/review-demo', (req) => {
+    requirePlatformAdmin(req);
+    return require('../services/review-demo').ensureReviewDemo();
+  });
   app.get('/api/admin/platform/companies', (req) => {
     requirePlatformAdmin(req);
     return { companies: ACCOUNTS.listCompanies() };
@@ -1166,7 +1221,7 @@ module.exports = function adminRoutes(app) {
     requirePlatformAdmin(req);
     requireRole('owner')(req);
     const provider = String(req.params.provider);
-    if (!['twilio', 'resend'].includes(provider)) throw new HttpError(404, 'Unknown integration');
+    if (!['twilio', 'resend', 'push'].includes(provider)) throw new HttpError(404, 'Unknown integration');
     // Twilio and Resend are one shared set of keys for the platform.
     const scoped = undefined;
     const body = req.body || {};
@@ -1201,6 +1256,7 @@ module.exports = function adminRoutes(app) {
     try {
       if (provider === 'resend') return await providers.sendTestEmail(business, to || req.user.email);
       if (provider === 'twilio') return await providers.sendTestSms(business, to || req.user.phone);
+      if (provider === 'push') return await providers.sendTestPush(req.user);
       throw new Error('That integration has nothing to send.');
     } catch (e) {
       throw new HttpError(422, e.message);

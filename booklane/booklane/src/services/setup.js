@@ -106,4 +106,4 @@ function seedSessions(business, { markets = DEFAULT_MARKETS, products = DEFAULT_
   return created;
 }
 
-module.exports = { createBusiness, uniqueSlug, ensureDefaultAvailability, createSessionProduct, seedSessions };
+module.exports = { createBusiness, uniqueSlug, ensureDefaultAvailability, createSessionProduct, seedSessions, NEUTRAL_STEPS };

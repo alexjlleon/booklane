@@ -152,6 +152,8 @@ async function requestContract(business, q, lead, body) {
     html: layout(business, { heading: 'Contract request received', body: `<p>Thanks! Our team is checking availability for your date and will send your contract shortly. Here's what you requested:</p>${quoteSummaryHtml(fresh, business)}`, cta: { label: 'View your quote', url: `${B.baseFor(business)}/q/${q.token}` } }),
   });
   if (business.settings.notifications.notify_on_contract) {
+    require('./push').notify(require('./push').membersWithEmails(business.id, B.contractEmails(business)), 'leads',
+      { title: 'Contract requested', body: `${L.leadName(lead)} · ${money(fresh.total, business.settings.quote.currency)}`, url: `/app#/leads/${lead.id}` });
     await notifyTeam(business, fresh, lead, `Contract requested: ${L.leadName(lead)} · ${money(fresh.total, business.settings.quote.currency)}`, 'Send this customer a contract',
       [['Legal name', req.legal_name], ['Billing address', req.billing_address], ['Venue address', req.venue_address], ['Event time', [req.event_start_time, req.event_end_time].filter(Boolean).join(' – ')], ['Planner', req.planner_name], ['Notes', req.notes]], B.contractEmails(business));
   }

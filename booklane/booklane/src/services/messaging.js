@@ -642,6 +642,8 @@ function alertTeamOfReply(businessId, number, body) {
   const to = B.replyEmails(business);
   const outcome = booking && booking.outcome ? OUTCOME_LABEL[booking.outcome] : null;
   if (to.length) {
+    require('./push').notify(require('./push').membersWithEmails(businessId, to), 'replies',
+      { title: proposal ? `${name} wants a proposal` : `${name} texted back`, body: clampStr(body, 200), url: lead ? `/app#/leads/${lead.id}` : '/app#/leads' });
     sendEmail({
       to, businessId, fromName: business.name,
       subject: proposal ? `${name} asked for a proposal by text` : `Text reply from ${name}`,

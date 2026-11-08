@@ -16,10 +16,10 @@ const { esc } = require('../lib/util');
 
 const owner = () => process.env.PLATFORM_OWNER || 'Weddings Unlimited LLC';
 const support = () => process.env.SUPPORT_EMAIL || 'alex@weddingsunlimited.com';
-const UPDATED = 'October 27, 2026';
+const UPDATED = 'November 8, 2026';
 
 const footer = () => `<footer class="site-foot">
-  <a href="/">${esc(APP_NAME)}</a><a href="/privacy">Privacy policy</a><a href="/terms">Terms of service</a><a href="mailto:${esc(support())}">Contact</a>
+  <a href="/">${esc(APP_NAME)}</a><a href="/privacy">Privacy policy</a><a href="/terms">Terms of service</a><a href="/delete-account">Delete your account</a><a href="mailto:${esc(support())}">Contact</a>
   <span>© ${new Date().getFullYear()} ${esc(owner())}</span>
 </footer>`;
 
@@ -64,7 +64,7 @@ module.exports = function site(app) {
   });
 
   app.get('/privacy', (req, res) => res.html(legal('Privacy policy', `
-    <p>${esc(APP_NAME)} ("we", "us") is a scheduling and lead-capture platform operated by ${esc(owner())}. This policy explains what information ${esc(APP_NAME)} collects, how it is used, and the choices you have. It applies to ${esc(APP_NAME)} at app.availvo.co, availvo.co and every booking page or form a business runs on ${esc(APP_NAME)}, including on its own domain.</p>
+    <p>${esc(APP_NAME)} ("we", "us") is a scheduling and lead-capture platform operated by ${esc(owner())}. This policy explains what information ${esc(APP_NAME)} collects, how it is used, and the choices you have. It applies to ${esc(APP_NAME)} at app.availvo.co, availvo.co, the ${esc(APP_NAME)} apps for iPhone and Android, and every booking page or form a business runs on ${esc(APP_NAME)}, including on its own domain.</p>
 
     <h2>Who this covers</h2>
     <p><b>Account holders</b> are the businesses and team members who sign in to ${esc(APP_NAME)}. <b>Customers</b> are the people who use a business's booking pages, forms or quotes. When you are a customer, the business you are booking with decides what it asks you and what it does with your answers; ${esc(APP_NAME)} stores and processes that information on the business's behalf.</p>
@@ -76,6 +76,7 @@ module.exports = function site(app) {
       <li><b>What customers enter:</b> name, email, phone, the answers to a business's questions, and the time they book. Forms save as you go, so answers are kept even if a form is not finished.</li>
       <li><b>Where a booking came from:</b> the address and title of the web page a booking form was embedded on.</li>
       <li><b>Connected calendar data</b>, described in the next section.</li>
+      <li><b>The ${esc(APP_NAME)} phone app:</b> if you allow notifications, a notification token that Apple or Google issues for your phone, whether it is an iPhone or Android phone, and the app's version number. They are used only to send you the notifications you chose (new, moved and cancelled calls, contract requests, customer texts), and are deleted when you log out, remove the phone on your Account screen, or delete your account. The app does not collect your location, contacts, photos, advertising identifier or usage analytics, and contains no advertising or third-party tracking.</li>
       <li><b>Technical information:</b> a sign-in cookie for account holders, and your browser's local storage to keep a form's progress if you reload the page. We do not use advertising or tracking cookies.</li>
     </ul>
 
@@ -111,17 +112,19 @@ module.exports = function site(app) {
       <li><b>Resend</b> delivers email.</li>
       <li><b>Twilio</b> delivers text messages.</li>
       <li><b>Google</b> and <b>Microsoft</b>, for connected calendars, as described above.</li>
+      <li><b>Apple</b> (Apple Push Notification service) and <b>Google</b> (Firebase Cloud Messaging) deliver phone app notifications. They receive the notification token and the short text of each notification.</li>
       <li>A business may connect its own tools, such as its CRM or a webhook. Information from that business's pages is then sent to those tools at the business's direction.</li>
     </ul>
     <p>We may also disclose information if required by law, or to protect the rights and safety of our users or the public.</p>
 
     <h2>How long we keep it</h2>
-    <p>Account and business information is kept while the account is open. Customer submissions are kept for the business until it deletes them or closes its account. Calendar tokens are deleted as soon as the calendar is disconnected. When an account is closed, its data is deleted within 30 days, except where we must keep it longer by law.</p>
+    <p>Account and business information is kept while the account is open. Customer submissions are kept for the business until it deletes them or closes its account. Calendar tokens are deleted as soon as the calendar is disconnected. When you delete your account yourself, it is deleted immediately; when you ask us to close it, it is deleted within 30 days. Copies in backups are overwritten within 30 days. We keep information longer only where the law requires it.</p>
 
     <h2>Security</h2>
     <p>${esc(APP_NAME)} is served only over HTTPS. Passwords are hashed, calendar tokens and provider keys are encrypted at rest, and access to production systems is limited to the people who run ${esc(APP_NAME)}.</p>
 
     <h2>Your choices and rights</h2>
+    <p><b>Deleting your account.</b> You can delete your account yourself at any time, in the app or on the web: open <b>Account</b> from the menu and choose <b>Delete my account</b>. This deletes your login, any company you are the only owner of (with its booking pages, bookings, leads, forms and settings) and your calendar connections. More on <a href="/delete-account">deleting your account</a>.</p>
     <p>You can see and update your account details in ${esc(APP_NAME)}, disconnect calendars at any time, and ask us to export or delete your information by writing to <a href="mailto:${esc(support())}">${esc(support())}</a>. If you are a customer of a business on ${esc(APP_NAME)}, you can also ask that business directly. Depending on where you live, you may have further rights under laws such as the CCPA; we will honour them.</p>
 
     <h2>Children</h2>
@@ -132,6 +135,29 @@ module.exports = function site(app) {
 
     <h2>Contact</h2>
     <p>${esc(owner())}<br><a href="mailto:${esc(support())}">${esc(support())}</a></p>`)));
+
+  // Google Play asks every app that has accounts for a web address where deletion can be requested
+  // without installing the app. Apple asks for deletion inside the app, which the Account screen has.
+  app.get('/delete-account', (req, res) => res.html(legal('Delete your account', `
+    <p>You can delete your ${esc(APP_NAME)} account and its data yourself at any time, in the ${esc(APP_NAME)} app for iPhone or Android or on the web.</p>
+    <h2>Delete it yourself</h2>
+    <ol>
+      <li>Log in at <a href="/app#/account">app.availvo.co</a> or open the ${esc(APP_NAME)} app.</li>
+      <li>Open the menu and choose <b>Account</b>.</li>
+      <li>Under <b>Delete your account</b>, enter your password, type DELETE and press <b>Delete my account</b>.</li>
+    </ol>
+    <p>It happens immediately and cannot be undone. We email you to confirm.</p>
+    <h2>What is deleted</h2>
+    <ul>
+      <li>Your login, name, email, phone number, password hash, sign-in sessions and phone notification tokens.</li>
+      <li>Every company you are the only owner of, with its booking pages, bookings, leads, quotes, forms, images, messages and settings. A company that has another owner stays, and only you are removed from it.</li>
+      <li>Your connected Google and Outlook calendars. Access is also revoked with Google.</li>
+    </ul>
+    <p>Backups are overwritten within 30 days. We keep nothing else, except where the law requires it.</p>
+    <h2>Cannot log in?</h2>
+    <p>Email <a href="mailto:${esc(support())}?subject=${encodeURIComponent(`Delete my ${APP_NAME} account`)}">${esc(support())}</a> from the address on the account and ask us to delete it. We confirm it is you, then delete it within 30 days, usually much sooner.</p>
+    <h2>Booked a call with a business?</h2>
+    <p>If you are a customer who booked through a business's page, that business holds your booking details. Ask the business to delete them, or write to us and we will pass the request on.</p>`)));
 
   app.get('/terms', (req, res) => res.html(legal('Terms of service', `
     <p>These terms apply to anyone who creates an account on ${esc(APP_NAME)}, which is operated by ${esc(owner())}. By creating an account or using ${esc(APP_NAME)}, you agree to them.</p>

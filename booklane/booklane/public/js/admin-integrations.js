@@ -11,6 +11,11 @@
     TWILIO_FROM_NUMBER: 'The Twilio number texts come from, e.g. +18325550123.',
     TWILIO_MESSAGING_SERVICE_SID: 'Optional. Use instead of a single number if you have a Messaging Service. Starts MG.',
     RESEND_API_KEY: 'Resend dashboard → API Keys. Starts re_.',
+    APNS_KEY_ID: 'Apple Developer → Certificates, IDs & Profiles → Keys. The 10-character Key ID of a key with Apple Push Notifications service ticked.',
+    APNS_TEAM_ID: 'Apple Developer → Membership details. 10 characters.',
+    APNS_PRIVATE_KEY: 'Open the AuthKey_XXXXXXXXXX.p8 file in Notepad and paste everything, including the BEGIN and END lines.',
+    APNS_BUNDLE_ID: 'Leave blank for co.availvo.app.',
+    FCM_SERVICE_ACCOUNT: 'Firebase → Project settings → Service accounts → Generate new private key. Open the downloaded .json in Notepad and paste all of it.',
     EMAIL_FROM: 'How emails appear, e.g. Weddings Unlimited <hello@weddingsunlimited.com>. The domain must be verified in Resend.',
   };
 
@@ -28,7 +33,7 @@
       return;
     }
     A.cache.providers = s;
-    host.innerHTML = ['twilio', 'resend'].map((p) => card(s[p], s.mask)).join('');
+    host.innerHTML = ['twilio', 'resend', 'push'].filter((p) => s[p]).map((p) => card(s[p], s.mask)).join('');
     // The cards are redrawn after every save, but the host element stays the same. Attaching the
     // handlers again on each redraw made one click fire once per earlier save (four test emails
     // for one press), so they are attached once per host.
@@ -43,6 +48,10 @@
 
   function activityLine(p) {
     const a = p.activity || {};
+    if (p.provider === 'push') {
+      return `${a.ios || 0} iPhone${a.ios === 1 ? '' : 's'} · ${a.android || 0} Android phone${a.android === 1 ? '' : 's'} signed up for notifications`
+        + (a.failing ? ` · <span style="color:#b7791f">${a.failing} failing</span>` : '');
+    }
     if (p.provider === 'twilio') {
       return `${a.sent_7d || 0} text${a.sent_7d === 1 ? '' : 's'} in 7 days · ${a.segments_7d || 0} segment${a.segments_7d === 1 ? '' : 's'} · ${a.optouts || 0} opted out`
         + (a.failed_7d ? ` · <span style="color:#c0392b">${a.failed_7d} failed</span>` : '');
@@ -72,7 +81,10 @@
         <button type="button" class="btn btn-ghost btn-sm" data-copy="${esc(p.webhook.url)}">Copy</button></div>
         <div class="help">${esc(p.webhook.label || '')}</div></div>` : '';
 
-    const testRow = `<div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap">
+    const testRow = p.provider === 'push' ? `<div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap">
+          <button type="button" class="btn btn-ghost" data-check="push">Check connection</button>
+          <button type="button" class="btn btn-ghost" data-sendtest="push" ${p.ready ? '' : 'disabled title="Finish setting this up first"'}>Send a test to my phones</button>
+        </div>` : `<div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap">
           <button type="button" class="btn btn-ghost" data-check="${p.provider}">Check connection</button>
           <div class="field" style="flex:1;min-width:200px;margin:0"><label>Send a test to</label>
             <input class="input" data-testto="${p.provider}" placeholder="${p.provider === 'twilio' ? 'your mobile number' : 'you@example.com'}"></div>

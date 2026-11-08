@@ -3392,3 +3392,153 @@ test('the BoothBook payload reader prefers the customer over the sales rep', () 
   assert.deepEqual(p.phones, ['+17135551212']);
   assert.equal(CRM2.readPayload({ email: 'a@b.co', rep_email: 'r@b.co' }).email, 'a@b.co');
 });
+
+// ---------------------------------------------------------------- phone app (Nov 8)
+
+test('phone app: devices register, get booking notifications, and are dropped when dead', async () => {
+  const pushLib = require('../src/lib/push');
+  const sent = [];
+  pushLib.setTransport({
+    ios: async (token, msg) => { sent.push({ token, ...msg }); return token.startsWith('dead') ? { ok: false, dead: true, error: 'Apple said 410 (Unregistered)' } : { ok: true }; },
+    android: async (token, msg) => { sent.push({ token, ...msg }); return { ok: true }; },
+  });
+  try {
+    require('../src/lib/security').resetRateLimits();
+    const cookie = await signup('pushy@test.dev', 'Pushy Photo');
+    const me = (await req('GET', '/api/admin/auth/me', null, { cookie })).data;
+    // Rubbish tokens and unknown platforms are refused.
+    assert.equal((await req('POST', '/api/admin/push/devices', { platform: 'ios', token: 'short' }, { cookie })).status, 422);
+    assert.equal((await req('POST', '/api/admin/push/devices', { platform: 'windows', token: 'a'.repeat(64) }, { cookie })).status, 422);
+    const good = 'a1'.repeat(32);
+    assert.equal((await req('POST', '/api/admin/push/devices', { platform: 'ios', token: good, app_version: '1.0.0' }, { cookie })).status, 200);
+    assert.equal((await req('POST', '/api/admin/push/devices', { platform: 'android', token: 'f'.repeat(152) }, { cookie })).status, 200);
+    assert.equal((await req('POST', '/api/admin/push/devices', { platform: 'ios', token: 'dead' + 'b'.repeat(60) }, { cookie })).status, 200);
+    // Registering the same token again is one row, not two.
+    await req('POST', '/api/admin/push/devices', { platform: 'ios', token: good }, { cookie });
+    let state = (await req('GET', '/api/admin/push', null, { cookie })).data;
+    assert.equal(state.devices.length, 3);
+    assert.deepEqual(state.prefs, { bookings: true, leads: true, replies: true });
+
+    // A customer books: the host's phones hear about it, and the dead one is forgotten.
+    const day = nextWeekday(4);
+    const slots = (await req('GET', `/api/public/b/${me.business.slug}/e/discovery-call/slots?from=${day}&to=${day}&tz=America/Chicago`)).data.days[day];
+    const r = await req('POST', `/api/public/b/${me.business.slug}/e/discovery-call/book`, { start: slots[0], timezone: 'America/Chicago', contact: { first_name: 'Nora', last_name: 'Push', email: 'nora@example.com', phone: '5555550199' } });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+    for (let i = 0; i < 20 && sent.length < 3; i++) await new Promise((x) => setTimeout(x, 25));
+    assert.equal(sent.length, 3);
+    assert.ok(sent.every((m) => m.title === 'New call booked' && /Nora Push · Discovery call/.test(m.body) && m.url.startsWith('/app#/bookings')));
+    state = (await req('GET', '/api/admin/push', null, { cookie })).data;
+    assert.equal(state.devices.length, 2, 'the dead token was removed');
+
+    // Switching "My calls" off stops them.
+    sent.length = 0;
+    await req('PATCH', '/api/admin/push/prefs', { bookings: false }, { cookie });
+    const id = db.get("SELECT id FROM bookings WHERE email = 'nora@example.com'").id;
+    const tok = db.get('SELECT token FROM bookings WHERE id = ?', id).token;
+    await req('POST', `/api/public/bookings/${tok}/cancel`, { reason: 'changed plans' });
+    await new Promise((x) => setTimeout(x, 100));
+    assert.equal(sent.length, 0);
+
+    // The test button reaches every phone regardless of preferences.
+    const t = await req('POST', '/api/admin/push/test', {}, { cookie });
+    assert.equal(t.status, 200, JSON.stringify(t.data));
+    assert.equal(t.data.sent, 2);
+
+    // Logging out from the app forgets the phone by token.
+    await req('POST', '/api/admin/push/devices/remove', { token: good }, { cookie });
+    assert.equal((await req('GET', '/api/admin/push', null, { cookie })).data.devices.length, 1);
+  } finally { pushLib.setTransport(null); }
+});
+
+test('phone app: the handoff link logs the browser in once, and only to the dashboard', async () => {
+  require('../src/lib/security').resetRateLimits();
+  const cookie = await signup('handoff@test.dev', 'Handoff Co');
+  assert.equal((await req('POST', '/api/admin/auth/handoff', { next: 'https://evil.example/' }, { cookie })).status, 422);
+  assert.equal((await req('POST', '/api/admin/auth/handoff', { next: '//evil.example' }, { cookie })).status, 422);
+  const r = await req('POST', '/api/admin/auth/handoff', { next: '/oauth/google/start' }, { cookie });
+  assert.equal(r.status, 200);
+  const path = r.data.url.replace(base, '');
+  const first = await req('GET', path);
+  assert.equal(first.status, 302);
+  assert.ok(first.cookie.startsWith('bl_sess='), 'a new session in the browser');
+  const me = await req('GET', '/api/admin/auth/me', null, { cookie: first.cookie });
+  assert.equal(me.data.user.email, 'handoff@test.dev');
+  const again = await fetch(base + path, { redirect: 'manual' });
+  assert.equal(again.headers.get('location'), '/app#/login', 'single use');
+});
+
+test('deleting your account takes the companies you alone own, and nothing else', async () => {
+  require('../src/lib/security').resetRateLimits();
+  const solo = await signup('leaving@test.dev', 'Leaving Soon');
+  const soloMe = (await req('GET', '/api/admin/auth/me', null, { cookie: solo })).data;
+  const shared = await signup('partner@test.dev', 'Shared Studio');
+  const sharedMe = (await req('GET', '/api/admin/auth/me', null, { cookie: shared })).data;
+  const leaver = db.get("SELECT id FROM users WHERE email = 'leaving@test.dev'").id;
+  // The leaver is also a co-owner of Shared Studio, which must survive.
+  db.run("INSERT INTO memberships (user_id, business_id, role) VALUES (?,?,'owner')", leaver, sharedMe.business.id);
+  await req('POST', '/api/admin/push/devices', { platform: 'android', token: 'z'.repeat(80) }, { cookie: solo });
+  const day = nextWeekday(5);
+  const slots = (await req('GET', `/api/public/b/${soloMe.business.slug}/e/discovery-call/slots?from=${day}&to=${day}&tz=America/Chicago`)).data.days[day];
+  await req('POST', `/api/public/b/${soloMe.business.slug}/e/discovery-call/book`, { start: slots[0], timezone: 'America/Chicago', contact: { first_name: 'Kim', last_name: 'Gone', email: 'kim.gone@example.com', phone: '5555550111' } });
+
+  const plan = (await req('GET', '/api/admin/account/delete-plan', null, { cookie: solo })).data;
+  assert.deepEqual(plan.companies_deleted.map((b) => b.name), ['Leaving Soon']);
+  assert.deepEqual(plan.companies_kept.map((b) => b.name), ['Shared Studio']);
+  assert.equal(plan.companies_deleted[0].bookings, 1);
+
+  assert.equal((await req('POST', '/api/admin/account/delete', { password: 'password123', confirm: 'nope' }, { cookie: solo })).status, 422);
+  assert.equal((await req('POST', '/api/admin/account/delete', { password: 'wrong-password', confirm: 'DELETE' }, { cookie: solo })).status, 422);
+  const done = await req('POST', '/api/admin/account/delete', { password: 'password123', confirm: 'delete' }, { cookie: solo });
+  assert.equal(done.status, 200, JSON.stringify(done.data));
+  assert.deepEqual(done.data.companies_deleted, ['Leaving Soon']);
+
+  assert.equal(db.get("SELECT COUNT(*) c FROM users WHERE email = 'leaving@test.dev'").c, 0);
+  assert.equal(db.get('SELECT COUNT(*) c FROM businesses WHERE id = ?', soloMe.business.id).c, 0);
+  assert.equal(db.get("SELECT COUNT(*) c FROM bookings WHERE email = 'kim.gone@example.com'").c, 0);
+  assert.equal(db.get('SELECT COUNT(*) c FROM push_devices WHERE user_id = ?', leaver).c, 0);
+  assert.equal(db.get('SELECT COUNT(*) c FROM businesses WHERE id = ?', sharedMe.business.id).c, 1, 'the co-owned company stays');
+  assert.equal((await req('GET', '/api/admin/auth/me', null, { cookie: solo })).status, 401);
+  assert.equal((await req('GET', `/b/${soloMe.business.slug}`)).status, 404);
+  assert.deepEqual(db.raw.prepare('PRAGMA foreign_key_check').all(), []);
+
+  // The platform admin (the very first account) cannot delete itself.
+  const first = db.get('SELECT id, email FROM users WHERE is_super_admin = 1 ORDER BY id LIMIT 1');
+  assert.ok(require('../src/services/accounts').deletionPlan(first.id).blocked);
+});
+
+test('the delete-account page and the privacy policy describe the phone app', async () => {
+  const del = await req('GET', '/delete-account');
+  assert.equal(del.status, 200);
+  assert.match(del.data, /Delete my account/);
+  const privacy = await req('GET', '/privacy');
+  assert.match(privacy.data, /notification token/);
+  assert.match(privacy.data, /Firebase Cloud Messaging/);
+  const appPage = await req('GET', '/app');
+  assert.match(appPage.data, /app-native\.js/);
+});
+
+test('the app review login is a made-up company with calls and a fresh password', async () => {
+  const { ensureReviewDemo } = require('../src/services/review-demo');
+  const a = ensureReviewDemo();
+  const b = ensureReviewDemo();
+  assert.notEqual(a.password, b.password);
+  require('../src/lib/security').resetRateLimits();
+  const login = await req('POST', '/api/admin/auth/login', { email: b.email, password: b.password });
+  assert.equal(login.status, 200);
+  const old = await req('POST', '/api/admin/auth/login', { email: a.email, password: a.password });
+  assert.equal(old.status, 401);
+  const bizId = db.get('SELECT id FROM businesses WHERE slug = ?', b.slug).id;
+  const future = db.get("SELECT COUNT(*) c FROM bookings WHERE business_id = ? AND start_utc > ?", bizId, new Date().toISOString()).c;
+  assert.ok(future >= 5, `${future} upcoming calls`);
+  assert.equal(db.get('SELECT COUNT(*) c FROM bookings WHERE business_id = ?', bizId).c, 10, 'pressing twice does not duplicate');
+  assert.equal(db.get('SELECT COUNT(*) c FROM event_types WHERE business_id = ?', bizId).c, 3);
+});
+
+test('push keys: pem rebuilt from a one-line paste', () => {
+  const crypto = require('node:crypto');
+  const { privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const pem = privateKey.export({ type: 'pkcs8', format: 'pem' });
+  const oneLine = pem.replace(/\n/g, ' ');
+  const fixed = require('../src/lib/push').normalizePem(oneLine);
+  assert.doesNotThrow(() => crypto.sign('sha256', Buffer.from('x'), { key: fixed, dsaEncoding: 'ieee-p1363' }));
+});

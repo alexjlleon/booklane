@@ -14,6 +14,7 @@ const S = require('./scheduling');
 const calendars = require('./calendars');
 const { sendWebhook } = require('./integrations');
 const MSG = require('./messaging');
+const PUSH = require('./push');
 
 function hydrateEt(et) {
   if (!et) return et;
@@ -120,6 +121,12 @@ async function sendBookingEmails(kind, booking, { oldHost, notifyCustomer = true
   const guests = guestsOf(b);
   const ics = buildIcs({ uid: bookingUid(b), start, end, summary, description: `Manage: ${manage}`, location: b.location,
     organizerName: business.name, organizerEmail: host?.email, attendeeName: b.name, attendeeEmail: b.email, guests, cancelled: kind === 'cancelled', sequence: kind === 'rescheduled' || kind === 'reassigned' ? 1 : kind === 'cancelled' ? 2 : 0 });
+  // The host's phone, if they have the app. Only the person whose call it is: the team inbox is email.
+  if (host && !host.is_resource) {
+    const short = T.formatDateTime(start, business.timezone, { weekday: 'short', month: 'short', year: undefined, timeZoneName: 'short' });
+    const titles = { created: 'New call booked', rescheduled: 'Call moved', cancelled: 'Call cancelled', reassigned: `${oldHost?.name || 'A teammate'} passed you a call` };
+    PUSH.notify([host.id], 'bookings', { title: titles[kind], body: `${b.name || 'Someone'} · ${et?.name || 'Call'} · ${short}`, url: kind === 'cancelled' ? '/app#/bookings' : `/app#/bookings?focus=${b.id}` });
+  }
   const headings = { created: `You're booked, ${esc((b.name || '').split(' ')[0])}!`, rescheduled: 'Your call was rescheduled', cancelled: 'Your call was cancelled',
     reassigned: `Your call is now with ${esc(host?.name || 'a teammate')}` };
   if (kind !== 'reassigned' || notifyCustomer) await sendEmail({

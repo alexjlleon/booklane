@@ -22,7 +22,7 @@ const app = createRouter();
 // A request for book.weddingsunlimited.com is that company's site: its home page at /, its booking
 // pages at /<page>, and its admin at /app. Paths that belong to the platform itself keep working
 // there, so a booking's manage link or a quote link opens on the company's own domain.
-const PLATFORM_PATHS = new Set(['api', 'app', 'static', 'b', 'q', 'booking', 'oauth', 'healthz', 'embed.js', 'favicon.ico', 'robots.txt', 'session', 'u', 'privacy', 'terms']);
+const PLATFORM_PATHS = new Set(['api', 'app', 'static', 'b', 'q', 'booking', 'oauth', 'healthz', 'embed.js', 'favicon.ico', 'robots.txt', 'session', 'u', 'privacy', 'terms', 'delete-account']);
 const requestHost = (req) => String(req.headers.host || '').split(',')[0].trim();
 app.pre((req, res) => {
   const host = B.normalizeDomain(requestHost(req));
@@ -83,7 +83,19 @@ require('./routes/site')(app);
 app.get('/app', (req, res) => res.html(page({ title: `${req.hostBusiness ? `${req.hostBusiness.name} · ` : ''}${APP_NAME} dashboard`,
   // On a company's own domain the login screen is that company's, so it does not offer sign-up.
   data: { companyDomain: req.hostBusiness ? { name: req.hostBusiness.name } : null, allowSignup: process.env.ALLOW_SIGNUP !== 'false' && !req.hostBusiness, supportEmail: process.env.SUPPORT_EMAIL || 'alex@weddingsunlimited.com' },
-  scripts: ['pricing.js', 'admin-core.js', 'admin-main.js', 'admin-setup.js', 'admin-business.js', 'admin-org.js', 'admin-sessions.js', 'admin-forms.js', 'admin-messaging.js', 'admin-integrations.js', 'admin-team.js', 'admin-platform.js'], styles: ['app.css', 'admin.css'], bodyClass: 'admin' })));
+  scripts: ['pricing.js', 'admin-core.js', 'admin-main.js', 'admin-setup.js', 'admin-business.js', 'admin-org.js', 'admin-sessions.js', 'admin-forms.js', 'admin-messaging.js', 'admin-integrations.js', 'admin-team.js', 'admin-platform.js', 'app-native.js'], styles: ['app.css', 'admin.css'], bodyClass: 'admin' })));
+
+// The phone app hands a logged-in person to the phone's real browser (for Google sign-in, which
+// refuses to run inside an app). The link is single use and lasts a minute; anything wrong just
+// lands on the normal login screen.
+app.get('/app/handoff', (req, res) => {
+  const { createSession } = require('./lib/auth');
+  const userId = require('./services/accounts').consume('handoff', req.query.t);
+  const next = String(req.query.next || '/app');
+  const safe = /^\/(app|oauth\/)/.test(next) && !next.startsWith('//') ? next : '/app';
+  if (userId) createSession(res, userId);
+  res.redirect(userId ? safe : '/app#/login');
+});
 
 // The form builder's live preview. Same page and script as a real form, but fed the unsaved form
 // by the builder over postMessage, so new and switched-off forms preview too. Nothing it does is

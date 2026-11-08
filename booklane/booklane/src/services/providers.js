@@ -85,10 +85,33 @@ function resendShape() {
   };
 }
 
+function pushShape() {
+  const push = require('../lib/push');
+  const missing = [];
+  for (const k of ['APNS_KEY_ID', 'APNS_TEAM_ID', 'APNS_PRIVATE_KEY']) if (!config.get(k)) missing.push(k);
+  if (!config.get('FCM_SERVICE_ACCOUNT')) missing.push('FCM_SERVICE_ACCOUNT');
+  return {
+    provider: 'push',
+    name: 'Phone app notifications',
+    what: 'Sends notifications to the Availvo iPhone and Android apps: new, moved and cancelled calls, contract requests, customer texts.',
+    ready: push.apnsConfigured() || push.fcmConfigured(),
+    missing,
+    fields: fields('push'),
+    activity: {
+      ios: db.get("SELECT COUNT(*) c FROM push_devices WHERE platform = 'ios'").c,
+      android: db.get("SELECT COUNT(*) c FROM push_devices WHERE platform = 'android'").c,
+      failing: db.get('SELECT COUNT(*) c FROM push_devices WHERE last_error IS NOT NULL').c,
+    },
+    note: push.apnsConfigured() && !push.fcmConfigured() ? 'iPhones are set up; Android phones will not get notifications until the Firebase service account is added.'
+      : !push.apnsConfigured() && push.fcmConfigured() ? 'Android phones are set up; iPhones will not get notifications until the Apple key is added.' : null,
+  };
+}
+
 function status() {
   return {
     twilio: twilioShape(),
     resend: resendShape(),
+    push: pushShape(),
     mask: config.MASK,
   };
 }
@@ -162,7 +185,13 @@ async function checkResend() {
   }
 }
 
-const CHECKS = { twilio: checkTwilio, resend: checkResend };
+async function checkPush() {
+  const r = await require('../lib/push').check();
+  const ok = !!((r.ios && r.ios.ok) || (r.android && r.android.ok));
+  return { ok, message: `iPhone: ${r.ios.message} Android: ${r.android.message}` };
+}
+
+const CHECKS = { twilio: checkTwilio, resend: checkResend, push: checkPush };
 
 async function check(provider) {
   const fn = CHECKS[provider];
@@ -196,7 +225,15 @@ async function sendTestSms(business, to) {
   return { ok: true, to: number, segments: r.segments };
 }
 
+async function sendTestPush(user) {
+  const PUSH = require('./push');
+  if (!PUSH.devicesFor(user.id).length) throw new Error('None of your phones has the Availvo app with notifications allowed yet.');
+  const r = await PUSH.notifyUsers([user.id], null, { title: 'Availvo test', body: 'Phone notifications are working.', url: '/app#/integrations' });
+  if (!r.sent) throw new Error(PUSH.devicesFor(user.id).map((d) => d.last_error).filter(Boolean)[0] || 'Nothing was delivered.');
+  return { ok: true, to: `${r.sent} phone${r.sent === 1 ? '' : 's'}` };
+}
+
 module.exports = {
-  status, check, checkTwilio, checkResend,
+  status, check, checkTwilio, checkResend, sendTestPush,
   sendTestEmail, sendTestSms, resendDomainStatus,
 };

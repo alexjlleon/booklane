@@ -18,6 +18,13 @@ const KEYS = {
   TWILIO_MESSAGING_SERVICE_SID: { secret: false, provider: 'twilio', label: 'Messaging Service SID' },
   RESEND_API_KEY: { secret: true, provider: 'resend', label: 'API key' },
   EMAIL_FROM: { secret: false, provider: 'resend', label: 'Send from' },
+  // Phone app notifications. Apple's are sent straight to APNs with a .p8 key; Android's go through
+  // Firebase Cloud Messaging with a service account. Both are platform-wide, like Twilio and Resend.
+  APNS_KEY_ID: { secret: false, provider: 'push', label: 'Apple key ID' },
+  APNS_TEAM_ID: { secret: false, provider: 'push', label: 'Apple team ID' },
+  APNS_PRIVATE_KEY: { secret: true, provider: 'push', label: 'Apple .p8 key' },
+  APNS_BUNDLE_ID: { secret: false, provider: 'push', label: 'iPhone app bundle ID' },
+  FCM_SERVICE_ACCOUNT: { secret: true, provider: 'push', label: 'Firebase service account JSON' },
 };
 
 const MASK = '•'.repeat(8);

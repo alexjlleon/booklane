@@ -25,9 +25,21 @@
       const { companies } = await api('GET', '/platform/companies');
       return `<div class="topbar"><div><h1>Companies</h1><div class="sub">Everyone on the platform. New companies get booking pages and limited email. Approving also turns on texting and their own domain.</div></div></div>
         <div class="panel table-wrap"><table class="t"><thead><tr><th>Company</th><th>Owner</th><th>Signed up</th><th>Bookings</th><th>Status</th><th></th></tr></thead>
-        <tbody>${companies.map(row).join('')}</tbody></table></div>`;
+        <tbody>${companies.map(row).join('')}</tbody></table></div>
+        <div class="panel"><h2>App store review login</h2>
+          <p class="desc">Apple and Google need a login to try the phone app. This makes (or refreshes) <b>Bright Oak Studio</b>, a made-up company with sample booking pages, calls and leads, and gives a new password each time. Never give reviewers a real company's login.</p>
+          <button type="button" class="btn btn-primary btn-sm" data-review-demo>Make the review login</button>
+          <div data-review-out class="small" style="margin-top:10px"></div></div>`;
     },
     mount(root) {
+      const demo = root.querySelector('[data-review-demo]');
+      if (demo) demo.addEventListener('click', async () => {
+        demo.disabled = true;
+        try {
+          const r = await api('POST', '/platform/review-demo', {});
+          root.querySelector('[data-review-out]').innerHTML = `<div class="ok-box">Email: <code class="code">${esc(r.email)}</code> <button type="button" class="btn btn-link btn-sm" data-copy="${esc(r.email)}">Copy</button><br>Password: <code class="code">${esc(r.password)}</code> <button type="button" class="btn btn-link btn-sm" data-copy="${esc(r.password)}">Copy</button><br>Paste both into App Store Connect (App Review Information) and Google Play (App access). The password changes if you press this again.</div>`;
+        } catch (e) { A.toast(e.message, true); } finally { demo.disabled = false; }
+      });
       $$('[data-co]', root).forEach((btn) => btn.addEventListener('click', async () => {
         btn.disabled = true;
         const val = btn.dataset.set === 'suspended' ? btn.dataset.val === 'true' : btn.dataset.val;

@@ -245,6 +245,14 @@ CREATE TABLE IF NOT EXISTS sms_optouts (
   phone TEXT NOT NULL, reason TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (business_id, phone)
 );
+-- Phones running the Availvo app that want notifications. One row per install: the token is what
+-- Apple (APNs) or Google (FCM) gives that install, and it is dropped as soon as either says it is dead.
+CREATE TABLE IF NOT EXISTS push_devices (
+  id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  platform TEXT NOT NULL, token TEXT NOT NULL UNIQUE, app_version TEXT, device_name TEXT,
+  last_error TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), last_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_push_devices_user ON push_devices (user_id);
 `;
 raw.exec(SCHEMA);
 // Lightweight migrations for databases created by earlier versions
@@ -331,6 +339,8 @@ for (const sql of [
   // booked yet) or 'no_show'. Set by the host's text reply or from Bookings; drives the follow-ups.
   'ALTER TABLE bookings ADD COLUMN outcome TEXT',
   'ALTER TABLE bookings ADD COLUMN outcome_at TEXT',
+  // Which phone notifications this person wants from the app: { bookings, leads, replies } (all on when unset).
+  "ALTER TABLE users ADD COLUMN push_prefs TEXT NOT NULL DEFAULT '{}'",
 ]) { try { raw.exec(sql); } catch { /* column already exists */ } }
 
 // Booklane no longer takes payments. Drop what the shop, the paid sessions and the card providers

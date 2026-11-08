@@ -283,3 +283,11 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
 /* How a past call went */
 .outcome-ctl { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
 .select.select-sm { padding: 4px 26px 4px 8px; font-size: 12.5px; height: auto; width: auto; }
+
+/* Inside the Availvo phone app the page runs edge to edge, so keep clear of the notch, the status
+   bar and the home indicator. env() is 0 in an ordinary browser, so none of this changes the web. */
+html.in-app .mobile-bar { padding-top: calc(12px + env(safe-area-inset-top)); }
+html.in-app .sidebar { padding-top: calc(18px + env(safe-area-inset-top)); padding-bottom: calc(18px + env(safe-area-inset-bottom)); }
+html.in-app .main { padding-bottom: calc(60px + env(safe-area-inset-bottom)); }
+html.in-app body:not(:has(.mobile-bar)) { padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+html.in-app { -webkit-tap-highlight-color: transparent; }
