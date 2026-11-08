@@ -145,6 +145,7 @@ function hydrateAutomation(a) {
 /** Does this automation apply to this booking? */
 function matches(a, ctx) {
   const bk = ctx._booking;
+  if (a.calls_only && ctx._et && ctx._et.kind === 'session') return false;
   if (a.event_type_ids.length && !a.event_type_ids.map(Number).includes(Number(bk.event_type_id))) return false;
   if (a.calendar_ids.length) {
     const cal = db.get('SELECT id FROM calendar_profiles WHERE user_id = ? AND business_id = ?', bk.host_user_id, bk.business_id);
@@ -207,17 +208,25 @@ function scheduleFor(booking, trigger, { now = Date.now() } = {}) {
     for (const channel of channelsOf(a)) {
       const to = channel === 'sms' ? sms.normalizeNumber(booking.phone) : (isEmail(booking.email) ? booking.email : null);
       if (!to) { result.skipped.push({ automation: a.id, channel, reason: channel === 'sms' ? 'no usable mobile number' : 'no email address' }); continue; }
+      // An email-and-text automation keeps sending its emails while texting is not connected yet.
+      if (channel === 'sms' && !sms.configured()) { result.skipped.push({ automation: a.id, channel, reason: 'texting is not connected yet' }); continue; }
       if (channel === 'sms' && !B.canText(B.byId(booking.business_id))) { result.skipped.push({ automation: a.id, channel, reason: 'texting is not turned on for this company' }); continue; }
       if (channel === 'sms' && isOptedOut(booking.business_id, to)) { result.skipped.push({ automation: a.id, channel, reason: 'they replied STOP' }); continue; }
       if (channel === 'sms' && !(a.sms_body || '').trim()) { result.skipped.push({ automation: a.id, channel, reason: 'no text written' }); continue; }
       if (channel === 'email' && !(a.body_html || '').trim()) { result.skipped.push({ automation: a.id, channel, reason: 'no email written' }); continue; }
 
       let due = dueAt(a, ctx, now);
-      // A "3 days before" rule on a booking made tomorrow has already passed. Send it now rather
-      // than dropping it, but never send a "before" message after the appointment has started.
+      // A "3 days before" rule on a booking made tomorrow has already passed. Normally it goes out
+      // now rather than being dropped; with skip_if_late it is skipped, so a call booked an hour out
+      // does not get the 3-day, 1-day and 2-hour reminders all at once. Never after it has started.
+      if (a.trigger === 'before' && due < now && a.skip_if_late) { result.skipped.push({ automation: a.id, channel, reason: 'booked too close to the appointment for this one' }); continue; }
       if (a.trigger === 'before' && due < now) due = ctx._start > now ? now : 0;
       if (!due) { result.skipped.push({ automation: a.id, channel, reason: 'the appointment already started' }); continue; }
-      if (channel === 'sms') due = holdForQuietHours(due, ctx._tz);
+      if (channel === 'sms') {
+        due = holdForQuietHours(due, ctx._tz);
+        // A reminder text for a 7am call would otherwise be held until 8am, after the call.
+        if (a.trigger === 'before' && due > ctx._start) { result.skipped.push({ automation: a.id, channel, reason: 'quiet hours would hold this text until after the appointment' }); continue; }
+      }
 
       const r = db.run(`INSERT OR IGNORE INTO scheduled_messages (business_id, automation_id, booking_id, lead_id, channel, to_addr, send_after, due_at)
         VALUES (?,?,?,?,?,?,?,?)`, booking.business_id, a.id, booking.id, booking.lead_id, channel, to, due, new Date(due).toISOString());
@@ -430,6 +439,11 @@ function handleInboundSms({ from, to, body, businessId, sid: providerSid }) {
     bizId, 'in', to || null, number, clampStr(body, 1000), word || 'received', providerSid || null);
 
   if (!number) return { action: 'ignored', reason: 'unreadable number' };
+  // A host answering the after-call question. Checked before START, because "yes" is both.
+  if (word !== 'stop') {
+    const hostReply = handleHostReply(number, body);
+    if (hostReply) return hostReply;
+  }
   if (word === 'stop') {
     const targets = bizId ? [bizId] : db.all('SELECT id FROM businesses').map((r) => r.id);
     for (const id of targets) db.run('INSERT OR IGNORE INTO sms_optouts (business_id, phone, reason) VALUES (?,?,?)', id, number, 'replied STOP');
@@ -443,6 +457,97 @@ function handleInboundSms({ from, to, body, businessId, sid: providerSid }) {
   return { action: 'logged', number, keyword: word };
 }
 
+// ---------------------------------------------------------------- after-call check to the host
+//
+// A few minutes after each call ends, the host gets a text asking whether the customer picked up.
+// Replying 1 records the call as held; 2 marks the booking a no-show, which also cancels any
+// follow-ups queued for it. Switched on per company (settings.host_check). Only people get it,
+// never market calendars, and only when they have a mobile number on their profile.
+
+const HOST_CHECK_WINDOW_MS = 16 * 3600000;   // never ask about a call that ended longer ago than this
+const HOST_REPLY_WINDOW = 48 * 3600000;      // a reply only counts against a question this recent
+
+function hostCheckText(booking, business, host) {
+  const et = db.get('SELECT name FROM event_types WHERE id = ?', booking.event_type_id);
+  const tz = host.timezone || business.timezone;
+  const who = String(booking.name || booking.email || 'the customer').trim().slice(0, 40);
+  return `${business.name}: did your ${T.formatTime(Date.parse(booking.start_utc), tz)} call with ${who}${et ? ` (${et.name})` : ''} happen? `
+    + 'Reply 1 if they picked up and the call was held, or 2 if it was a no-show.';
+}
+
+/** Called from the job loop. Sends the after-call question for calls that have just ended. */
+async function sendHostChecks({ now = Date.now() } = {}) {
+  if (!sms.configured()) return { sent: 0 };
+  let sent = 0;
+  for (const { id } of db.all('SELECT id FROM businesses WHERE suspended_at IS NULL')) {
+    const business = B.byId(id);
+    const cfg = (business.settings || {}).host_check || {};
+    if (!cfg.enabled || !B.canText(business)) continue;
+    const after = int(cfg.after_min, 10, 0, 720) * 60000;
+    const rows = db.all(`SELECT b.*, u.phone host_phone, u.timezone host_tz, u.name host_name, u.is_resource FROM bookings b
+      JOIN users u ON u.id = b.host_user_id
+      WHERE b.business_id = ? AND b.status = 'confirmed' AND b.host_check_sent_at IS NULL AND b.end_utc <= ? AND b.end_utc >= ?`,
+    id, new Date(now - after).toISOString(), new Date(now - HOST_CHECK_WINDOW_MS).toISOString());
+    for (const b of rows) {
+      const to = sms.normalizeNumber(b.host_phone);
+      if (b.is_resource || !to || isOptedOut(id, to)) continue;
+      // Respect quiet hours in the host's own timezone; the next run picks it up in the morning.
+      const due = holdForQuietHours(Date.parse(b.end_utc) + after, b.host_tz || business.timezone);
+      if (due > now) continue;
+      const body = hostCheckText(b, business, { timezone: b.host_tz });
+      // Claim it first, so an overlapping run can never text the same question twice.
+      if (!db.run('UPDATE bookings SET host_check_sent_at = ?, host_check_to = ? WHERE id = ? AND host_check_sent_at IS NULL', new Date(now).toISOString(), to, b.id).changes) continue;
+      try {
+        const r = await sms.sendSms({ to, body });
+        db.run('INSERT INTO sms_log (business_id, direction, to_addr, from_addr, body, status, provider_sid, segments) VALUES (?,?,?,?,?,?,?,?)',
+          id, 'out', to, sms.fromNumber() || sms.messagingService(), body, r.status || 'sent', r.sid, r.segments);
+        sent++;
+      } catch (e) {
+        db.run('INSERT INTO sms_log (business_id, direction, to_addr, body, status, error) VALUES (?,?,?,?,?,?)', id, 'out', to, body, 'failed', clampStr(e.message, 300));
+      }
+    }
+  }
+  return { sent };
+}
+
+/** 'held', 'no_show' or null, from a host's reply. */
+function hostAnswerOf(body) {
+  const t = String(body || '').trim().toLowerCase().replace(/[.!]+$/, '');
+  if (/^(1|y|yes|yep|yeah|held|done|picked up)$/.test(t)) return 'held';
+  if (/^(2|n|no|nope|no ?-?show|no answer|didn'?t pick up)$/.test(t)) return 'no_show';
+  return null;
+}
+
+/**
+ * A reply from a host to the after-call question. Answers the most recent open question sent to
+ * that number, then asks about the next one if more are waiting. Returns null when the text is
+ * not an answer, or nobody asked this number anything, so normal inbound handling carries on.
+ */
+function handleHostReply(number, body, now = Date.now()) {
+  const answer = hostAnswerOf(body);
+  if (!answer) return null;
+  const open = () => db.all(`SELECT * FROM bookings WHERE host_check_to = ? AND host_check_answer IS NULL AND host_check_sent_at >= ?
+    ORDER BY host_check_sent_at DESC, id DESC`, number, new Date(now - HOST_REPLY_WINDOW).toISOString());
+  const pending = open();
+  if (!pending.length) return null;
+  const b = pending[0];
+  const business = B.byId(b.business_id);
+  const host = db.get('SELECT name FROM users WHERE id = ?', b.host_user_id);
+  db.run('UPDATE bookings SET host_check_answer = ? WHERE id = ?', answer, b.id);
+  if (answer === 'no_show' && b.status === 'confirmed') {
+    db.run("UPDATE bookings SET status = 'no_show' WHERE id = ?", b.id);
+    try { cancelQueued(b.id, 'they did not show up for the call'); } catch (e) { console.error('[host check]', e.message); }
+  }
+  if (b.lead_id) {
+    try { B.logActivity(b.business_id, b.lead_id, 'booking', answer === 'no_show' ? `Marked as a no-show by ${host ? host.name : 'the host'} by text` : `${host ? host.name : 'The host'} confirmed the call was held`, { booking_id: b.id }); } catch (e) { /* log only */ }
+  }
+  const who = String(b.name || 'them').trim().split(/\s+/)[0];
+  let reply = answer === 'no_show' ? `Got it, ${who} is marked as a no-show.` : `Thanks, the call with ${who} is marked as held.`;
+  const next = open()[0];
+  if (next) reply += ` Next: ${hostCheckText(next, B.byId(next.business_id), { timezone: (db.get('SELECT timezone FROM users WHERE id = ?', next.host_user_id) || {}).timezone }).replace(/^[^:]*: /, '')}`;
+  return { action: 'host_check', booking_id: b.id, answer, business: business ? business.id : null, reply };
+}
+
 // ---------------------------------------------------------------- admin listing
 
 function listAutomations(businessId) {
@@ -453,7 +558,7 @@ function listAutomations(businessId) {
         SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) sent,
         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) failed
       FROM scheduled_messages WHERE automation_id = ?`, a.id) || {};
-    return { ...a, active: !!a.active, skip_if_rebooked: !!a.skip_if_rebooked, timing: describeTiming(a),
+    return { ...a, active: !!a.active, skip_if_rebooked: !!a.skip_if_rebooked, skip_if_late: !!a.skip_if_late, calls_only: !!a.calls_only, timing: describeTiming(a),
       queued: counts.queued || 0, sent: counts.sent || 0, failed: counts.failed || 0 };
   });
 }
@@ -486,6 +591,7 @@ function summary(businessId) {
 module.exports = {
   VARIABLES, TRIGGERS, contextFor, render, matches, hydrateAutomation, dueAt, holdForQuietHours,
   scheduleFor, cancelQueued, rescheduleQueued, processDue, sendOne, isOptedOut,
+  sendHostChecks, handleHostReply, hostAnswerOf, hostCheckText,
   preview, sampleContext, sendTest, describeTiming, handleInboundSms,
   listAutomations, listQueue, summary,
 };

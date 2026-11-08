@@ -261,6 +261,11 @@ module.exports = function publicRoutes(app) {
     }
     // Twilio sends its own STOP confirmation, so stay quiet and do not double-reply.
     res.set('X-Booklane-Action', (result && result.action) || 'none');
+    // A host answering the after-call question gets a short confirmation back.
+    if (result && result.reply) {
+      const xml = String(result.reply).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return res.text(`<Response><Message>${xml}</Message></Response>`, 'text/xml');
+    }
     return res.text('<Response/>', 'text/xml');
   });
 

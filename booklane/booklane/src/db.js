@@ -315,6 +315,18 @@ for (const sql of [
   'ALTER TABLE bookings ADD COLUMN handoff_note TEXT',
   // Email addresses of the people the customer invited to the call, as a JSON list.
   "ALTER TABLE bookings ADD COLUMN guests TEXT NOT NULL DEFAULT '[]'",
+  // Which shared template an automation was added from (see services/message-templates.js), so the
+  // library can show it as added. NULL for automations written from scratch.
+  'ALTER TABLE message_automations ADD COLUMN template_key TEXT',
+  // Skip a "before" message when the booking was made too close to the call for it to go out on
+  // time, rather than sending it straight away on top of the confirmation.
+  'ALTER TABLE message_automations ADD COLUMN skip_if_late INTEGER NOT NULL DEFAULT 0',
+  // Only for calls: leave sessions (photo shoots and the like) out.
+  'ALTER TABLE message_automations ADD COLUMN calls_only INTEGER NOT NULL DEFAULT 0',
+  // The after-call text to the host: when it went out, and what they answered ('held' | 'no_show').
+  'ALTER TABLE bookings ADD COLUMN host_check_sent_at TEXT',
+  'ALTER TABLE bookings ADD COLUMN host_check_to TEXT',
+  'ALTER TABLE bookings ADD COLUMN host_check_answer TEXT',
 ]) { try { raw.exec(sql); } catch { /* column already exists */ } }
 
 // Booklane no longer takes payments. Drop what the shop, the paid sessions and the card providers

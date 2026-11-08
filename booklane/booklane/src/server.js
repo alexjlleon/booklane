@@ -161,6 +161,7 @@ async function runJobs() {
     await L.processAbandoned();
     await BK.sendReminders();
     await MSG.processDue();
+    await MSG.sendHostChecks();
     // Refreshes every calendar sign-in every few hours and emails about any that need reconnecting.
     await CAL_HEALTH.run();
     db.run('DELETE FROM sessions WHERE expires_at < ?', Date.now());

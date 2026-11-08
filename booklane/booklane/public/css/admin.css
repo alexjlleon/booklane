@@ -277,3 +277,6 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
 .auto-filters .input, .auto-filters .select { width: auto; flex: 0 1 auto; min-width: 0; padding-top: 8px; padding-bottom: 8px; font-size: 14px; }
 .auto-filters input[type="search"] { flex: 1 1 220px; }
 @media (max-width: 640px) { .auto-filters .select, .auto-filters input[type="search"] { flex: 1 1 100%; } }
+/* Ready-made reminder templates on Automations */
+.tpl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; margin-top: 12px; }
+.tpl-card { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; background: var(--card, #fff); }

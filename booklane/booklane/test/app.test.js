@@ -2996,3 +2996,182 @@ test('Check a date box: off by default, turned on per company, public sees only 
   assert.match(String(pageHtml), /"date_check":\{"meeting":true,"event":true/);
   await req('PATCH', '/api/admin/business', { settings: { date_check: { meeting: false, event: false, available_text: '' } } }, { cookie: ownerCookie });
 });
+
+// ---------------------------------------------------------------- shared reminder templates
+const TPL = require('../src/services/message-templates');
+
+test('reminder templates: every company sees them, adding one turns it on for email and text, never twice', async () => {
+  freshLimits(); stubTwilio();
+  const bizId = db.get('SELECT id FROM businesses WHERE slug = ?', bizSlug).id;
+  db.run('DELETE FROM message_automations WHERE business_id = ? AND template_key IS NOT NULL', bizId);
+
+  // The copy itself: plain characters (one segment costs 1/3 as much), an opt-out, no misspelled fields.
+  for (const t of TPL.TEMPLATES) {
+    assert.equal(smsLib.segmentInfo(t.sms_body).encoding, 'GSM-7', `${t.key} text stays in GSM-7`);
+    assert.match(t.sms_body, /Reply STOP to opt out/, `${t.key} text says how to opt out`);
+    const p = await req('POST', '/api/admin/automations/preview', { channel: 'both', subject: t.subject, body_html: t.body_html, sms_body: t.sms_body }, { cookie: ownerCookie });
+    assert.deepEqual(p.data.unknown_variables, [], `${t.key} uses only real merge fields`);
+    assert.ok(!/[–—]/.test(t.subject + t.body_html + t.sms_body), `${t.key} has no long dashes`);
+  }
+
+  let list = await req('GET', '/api/admin/automations', null, { cookie: ownerCookie });
+  assert.equal(list.data.templates.length, TPL.TEMPLATES.length);
+  assert.ok(list.data.templates.every((t) => !t.added));
+
+  const one = await req('POST', '/api/admin/automations/templates', { key: 'call-1-day' }, { cookie: ownerCookie });
+  assert.equal(one.status, 200, JSON.stringify(one.data));
+  assert.equal(one.data.added, 1);
+  const made = one.data.automations[0];
+  assert.equal(made.channel, 'both');
+  assert.equal(made.active, true, 'added switched on, so it sends by itself');
+  assert.equal(made.offset_min, 1440);
+  assert.equal(made.skip_if_late, true);
+  assert.equal(made.calls_only, true);
+
+  const all = await req('POST', '/api/admin/automations/templates', {}, { cookie: ownerCookie });
+  assert.equal(all.data.added, TPL.TEMPLATES.length - 1, 'add all skips the one already added');
+  const again = await req('POST', '/api/admin/automations/templates', {}, { cookie: ownerCookie });
+  assert.equal(again.data.added, 0, 'pressing it twice never doubles messages');
+  list = await req('GET', '/api/admin/automations', null, { cookie: ownerCookie });
+  assert.ok(list.data.templates.every((t) => t.added && t.automation_active));
+
+  assert.equal((await req('POST', '/api/admin/automations/templates', { key: 'nope' }, { cookie: ownerCookie })).status, 404);
+
+  // A second, unrelated company sees the same library, none of it added yet.
+  const other = await signup('tpl-other@test.dev', 'Template Two');
+  const theirs = await req('GET', '/api/admin/automations/templates', null, { cookie: other });
+  assert.equal(theirs.data.templates.length, TPL.TEMPLATES.length);
+  assert.ok(theirs.data.templates.every((t) => !t.added));
+});
+
+test('templates skip reminders that would arrive late, and leave sessions out', async () => {
+  freshLimits(); stubTwilio();
+  const bizId = db.get('SELECT id FROM businesses WHERE slug = ?', bizSlug).id;
+  const autos = db.all('SELECT id, template_key FROM message_automations WHERE business_id = ? AND template_key IS NOT NULL', bizId);
+  const idOf = (k) => autos.find((a) => a.template_key === k).id;
+
+  const call = db.get(`SELECT b.* FROM bookings b JOIN event_types e ON e.id = b.event_type_id
+    WHERE b.business_id = ? AND e.kind != 'session' AND b.status = 'confirmed' ORDER BY b.id DESC LIMIT 1`, bizId);
+  assert.ok(call, 'a call booking exists from earlier tests');
+  const keep = { start: call.start_utc, end: call.end_utc, phone: call.phone };
+  // A call at 2pm Chicago tomorrow, booked 40 minutes before... modelled by "now" being 40 minutes out.
+  const start = T.zonedToUtc(T.addDays(T.utcToZoned(Date.now(), 'America/Chicago').date, 1), 14 * 60, 'America/Chicago');
+  db.run("UPDATE bookings SET start_utc = ?, end_utc = ?, phone = '2145550101', invitee_tz = 'America/Chicago' WHERE id = ?", new Date(start).toISOString(), new Date(start + 1800000).toISOString(), call.id);
+  db.run('DELETE FROM scheduled_messages WHERE booking_id = ?', call.id);
+  const b = db.get('SELECT * FROM bookings WHERE id = ?', call.id);
+
+  const r = MSG.scheduleFor(b, 'before', { now: start - 40 * 60000 });
+  const q = db.all('SELECT automation_id, channel FROM scheduled_messages WHERE booking_id = ?', call.id);
+  const got = (k) => q.filter((x) => x.automation_id === idOf(k)).map((x) => x.channel).sort();
+  assert.deepEqual(got('call-15-min'), ['email', 'sms'], 'the 15-minute one goes by email and text');
+  for (const k of ['call-3-days', 'call-1-day', 'call-2-hours']) {
+    assert.deepEqual(got(k), [], `${k} is skipped rather than piled on`);
+    assert.ok(r.skipped.some((s) => s.automation === idOf(k) && /too close/.test(s.reason)));
+  }
+
+  // Booked well ahead, every reminder is queued on both channels.
+  db.run('DELETE FROM scheduled_messages WHERE booking_id = ?', call.id);
+  MSG.scheduleFor(b, 'before', { now: start - 5 * 86400000 });
+  const q2 = db.all('SELECT automation_id, channel FROM scheduled_messages WHERE booking_id = ?', call.id);
+  for (const k of ['call-3-days', 'call-1-day', 'call-2-hours', 'call-15-min']) assert.equal(q2.filter((x) => x.automation_id === idOf(k)).length, 2, `${k} queued twice`);
+  db.run('DELETE FROM scheduled_messages WHERE booking_id = ?', call.id);
+  db.run('UPDATE bookings SET start_utc = ?, end_utc = ?, phone = ? WHERE id = ?', keep.start, keep.end, keep.phone, call.id);
+
+  // Sessions are not calls.
+  const sess = db.get(`SELECT b.* FROM bookings b JOIN event_types e ON e.id = b.event_type_id
+    WHERE b.business_id = ? AND e.kind = 'session' ORDER BY b.id DESC LIMIT 1`, bizId);
+  const rs = MSG.scheduleFor({ ...sess, start_utc: new Date(Date.now() + 10 * 86400000).toISOString() }, 'before', { now: Date.now() });
+  for (const a of autos) assert.ok(!db.get('SELECT 1 FROM scheduled_messages WHERE booking_id = ? AND automation_id = ? AND status = ?', sess.id, a.id, 'queued') || rs.queued === 0, 'no template reminder for a session');
+  assert.ok(autos.every((a) => rs.skipped.some((s) => s.automation === a.id && s.reason === 'conditions did not match') || !['call-3-days', 'call-1-day', 'call-2-hours', 'call-15-min'].includes(a.template_key)));
+
+  // Clean up so later tests see only their own automations.
+  db.run('DELETE FROM message_automations WHERE business_id = ? AND template_key IS NOT NULL', bizId);
+});
+
+test('a reminder text is skipped when quiet hours would hold it past the call', () => {
+  stubTwilio();
+  const bizId = db.get('SELECT id FROM businesses WHERE slug = ?', bizSlug).id;
+  const id = db.run(`INSERT INTO message_automations (business_id, name, channel, trigger, offset_min, sms_body, body_html, active)
+    VALUES (?, 'Early', 'both', 'before', 60, 'Hi {{first_name}}. Reply STOP to opt out.', 'Hi', 1)`, bizId).lastId;
+  const call = db.get(`SELECT b.* FROM bookings b JOIN event_types e ON e.id = b.event_type_id WHERE b.business_id = ? AND e.kind != 'session' AND b.status = 'confirmed' ORDER BY b.id DESC LIMIT 1`, bizId);
+  // 7:30am call: an hour before is 6:30am, held to 8am, which is after the call.
+  const start = T.zonedToUtc(T.addDays(T.utcToZoned(Date.now(), 'America/Chicago').date, 2), 7 * 60 + 30, 'America/Chicago');
+  const b = { ...call, start_utc: new Date(start).toISOString(), invitee_tz: 'America/Chicago', phone: '2145550102' };
+  db.run('DELETE FROM scheduled_messages WHERE booking_id = ?', call.id);
+  const r = MSG.scheduleFor(b, 'before', { now: Date.now() });
+  assert.ok(r.skipped.some((s) => s.automation === id && s.channel === 'sms' && /quiet hours/.test(s.reason)));
+  assert.ok(db.get("SELECT 1 FROM scheduled_messages WHERE automation_id = ? AND channel = 'email'", id), 'the email still goes');
+  db.run('DELETE FROM message_automations WHERE id = ?', id);
+});
+
+// ---------------------------------------------------------------- after-call question to the host
+test('after the call the host is texted once, and replying 2 marks a no-show', async () => {
+  freshLimits(); stubTwilio();
+  const oldStart = process.env.SMS_QUIET_START_HOUR; const oldEnd = process.env.SMS_QUIET_END_HOUR;
+  process.env.SMS_QUIET_START_HOUR = '0'; process.env.SMS_QUIET_END_HOUR = '24';   // whatever time the tests run
+  try {
+    const bizId = db.get('SELECT id FROM businesses WHERE slug = ?', bizSlug).id;
+    const owner = db.get("SELECT id FROM users WHERE email = 'owner@test.dev'");
+    db.run("UPDATE users SET phone = '(832) 555-7000' WHERE id = ?", owner.id);
+
+    // Off by default: nothing is sent.
+    let view = await req('GET', '/api/admin/automations', null, { cookie: ownerCookie });
+    assert.equal(view.data.host_check.enabled, false);
+    assert.match(view.data.host_check.sample, /Reply 1 .* or 2 if it was a no-show/);
+
+    const call = db.get(`SELECT b.* FROM bookings b JOIN event_types e ON e.id = b.event_type_id WHERE b.business_id = ? AND e.kind != 'session' AND b.status = 'confirmed' ORDER BY b.id DESC LIMIT 1`, bizId);
+    const keep = { start: call.start_utc, end: call.end_utc, host: call.host_user_id };
+    const ended = Date.now() - 20 * 60000;
+    db.run('UPDATE bookings SET start_utc = ?, end_utc = ?, host_user_id = ?, host_check_sent_at = NULL, host_check_answer = NULL WHERE id = ?',
+      new Date(ended - 1800000).toISOString(), new Date(ended).toISOString(), owner.id, call.id);
+    const queuedFollowUp = db.run("INSERT INTO scheduled_messages (business_id, booking_id, channel, to_addr, status, send_after) VALUES (?,?,'email','x@x.dev','queued',?)", bizId, call.id, Date.now() + 86400000).lastId;
+
+    assert.equal((await MSG.sendHostChecks()).sent, 0, 'not sent while switched off');
+
+    const on = await req('PUT', '/api/admin/automations/host-check', { enabled: true, after_min: 10 }, { cookie: ownerCookie });
+    assert.equal(on.status, 200, JSON.stringify(on.data));
+    assert.equal(on.data.enabled, true);
+
+    const first = await MSG.sendHostChecks();
+    assert.equal(first.sent, 1);
+    const mine = sentTexts.filter((t) => t.to === '+18325557000');
+    assert.equal(mine.length, 1);
+    assert.match(mine[0].body, /did your .* call with .* happen\? Reply 1 .* 2 if it was a no-show/);
+    assert.equal((await MSG.sendHostChecks()).sent, 0, 'never asked twice');
+
+    // Something that is not an answer is left to normal inbound handling.
+    assert.notEqual(MSG.handleInboundSms({ from: '+18325557000', body: 'who is this?' }).action, 'host_check');
+
+    // Reply through the real webhook, signed the way Twilio signs.
+    const params = { From: '+18325557000', To: '+18325550000', Body: '2', MessageSid: 'SM_hc_1' };
+    const crypto2 = require('node:crypto');
+    const url = `${base}/api/public/sms/inbound`;
+    const sig = crypto2.createHmac('sha1', process.env.TWILIO_AUTH_TOKEN).update(Buffer.from(Object.keys(params).sort().reduce((acc, k) => acc + k + params[k], url), 'utf8')).digest('base64');
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Twilio-Signature': sig }, body: new URLSearchParams(params).toString() });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('x-booklane-action'), 'host_check');
+    assert.match(await res.text(), /<Message>Got it, .* is marked as a no-show\.<\/Message>/);
+
+    const after = db.get('SELECT status, host_check_answer FROM bookings WHERE id = ?', call.id);
+    assert.equal(after.status, 'no_show');
+    assert.equal(after.host_check_answer, 'no_show');
+    assert.equal(db.get('SELECT status FROM scheduled_messages WHERE id = ?', queuedFollowUp).status, 'cancelled', 'follow-ups for a no-show are pulled');
+
+    // A second reply has nothing open to answer, so it does not change anything.
+    assert.notEqual(MSG.handleInboundSms({ from: '+18325557000', body: '1' }).action, 'host_check');
+
+    // "1" on a fresh question records it as held and leaves the booking confirmed.
+    db.run("UPDATE bookings SET status = 'confirmed', host_check_sent_at = NULL, host_check_answer = NULL WHERE id = ?", call.id);
+    await MSG.sendHostChecks();
+    const held = MSG.handleInboundSms({ from: '+18325557000', body: 'Yes' });
+    assert.equal(held.action, 'host_check');
+    assert.equal(held.answer, 'held');
+    assert.equal(db.get('SELECT status FROM bookings WHERE id = ?', call.id).status, 'confirmed');
+
+    await req('PUT', '/api/admin/automations/host-check', { enabled: false, after_min: 10 }, { cookie: ownerCookie });
+    db.run('UPDATE bookings SET start_utc = ?, end_utc = ?, host_user_id = ? WHERE id = ?', keep.start, keep.end, keep.host, call.id);
+  } finally {
+    if (oldStart === undefined) delete process.env.SMS_QUIET_START_HOUR; else process.env.SMS_QUIET_START_HOUR = oldStart;
+    if (oldEnd === undefined) delete process.env.SMS_QUIET_END_HOUR; else process.env.SMS_QUIET_END_HOUR = oldEnd;
+  }
+});

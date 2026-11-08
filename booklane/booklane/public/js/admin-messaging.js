@@ -41,10 +41,13 @@
         ${stat('Opted out of texts', s.optouts, 'replied STOP')}
       </div>
 
+      ${templatesPanel(d)}
+      ${hostCheckPanel(d)}
+
       <div class="panel">
         <div class="panel-head"><div><h2>Your automations</h2><p class="desc" style="margin:0">Texts are held until ${s.quiet_hours.to}am in the customer's own timezone.</p></div></div>
         ${d.automations.length ? `${toolbar(d)}<div id="auto-list">${listHtml(d)}</div>` : `<div class="empty-state"><h3>Nothing scheduled yet</h3>
-          <p>Add a reminder before the appointment, a thank-you after it, or a nudge for consults that did not book. You write the words; the timing and conditions are set here.</p>
+          <p>Add the ready-made reminders above in one click, or write your own: a reminder before the appointment, a thank-you after it, or a nudge for consults that did not book.</p>
           <button type="button" class="btn btn-primary" data-new>Write your first one</button></div>`}
       </div>`;
     },
@@ -62,6 +65,23 @@
         }
         if (e.target.closest('[data-clear-view]')) { Object.assign(view, VIEW_DEFAULTS); saveView(); return A.render(); }
         if (e.target.closest('[data-new]')) return editAutomation(null);
+        const tpl = e.target.closest('[data-add-template]');
+        if (tpl) return (async () => {
+          tpl.disabled = true;
+          const key = tpl.dataset.addTemplate;
+          try {
+            const r = await A.guard(() => api('POST', '/automations/templates', key === '*' ? {} : { key }), null);
+            A.toast(r.added
+              ? `${r.added === 1 ? 'Added and switched on' : `${r.added} reminders added and switched on`}.${r.texting_ready ? '' : ' Emails start now; texts start once texting is connected.'}`
+              : 'Those are already added');
+            A.render();
+          } catch (err) { tpl.disabled = false; }
+        })();
+        if (e.target.closest('[data-host-check-save]')) return (async () => {
+          const box = $('#host-check', root);
+          const body = { enabled: $('[name="hc_enabled"]', box).checked, after_min: Number($('[name="hc_after"]', box).value) || 0 };
+          try { await A.guard(() => api('PUT', '/automations/host-check', body), body.enabled ? 'Hosts will be asked after each call' : 'After-call texts switched off'); A.render(); } catch (err) { /* toast shown */ }
+        })();
         const ed = e.target.closest('[data-edit]');
         if (ed) return editAutomation((A.cache.auto.automations || []).find((a) => a.id === Number(ed.dataset.edit)));
         const cl = e.target.closest('[data-clone]');
@@ -76,6 +96,54 @@
       });
     },
   });
+
+  // ------------------------------------------------------------ ready-made templates
+  // The same library for every company. Adding one copies it into this company's automations,
+  // switched on, where it can be edited like anything else.
+  function templatesPanel(d) {
+    const list = d.templates || [];
+    if (!list.length) return '';
+    const left = list.filter((t) => !t.added).length;
+    const canAdd = ['owner', 'admin'].includes(((A.me && A.me.business) || {}).role);
+    const card = (t) => `<div class="tpl-card">
+        <div class="row between" style="gap:8px;align-items:flex-start">
+          <div><b>${esc(t.name)}</b><div class="small muted">${esc(t.timing)} · Email and text</div></div>
+          ${t.added
+    ? `<span class="row" style="gap:6px;flex:none"><span class="pill ${t.automation_active ? 'won' : 'lost'}">${t.automation_active ? 'Added' : 'Added, off'}</span><button type="button" class="btn btn-link btn-sm" data-edit="${t.automation_id}">Edit</button></span>`
+    : canAdd ? `<button type="button" class="btn btn-ghost btn-sm" style="flex:none" data-add-template="${esc(t.key)}">Add</button>` : ''}
+        </div>
+        <p class="small" style="margin:6px 0 0">${esc(t.blurb)}</p>
+        <details class="small" style="margin-top:6px"><summary class="muted" style="cursor:pointer">See the wording</summary>
+          <div style="margin-top:6px"><b>Text:</b> <span style="white-space:pre-wrap">${esc(t.sms_body)}</span></div>
+          <div style="margin-top:6px"><b>Email:</b> ${esc(t.subject)}<div class="muted" style="white-space:pre-wrap;margin-top:2px">${esc(t.body_html)}</div></div>
+        </details>
+      </div>`;
+    return `<div class="panel">
+      <div class="panel-head"><div><h2>Ready-made reminders</h2><p class="desc" style="margin:0">Each one sends an email and a text on its own. They are for calls only, skip themselves when someone books too close to the call, and can be edited once added.</p></div>
+        ${left && canAdd ? `<button type="button" class="btn btn-primary" data-add-template="*">Add all ${left === list.length ? list.length : `${left} remaining`}</button>` : ''}</div>
+      <div class="tpl-grid">${list.map(card).join('')}</div>
+      ${d.sms && !d.sms.ready ? '<p class="small muted" style="margin:10px 0 0">Texting is not connected yet, so these send emails for now. Texts start on their own once it is.</p>' : ''}
+    </div>`;
+  }
+
+  // ------------------------------------------------------------ after-call question to the host
+  function hostCheckPanel(d) {
+    const h = d.host_check;
+    if (!h) return '';
+    const canEdit = ['owner', 'admin'].includes(((A.me && A.me.business) || {}).role);
+    return `<div class="panel" id="host-check">
+      <div class="panel-head"><div><h2>Ask the host if the call happened</h2><p class="desc" style="margin:0">A few minutes after each call ends, the host gets a text. Replying <b>1</b> records it as held; <b>2</b> marks it a no-show and cancels any follow-ups for it.</p></div></div>
+      <div class="row" style="gap:16px;align-items:center;flex-wrap:wrap">
+        <label class="check"><input type="checkbox" name="hc_enabled" ${h.enabled ? 'checked' : ''} ${canEdit ? '' : 'disabled'}><span>Text the host after each call</span></label>
+        <label class="row small" style="gap:6px">Send it <input class="input" style="max-width:80px" type="number" min="0" max="720" name="hc_after" value="${esc(String(h.after_min))}" ${canEdit ? '' : 'disabled'}> minutes after the call ends</label>
+        ${canEdit ? '<button type="button" class="btn btn-ghost btn-sm" data-host-check-save>Save</button>' : ''}
+      </div>
+      <div class="panel" style="padding:12px;margin:12px 0 0;white-space:pre-wrap;background:#eef6ff;border-color:#cfe2f7">${esc(h.sample)}</div>
+      ${h.texting_ready ? '' : '<p class="small" style="margin:8px 0 0;color:#b26b00">Texting is not connected for this company yet, so nothing will send until it is.</p>'}
+      ${h.missing_phone.length ? `<p class="small muted" style="margin:8px 0 0">No mobile number on file, so they will not be asked: ${h.missing_phone.map(esc).join(', ')}. Each person adds theirs under their profile.</p>` : ''}
+      <p class="small muted" style="margin:8px 0 0">Not sent during quiet hours (before ${d.summary.quiet_hours.to}am or after ${d.summary.quiet_hours.from > 12 ? d.summary.quiet_hours.from - 12 : d.summary.quiet_hours.from}pm in the host's timezone), and never about a call that ended more than 16 hours ago.</p>
+    </div>`;
+  }
 
   // ------------------------------------------------------------ filtering and sorting
   const VIEW_DEFAULTS = { team: 'all', q: '', when: 'all', channel: 'all', status: 'all', page: 'all', kind: 'all', sort: 'timeline' };
@@ -239,6 +307,8 @@
     `One per line. Matches loosely, so "photo booth" catches "Photo Booth (3 hours)".${d.services.length ? ` You have: ${d.services.slice(0, 8).map(esc).join(', ')}${d.services.length > 8 ? '…' : ''}` : ''}`)}
         ${A.field('Match', A.select('match_mode', a ? a.match_mode : 'any', { any: 'Any one of them is enough', all: 'They must want all of them' }))}
         ${A.toggle('skip_if_rebooked', a ? a.skip_if_rebooked : false, 'Skip if they have already booked something else since')}
+        ${A.toggle('calls_only', a ? a.calls_only : false, 'Calls only (leave sessions out)')}
+        ${A.toggle('skip_if_late', a ? a.skip_if_late : false, 'Skip a "before" message when they book too close to the appointment for it to go out on time')}
       </div>
 
       <div class="panel stack">

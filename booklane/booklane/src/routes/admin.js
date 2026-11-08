@@ -23,6 +23,7 @@ const FORMS = require('../services/forms');
 const FSTYLE = require('../services/form-style');
 const UP = require('../services/uploads');
 const MSG = require('../services/messaging');
+const TPL = require('../services/message-templates');
 const sms = require('../lib/sms');
 const appConfig = require('../lib/config');
 const providers = require('../services/providers');
@@ -1215,6 +1216,8 @@ module.exports = function adminRoutes(app) {
       service_match: strings(body.service_match, existing ? db.json(existing.service_match, []) : []),
       match_mode: body.match_mode === 'all' ? 'all' : 'any',
       skip_if_rebooked: body.skip_if_rebooked !== undefined ? (bool(body.skip_if_rebooked) ? 1 : 0) : (existing?.skip_if_rebooked ?? 0),
+      skip_if_late: body.skip_if_late !== undefined ? (bool(body.skip_if_late) ? 1 : 0) : (existing?.skip_if_late ?? 0),
+      calls_only: body.calls_only !== undefined ? (bool(body.calls_only) ? 1 : 0) : (existing?.calls_only ?? 0),
       subject: clampStr(body.subject || '', 200),
       body_html: clampStr(body.body_html || '', 20000),
       sms_body: clampStr(body.sms_body || '', 1600),
@@ -1225,8 +1228,10 @@ module.exports = function adminRoutes(app) {
       // Refuse to switch on something that would send nothing, or nothing sendable.
       if ((channel === 'email' || channel === 'both') && !out.body_html.trim()) throw new HttpError(422, 'Write the email before switching this on', { body_html: 'Required' });
       if ((channel === 'sms' || channel === 'both') && !out.sms_body.trim()) throw new HttpError(422, 'Write the text before switching this on', { sms_body: 'Required' });
-      if ((channel === 'sms' || channel === 'both') && !B.canText(B.byId(bid(req)))) throw new HttpError(422, 'Texting is not turned on for your company yet, so this cannot send texts.', { channel: 'Texts are not turned on' });
-      if ((channel === 'sms' || channel === 'both') && !sms.configured()) throw new HttpError(422, 'Text messaging is not connected yet, so this cannot send texts.', { channel: 'Texts are not set up' });
+      // Email-and-text automations may be switched on before texting is ready: the emails go out
+      // and the texts start once texting is connected. Text-only ones would send nothing, so refuse.
+      if (channel === 'sms' && !B.canText(B.byId(bid(req)))) throw new HttpError(422, 'Texting is not turned on for your company yet, so this cannot send texts.', { channel: 'Texts are not turned on' });
+      if (channel === 'sms' && !sms.configured()) throw new HttpError(422, 'Text messaging is not connected yet, so this cannot send texts.', { channel: 'Texts are not set up' });
     }
     return out;
   }
@@ -1239,6 +1244,8 @@ module.exports = function adminRoutes(app) {
       summary: MSG.summary(businessId),
       triggers: MSG.TRIGGERS,
       variables: MSG.VARIABLES,
+      templates: templateList(businessId),
+      host_check: hostCheckView(businessId),
       event_types: db.all('SELECT id, name, kind, team_id FROM event_types WHERE business_id = ? ORDER BY sort, id', businessId),
       teams: ORG.listTeams(businessId).map((t) => ({ id: t.id, name: t.name, color: t.color })),
       calendars: SESS.listCalendars(businessId, { includeInactive: true }).map((c) => ({ id: c.id, name: c.name, kind: c.kind })),
@@ -1257,10 +1264,10 @@ module.exports = function adminRoutes(app) {
     const f = automationIn(req, null);
     const sort = (db.get('SELECT MAX(sort) m FROM message_automations WHERE business_id = ?', bid(req)) || {}).m || 0;
     const { lastId } = db.run(`INSERT INTO message_automations (business_id, name, channel, kind, trigger, offset_min,
-        event_type_ids, calendar_ids, service_match, match_mode, skip_if_rebooked, subject, body_html, sms_body, active, sort, team_id)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        event_type_ids, calendar_ids, service_match, match_mode, skip_if_rebooked, subject, body_html, sms_body, active, sort, team_id, skip_if_late, calls_only)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     bid(req), f.name, f.channel, f.kind, f.trigger, f.offset_min, f.event_type_ids, f.calendar_ids, f.service_match,
-    f.match_mode, f.skip_if_rebooked, f.subject, f.body_html, f.sms_body, f.active, sort + 1, f.team_id);
+    f.match_mode, f.skip_if_rebooked, f.subject, f.body_html, f.sms_body, f.active, sort + 1, f.team_id, f.skip_if_late, f.calls_only);
     return MSG.listAutomations(bid(req)).find((a) => a.id === lastId);
   });
 
@@ -1275,13 +1282,13 @@ module.exports = function adminRoutes(app) {
     const existing = getAutomation(req);
     const f = automationIn(req, existing);
     db.run(`UPDATE message_automations SET name=?, channel=?, kind=?, trigger=?, offset_min=?, event_type_ids=?, calendar_ids=?,
-        service_match=?, match_mode=?, skip_if_rebooked=?, subject=?, body_html=?, sms_body=?, active=?, team_id=?, updated_at=datetime('now')
+        service_match=?, match_mode=?, skip_if_rebooked=?, subject=?, body_html=?, sms_body=?, active=?, team_id=?, skip_if_late=?, calls_only=?, updated_at=datetime('now')
       WHERE id = ? AND business_id = ?`,
     f.name, f.channel, f.kind, f.trigger, f.offset_min, f.event_type_ids, f.calendar_ids, f.service_match,
-    f.match_mode, f.skip_if_rebooked, f.subject, f.body_html, f.sms_body, f.active, f.team_id, existing.id, bid(req));
+    f.match_mode, f.skip_if_rebooked, f.subject, f.body_html, f.sms_body, f.active, f.team_id, f.skip_if_late, f.calls_only, existing.id, bid(req));
     // Timing, conditions or wording may have changed, so anything not yet sent is stale. A change
     // to the team label (or the name) alone sends nothing differently, so the queue is left alone.
-    const sends = ['channel', 'kind', 'trigger', 'offset_min', 'event_type_ids', 'calendar_ids', 'service_match', 'match_mode', 'skip_if_rebooked', 'subject', 'body_html', 'sms_body', 'active'];
+    const sends = ['channel', 'kind', 'trigger', 'offset_min', 'event_type_ids', 'calendar_ids', 'service_match', 'match_mode', 'skip_if_rebooked', 'skip_if_late', 'calls_only', 'subject', 'body_html', 'sms_body', 'active'];
     const changed = sends.some((k) => String(f[k] ?? '') !== String(existing[k] ?? ''));
     const dropped = changed ? db.run("UPDATE scheduled_messages SET status = 'cancelled', skip_reason = 'the automation was edited' WHERE automation_id = ? AND status = 'queued'", existing.id).changes : 0;
     const out = MSG.listAutomations(bid(req)).find((a) => a.id === existing.id);
@@ -1295,11 +1302,82 @@ module.exports = function adminRoutes(app) {
     const a = getAutomation(req);
     const sort = (db.get('SELECT MAX(sort) m FROM message_automations WHERE business_id = ?', bid(req)) || {}).m || 0;
     const { lastId } = db.run(`INSERT INTO message_automations (business_id, name, channel, kind, trigger, offset_min,
-        event_type_ids, calendar_ids, service_match, match_mode, skip_if_rebooked, subject, body_html, sms_body, active, sort, team_id)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)`,
+        event_type_ids, calendar_ids, service_match, match_mode, skip_if_rebooked, subject, body_html, sms_body, active, sort, team_id, skip_if_late, calls_only)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?)`,
     a.business_id, `${a.name} (copy)`.slice(0, 200), a.channel, a.kind, a.trigger, a.offset_min, a.event_type_ids, a.calendar_ids,
-    a.service_match, a.match_mode, a.skip_if_rebooked, a.subject, a.body_html, a.sms_body, sort + 1, a.team_id);
+    a.service_match, a.match_mode, a.skip_if_rebooked, a.subject, a.body_html, a.sms_body, sort + 1, a.team_id, a.skip_if_late || 0, a.calls_only || 0);
     return MSG.listAutomations(bid(req)).find((x) => x.id === lastId);
+  });
+
+  // ---------- Shared templates (the same library for every company) ----------
+  function templateList(businessId) {
+    const added = new Map(db.all('SELECT id, template_key, active FROM message_automations WHERE business_id = ? AND template_key IS NOT NULL', businessId)
+      .map((r) => [r.template_key, r]));
+    return TPL.TEMPLATES.map((t) => {
+      const mine = added.get(t.key);
+      return { ...t, timing: MSG.describeTiming(t), added: !!mine, automation_id: mine ? mine.id : null, automation_active: mine ? !!mine.active : false };
+    });
+  }
+
+  // Copies templates into this company's automations, switched on so they start sending right away.
+  // Ones already added are left alone, so pressing "Add all" twice never doubles anyone's messages.
+  function addTemplates(businessId, keys) {
+    const have = new Set(db.all('SELECT template_key FROM message_automations WHERE business_id = ? AND template_key IS NOT NULL', businessId).map((r) => r.template_key));
+    const made = [];
+    for (const key of keys) {
+      const t = TPL.byKey(key);
+      if (!t || have.has(key)) continue;
+      const sort = (db.get('SELECT MAX(sort) m FROM message_automations WHERE business_id = ?', businessId) || {}).m || 0;
+      made.push(db.run(`INSERT INTO message_automations (business_id, name, channel, kind, trigger, offset_min, subject, body_html, sms_body,
+          active, sort, skip_if_late, calls_only, template_key) VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,?)`,
+      businessId, t.name, t.channel, t.kind, t.trigger, t.offset_min, t.subject, t.body_html, t.sms_body, sort + 1, t.skip_if_late, t.calls_only, t.key).lastId);
+      have.add(key);
+    }
+    return made;
+  }
+
+  app.get('/api/admin/automations/templates', (req) => {
+    requireRole('host')(req);
+    return { templates: templateList(bid(req)) };
+  });
+
+  app.post('/api/admin/automations/templates', (req) => {
+    requireRole('admin')(req);
+    const body = req.body || {};
+    const keys = Array.isArray(body.keys) ? body.keys.map(String) : body.key ? [String(body.key)] : TPL.TEMPLATES.map((t) => t.key);
+    const unknown = keys.filter((k) => !TPL.byKey(k));
+    if (unknown.length) throw new HttpError(404, 'That template does not exist');
+    const made = addTemplates(bid(req), keys);
+    const list = MSG.listAutomations(bid(req));
+    return {
+      added: made.length,
+      automations: list.filter((a) => made.includes(a.id)),
+      texting_ready: sms.configured() && B.canText(B.byId(bid(req))),
+    };
+  });
+
+  // ---------- After-call question to the host ----------
+  function hostCheckView(businessId) {
+    const b = B.byId(businessId);
+    const cfg = b.settings.host_check || { enabled: false, after_min: 10 };
+    const hosts = db.all(`SELECT u.id, u.name, u.phone FROM users u JOIN memberships m ON m.user_id = u.id
+      WHERE m.business_id = ? AND u.is_resource = 0 ORDER BY u.name`, businessId);
+    return {
+      enabled: !!cfg.enabled, after_min: cfg.after_min ?? 10,
+      texting_ready: sms.configured() && B.canText(b),
+      missing_phone: hosts.filter((h) => !sms.normalizeNumber(h.phone)).map((h) => h.name),
+      sample: MSG.hostCheckText({ start_utc: new Date(Date.now() - 3600000).toISOString(), name: 'Dana Ruiz', event_type_id: 0 }, b, { timezone: b.timezone }),
+    };
+  }
+
+  app.put('/api/admin/automations/host-check', (req) => {
+    requireRole('admin')(req);
+    const body = req.body || {};
+    const b = B.byId(bid(req));
+    const raw = db.json(db.get('SELECT settings FROM businesses WHERE id = ?', b.id).settings, {});
+    raw.host_check = { enabled: bool(body.enabled), after_min: int(body.after_min, 10, 0, 720) };
+    db.run('UPDATE businesses SET settings = ? WHERE id = ?', JSON.stringify(raw), b.id);
+    return hostCheckView(b.id);
   });
 
   app.delete('/api/admin/automations/:id', (req) => {
