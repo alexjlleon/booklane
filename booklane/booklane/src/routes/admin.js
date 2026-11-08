@@ -1533,7 +1533,7 @@ module.exports = function adminRoutes(app) {
   // ---------- Team ----------
   app.get('/api/admin/team', (req) => {
     requireRole('host')(req);
-    return db.all("SELECT u.id, u.name, u.email, u.timezone, m.role, m.status, COALESCE(m.level, 'staff') level FROM users u JOIN memberships m ON m.user_id = u.id WHERE m.business_id = ? AND COALESCE(u.is_resource,0) = 0 ORDER BY m.status, u.name", bid(req)).map((m) => ({ ...m, has_hours: !!db.get('SELECT 1 FROM availability_rules WHERE user_id = ?', m.id), calendars: db.all('SELECT provider, account_email FROM calendar_connections WHERE user_id = ?', m.id), teams: ORG.teamsOf(bid(req), m.id) }));
+    return db.all("SELECT u.id, u.name, u.email, u.phone, u.timezone, m.role, m.status, COALESCE(m.level, 'staff') level FROM users u JOIN memberships m ON m.user_id = u.id WHERE m.business_id = ? AND COALESCE(u.is_resource,0) = 0 ORDER BY m.status, u.name", bid(req)).map((m) => ({ ...m, has_hours: !!db.get('SELECT 1 FROM availability_rules WHERE user_id = ?', m.id), calendars: db.all('SELECT provider, account_email FROM calendar_connections WHERE user_id = ?', m.id), teams: ORG.teamsOf(bid(req), m.id) }));
   });
   app.post('/api/admin/team', async (req) => {
     requireRole('admin')(req);
@@ -1585,6 +1585,17 @@ module.exports = function adminRoutes(app) {
   });
   app.patch('/api/admin/team/:userId', (req) => {
     requireRole('admin')(req);
+    // A mobile number on its own, from the People screen, so admins can set up the after-call
+    // texts for their team. Only an owner may change an owner's number.
+    if (req.body && req.body.phone !== undefined && req.body.role === undefined && req.body.level === undefined) {
+      const target = db.get('SELECT role FROM memberships WHERE user_id = ? AND business_id = ?', int(req.params.userId), bid(req));
+      if (!target) throw new HttpError(404, 'Not found');
+      if (target.role === 'owner' && req.membership.role !== 'owner' && int(req.params.userId) !== req.user.id) throw new HttpError(403, "Only owners can change an owner's number");
+      const raw = String(req.body.phone || '').trim();
+      if (raw && !sms.normalizeNumber(raw)) throw new HttpError(422, 'That does not look like a US mobile number', { phone: 'Use 10 digits, e.g. 832-555-1234' });
+      db.run('UPDATE users SET phone = ? WHERE id = ?', raw ? clampStr(raw, 40) : null, int(req.params.userId));
+      return { ok: true, phone: raw || null };
+    }
     // A level change on its own, from the People screen. It decides who gets which sales calls,
     // nothing about what they can see or do, so any admin can set it for anyone, owners included.
     if (req.body && req.body.level !== undefined && req.body.role === undefined) {

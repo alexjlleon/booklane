@@ -3266,3 +3266,18 @@ test('a customer texting PROPOSAL alerts the team and gets a reply', () => withA
   assert.equal(q.body, '<Response/>');
   await req('PATCH', '/api/admin/business', { settings: { notifications: { reply_emails: [] } } }, { cookie: ownerCookie });
 }));
+
+test('admins can set a team member\'s mobile number on People', async () => {
+  const bizId = db.get('SELECT id FROM businesses WHERE slug = ?', bizSlug).id;
+  const someone = db.get("SELECT u.id FROM users u JOIN memberships m ON m.user_id = u.id WHERE m.business_id = ? AND m.role != 'owner' AND COALESCE(u.is_resource,0) = 0 LIMIT 1", bizId);
+  assert.ok(someone, 'a non-owner team member exists from earlier tests');
+  let r = await req('PATCH', `/api/admin/team/${someone.id}`, { phone: '832-555-4411' }, { cookie: ownerCookie });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.equal(db.get('SELECT phone FROM users WHERE id = ?', someone.id).phone, '832-555-4411');
+  const list = await req('GET', '/api/admin/team', null, { cookie: ownerCookie });
+  assert.equal(list.data.find((m) => m.id === someone.id).phone, '832-555-4411');
+  assert.equal((await req('PATCH', `/api/admin/team/${someone.id}`, { phone: '555-12' }, { cookie: ownerCookie })).status, 422);
+  r = await req('PATCH', `/api/admin/team/${someone.id}`, { phone: '' }, { cookie: ownerCookie });
+  assert.equal(db.get('SELECT phone FROM users WHERE id = ?', someone.id).phone, null);
+  assert.equal((await req('PATCH', '/api/admin/team/999999', { phone: '8325554411' }, { cookie: ownerCookie })).status, 404);
+});
