@@ -1,0 +1,50 @@
+# Builds a trial Android app (debug-signed .apk) that can be installed straight onto a phone,
+# without Google Play. Published as the "android-trial" release so there is one fixed download link.
+# Notifications are off in this build: they need the Firebase file, which only the store build gets.
+name: Android trial build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['booklane/mobile/**', 'booklane/booklane/public/js/app-native.js', '.github/workflows/android-trial.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: booklane/mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 21 }
+      - name: Install
+        run: npm ci
+      - name: Mark this build as having no notifications
+        run: sed -i 's#"appendUserAgent": "AvailvoApp/1.0"#"appendUserAgent": "AvailvoApp/1.0 AvailvoTrial NoPush"#' capacitor.config.json && grep appendUserAgent capacitor.config.json
+      - name: Sync
+        run: npx cap sync android
+      - name: Build the .apk
+        working-directory: booklane/mobile/android
+        run: |
+          chmod +x gradlew
+          BUILD_NUMBER=${{ github.run_number }} ./gradlew assembleDebug --no-daemon
+          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/Availvo-trial.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Availvo-trial-apk
+          path: Availvo-trial.apk
+      - name: Publish to the android-trial release
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view android-trial >/dev/null 2>&1 || gh release create android-trial --title "Availvo Android trial" --notes "Trial build for testing on a phone. Not the store version: notifications are off." --prerelease
+          gh release upload android-trial Availvo-trial.apk --clobber
+          gh release edit android-trial --notes "Trial build ${{ github.run_number }} from $(git rev-parse --short HEAD), built $(date -u '+%b %d, %Y %H:%M UTC'). Not the store version: notifications are off."

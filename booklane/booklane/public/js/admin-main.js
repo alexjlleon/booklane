@@ -147,11 +147,11 @@
     try { d = await api('GET', '/push'); } catch (e) { host.innerHTML = `<h2>Phone notifications</h2><p class="desc">${esc(e.message)}</p>`; return; }
     const inApp = !!(window.AvailvoApp && window.AvailvoApp.native);
     host.innerHTML = `<h2>Phone notifications</h2>
-      <p class="desc">${d.devices.length ? 'These phones get a notification for the things switched on below.' : inApp ? 'Allow notifications when your phone asks, and this phone will show up here.' : 'Get the <b>Availvo</b> app for iPhone or Android, log in, and allow notifications. Your phone will show up here.'}</p>
+      <p class="desc">${window.AvailvoApp && window.AvailvoApp.trial ? '<b>This is a trial build, so notifications are off in it.</b> The store version has them. ' : ''}${d.devices.length ? 'These phones get a notification for the things switched on below.' : inApp ? 'Allow notifications when your phone asks, and this phone will show up here.' : 'Get the <b>Availvo</b> app for iPhone or Android, log in, and allow notifications. Your phone will show up here.'}</p>
       <div class="stack">${PUSH_KINDS.map(([k, label, help]) => `<label class="row" style="gap:10px;align-items:flex-start"><input type="checkbox" data-pref="${k}" ${d.prefs[k] ? 'checked' : ''} style="margin-top:3px"><span><b>${esc(label)}</b><br><span class="small muted">${esc(help)}</span></span></label>`).join('')}</div>
       ${d.devices.length ? `<h3 style="font-size:14px;margin:16px 0 6px">Your phones</h3><ul class="small" style="margin:0;padding-left:0;list-style:none">${d.devices.map((x) => `<li class="row between" style="padding:6px 0;border-top:1px solid var(--line)"><span>${x.platform === 'ios' ? 'iPhone' : 'Android'}${x.device_name ? ` · ${esc(x.device_name)}` : ''}<span class="muted"> · last seen ${esc(A.dt(x.last_seen_at.replace(' ', 'T') + 'Z'))}</span>${x.last_error ? `<br><span style="color:#b7791f">${esc(x.last_error)}</span>` : ''}</span><button type="button" class="btn btn-link btn-sm" data-unpush="${x.id}">Remove</button></li>`).join('')}</ul>
         <button type="button" class="btn btn-ghost btn-sm" data-pushtest style="margin-top:10px">Send a test notification</button>` : ''}
-      ${inApp && !d.devices.length ? '<button type="button" class="btn btn-primary btn-sm" data-pushenable style="margin-top:12px">Turn on notifications</button>' : ''}`;
+      ${inApp && !window.AvailvoApp.trial && !d.devices.length ? '<button type="button" class="btn btn-primary btn-sm" data-pushenable style="margin-top:12px">Turn on notifications</button>' : ''}`;
     host.onchange = async (e) => {
       const c = e.target.closest('[data-pref]');
       if (c) await A.guard(() => api('PATCH', '/push/prefs', { [c.dataset.pref]: c.checked }), 'Saved');

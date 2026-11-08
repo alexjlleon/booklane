@@ -27,14 +27,17 @@
     const platform = Cap.getPlatform();
     const has = (n) => Cap.isPluginAvailable(n);
     const P = {};
-    for (const n of ['App', 'Browser', 'PushNotifications', 'Share', 'SplashScreen', 'StatusBar']) if (has(n)) P[n] = Cap.registerPlugin(n);
+    // The trial build passed around for testing has no Firebase file, and asking for a token there
+    // would fail, so it leaves notifications out (its user agent says NoPush).
+    const noPush = / NoPush\b/.test(navigator.userAgent);
+    for (const n of ['App', 'Browser', 'PushNotifications', 'Share', 'SplashScreen', 'StatusBar']) if (has(n) && !(noPush && n === 'PushNotifications')) P[n] = Cap.registerPlugin(n);
     const A = window.A;
     const TOKEN_KEY = 'availvo.pushToken';
     const ASKED_KEY = 'availvo.pushAsked';
     const store = { get: (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } }, set: (k, v) => { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) { /* private mode */ } } };
 
     document.documentElement.classList.add('in-app', `in-app-${platform}`);
-    const app = window.AvailvoApp = { native: true, platform };
+    const app = window.AvailvoApp = { native: true, platform, trial: noPush };
 
     // ------------------------------------------------------------ notifications
     let listening = false;
