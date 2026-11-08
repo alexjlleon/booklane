@@ -209,6 +209,9 @@ function channelsOf(a) {
  * Returns what was queued and what was skipped, which the tests and the admin both use.
  */
 function scheduleFor(booking, trigger, { now = Date.now() } = {}) {
+  // A call marked not valid (already a client, or the wrong department) never gets anything.
+  const current = booking.id ? db.get('SELECT outcome FROM bookings WHERE id = ?', booking.id) : null;
+  if ((current ? current.outcome : booking.outcome) === 'invalid') return { queued: 0, skipped: [{ reason: 'marked not a valid call' }] };
   const rows = db.all("SELECT * FROM message_automations WHERE business_id = ? AND active = 1 AND trigger = ? ORDER BY sort, id", booking.business_id, trigger).map(hydrateAutomation);
   if (!rows.length) return { queued: 0, skipped: [] };
   const ctx = contextFor(booking);
@@ -279,6 +282,10 @@ async function sendOne(msg) {
   const booking = db.get('SELECT * FROM bookings WHERE id = ?', msg.booking_id);
   if (!a || !booking) {
     db.run("UPDATE scheduled_messages SET status = 'skipped', skip_reason = ? WHERE id = ?", 'the automation or booking was deleted', msg.id);
+    return 'skipped';
+  }
+  if (booking.outcome === 'invalid') {
+    db.run("UPDATE scheduled_messages SET status = 'skipped', skip_reason = ? WHERE id = ?", 'marked not a valid call', msg.id);
     return 'skipped';
   }
   // Outcome messages only go while the call's outcome is still the one they were written for: a

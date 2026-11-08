@@ -3309,3 +3309,19 @@ test('host answer 4 marks the call not valid and stops every follow-up', () => w
   await req('PUT', '/api/admin/automations/host-check', { enabled: false, after_min: 10 }, { cookie: ownerCookie });
   db.run('DELETE FROM message_automations WHERE business_id = ? AND template_key IS NOT NULL', bizId);
 }));
+
+test('a call marked not valid never gets a message, even one queued or scheduled later', () => withAnyHour(async () => {
+  freshLimits(); stubTwilio();
+  const { bizId, id } = pastCall(30);
+  const a = await mkAutomation({ name: 'After anything', channel: 'email', trigger: 'after', offset_min: 0 });
+  await req('POST', `/api/admin/bookings/${id}/outcome`, { outcome: 'invalid' }, { cookie: ownerCookie });
+  const b = db.get('SELECT * FROM bookings WHERE id = ?', id);
+  // Nothing can be queued for it again: not after a move, not for a new automation.
+  for (const t of ['after', 'before', 'rescheduled', 'cancelled', 'not_booked', 'no_show']) assert.equal(MSG.scheduleFor(b, t).queued, 0, t);
+  // Something slipped into the outbox anyway is skipped at send time.
+  const row = db.run("INSERT INTO scheduled_messages (business_id, automation_id, booking_id, channel, to_addr, status, send_after) VALUES (?,?,?,'email','x@x.dev','queued',?)", bizId, a.data.id, id, Date.now() - 1000).lastId;
+  await MSG.processDue();
+  const m = db.get('SELECT status, skip_reason FROM scheduled_messages WHERE id = ?', row);
+  assert.deepEqual([m.status, m.skip_reason], ['skipped', 'marked not a valid call']);
+  await req('DELETE', `/api/admin/automations/${a.data.id}`, null, { cookie: ownerCookie });
+}));
