@@ -8,7 +8,7 @@ android {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         // Codemagic sets BUILD_NUMBER on every build; Google Play needs it to go up each upload.
-        versionCode (System.getenv("BUILD_NUMBER") ?: "1").toInteger()
+        versionCode = Integer.parseInt(System.getenv("BUILD_NUMBER") ?: "1")
         versionName "1.0.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
