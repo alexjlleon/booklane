@@ -1,0 +1,34 @@
+{
+  "appId": "co.availvo.app",
+  "appName": "Availvo",
+  "webDir": "www",
+  "server": {
+    "url": "https://app.availvo.co/app",
+    "hostname": "app.availvo.co",
+    "androidScheme": "https",
+    "errorPath": "offline.html",
+    "allowNavigation": ["app.availvo.co"]
+  },
+  "appendUserAgent": "AvailvoApp/1.0",
+  "backgroundColor": "#f4f2ee",
+  "ios": {
+    "contentInset": "never",
+    "scheme": "Availvo",
+    "limitsNavigationsToAppBoundDomains": false
+  },
+  "android": {
+    "allowMixedContent": false,
+    "captureInput": true
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 1500,
+      "launchAutoHide": true,
+      "backgroundColor": "#5b3df5",
+      "showSpinner": false
+    },
+    "PushNotifications": {
+      "presentationOptions": ["badge", "sound", "alert"]
+    }
+  }
+}

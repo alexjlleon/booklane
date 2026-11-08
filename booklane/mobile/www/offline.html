@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Availvo</title>
+<style>
+  html,body{margin:0;height:100%;font-family:-apple-system,system-ui,"Segoe UI",Roboto,sans-serif;background:#f4f2ee;color:#16131f}
+  main{min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:calc(24px + env(safe-area-inset-top)) 28px 24px;box-sizing:border-box;text-align:center}
+  .mark{width:72px;height:72px;border-radius:20px;background:#5b3df5;display:grid;place-items:center;margin-bottom:22px}
+  h1{font-size:22px;margin:0 0 8px}
+  p{color:#5e586d;margin:0 0 24px;line-height:1.5;max-width:320px}
+  button{font:inherit;font-weight:700;background:#5b3df5;color:#fff;border:0;border-radius:12px;padding:14px 26px}
+</style></head>
+<body><main>
+  <div class="mark"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4M9 15.5l2 2 4-4"/></svg></div>
+  <h1>You're offline</h1>
+  <p>Availvo needs the internet to show your bookings. Check your connection and try again.</p>
+  <button onclick="location.replace('https://app.availvo.co/app')">Try again</button>
+</main>
+<script>addEventListener('online', function () { location.replace('https://app.availvo.co/app'); });</script>
+</body></html>

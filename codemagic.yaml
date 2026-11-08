@@ -1,0 +1,105 @@
+# Codemagic builds the Availvo phone apps in the cloud, so no Mac is needed.
+# The app's code lives in booklane/mobile. Setup steps are in booklane/mobile/store/SUBMISSION-GUIDE.md.
+#
+# Names used below that must match what is created in Codemagic:
+#   Team integration (App Store Connect API key):  Availvo ASC
+#   Android keystore (Code signing identities):     availvo_upload
+#   Environment variable groups:                    firebase   -> GOOGLE_SERVICES_JSON (base64 of google-services.json)
+#                                                   google_play -> GCLOUD_SERVICE_ACCOUNT_CREDENTIALS (Play Console service account JSON)
+
+workflows:
+  ios-release:
+    name: Availvo iPhone (TestFlight + App Store)
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    integrations:
+      app_store_connect: Availvo ASC
+    environment:
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: co.availvo.app
+      vars:
+        APP_DIR: booklane/mobile
+        XCODE_PROJECT: ios/App/App.xcodeproj
+        XCODE_SCHEME: App
+      node: 22
+      xcode: latest
+    triggering:
+      events: [tag]
+      tag_patterns:
+        - pattern: 'ios-v*'
+    scripts:
+      - name: Install
+        script: cd $APP_DIR && npm ci
+      - name: Copy web shell and plugins into the iOS project
+        script: cd $APP_DIR && npx cap sync ios
+      - name: Signing profiles
+        script: cd $APP_DIR && xcode-project use-profiles
+      - name: Build number (one above the latest on TestFlight)
+        script: |
+          cd $APP_DIR/ios/App
+          # APP_STORE_APPLE_ID (optional) is the number under App Store Connect > App Information > Apple ID.
+          # Without it, Codemagic's own build counter is used, which also only goes up.
+          if [ -n "$APP_STORE_APPLE_ID" ]; then
+            LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" 2>/dev/null || echo 0)
+            agvtool new-version -all $((LATEST + 1))
+          else
+            agvtool new-version -all $BUILD_NUMBER
+          fi
+      - name: Build the .ipa
+        script: cd $APP_DIR && xcode-project build-ipa --project "$XCODE_PROJECT" --scheme "$XCODE_SCHEME"
+    artifacts:
+      - booklane/mobile/build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      email:
+        recipients: [alex@weddingsunlimited.com]
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        submit_to_app_store: false
+
+  android-release:
+    name: Availvo Android (Google Play)
+    max_build_duration: 45
+    instance_type: linux_x2
+    environment:
+      android_signing:
+        - availvo_upload
+      groups:
+        - firebase
+        - google_play
+      vars:
+        APP_DIR: booklane/mobile
+        PACKAGE_NAME: co.availvo.app
+      node: 22
+      java: 21
+    triggering:
+      events: [tag]
+      tag_patterns:
+        - pattern: 'android-v*'
+    scripts:
+      - name: Install
+        script: cd $APP_DIR && npm ci
+      - name: Firebase config for notifications
+        script: echo "$GOOGLE_SERVICES_JSON" | base64 --decode > $APP_DIR/android/app/google-services.json
+      - name: Copy web shell and plugins into the Android project
+        script: cd $APP_DIR && npx cap sync android
+      - name: Build the .aab (version code one above the latest on Google Play)
+        script: |
+          cd $APP_DIR/android
+          LATEST=$(google-play get-latest-build-number --package-name "$PACKAGE_NAME" 2>/dev/null || echo 0)
+          if [ "$LATEST" -ge "$BUILD_NUMBER" ] 2>/dev/null; then export BUILD_NUMBER=$((LATEST + 1)); fi
+          ./gradlew bundleRelease
+    artifacts:
+      - booklane/mobile/android/app/build/outputs/bundle/release/*.aab
+    publishing:
+      email:
+        recipients: [alex@weddingsunlimited.com]
+      # Google only accepts uploads through its API after the first one has been uploaded by hand
+      # in Play Console. For build 1, download the .aab from this build and upload it yourself;
+      # every later build goes to the internal testing track by itself.
+      google_play:
+        credentials: $GCLOUD_SERVICE_ACCOUNT_CREDENTIALS
+        track: internal
+        submit_as_draft: true

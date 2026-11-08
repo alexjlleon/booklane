@@ -1,0 +1,11 @@
+node_modules/
+ios/App/Pods/
+ios/App/App/public/
+android/app/src/main/assets/public/
+android/.gradle/
+android/build/
+android/app/build/
+*.keystore
+*.jks
+google-services.json
+GoogleService-Info.plist
