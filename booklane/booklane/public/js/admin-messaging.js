@@ -141,7 +141,7 @@
     if (!h) return '';
     const canEdit = ['owner', 'admin'].includes(((A.me && A.me.business) || {}).role);
     return `<div class="panel" id="host-check">
-      <div class="panel-head"><div><h2>Ask the host if the call happened</h2><p class="desc" style="margin:0">A few minutes after each call ends, the host gets a text and replies <b>1</b> booked on the call, <b>2</b> showed up but not booked yet, or <b>3</b> no-show. The answer starts the matching follow-ups above. It can also be set by hand on Bookings.</p></div></div>
+      <div class="panel-head"><div><h2>Ask the host if the call happened</h2><p class="desc" style="margin:0">A few minutes after each call ends, the host gets a text and replies <b>1</b> booked on the call, <b>2</b> showed up but not booked yet, or <b>3</b> no-show, or <b>4</b> not a valid call (already booked or wrong department; no follow-ups). The answer starts the matching follow-ups above. It can also be set by hand on Bookings.</p></div></div>
       <div class="row" style="gap:16px;align-items:center;flex-wrap:wrap">
         <label class="check"><input type="checkbox" name="hc_enabled" ${h.enabled ? 'checked' : ''} ${canEdit ? '' : 'disabled'}><span>Text the host after each call</span></label>
         <label class="row small" style="gap:6px">Send it <input class="input" style="max-width:80px" type="number" min="0" max="720" name="hc_after" value="${esc(String(h.after_min))}" ${canEdit ? '' : 'disabled'}> minutes after the call ends</label>

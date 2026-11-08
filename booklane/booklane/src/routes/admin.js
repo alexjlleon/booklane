@@ -479,7 +479,7 @@ module.exports = function adminRoutes(app) {
     if (Date.parse(bk.start_utc) > Date.now()) throw new HttpError(422, 'That call has not happened yet.');
     if (!['confirmed', 'no_show'].includes(bk.status)) throw new HttpError(422, 'A cancelled call has no outcome.');
     const outcome = req.body?.outcome ?? null;
-    if (outcome !== null && !MSG.OUTCOMES.includes(outcome)) throw new HttpError(422, 'Pick booked, not_booked or no_show');
+    if (outcome !== null && !MSG.OUTCOMES.includes(outcome)) throw new HttpError(422, 'Pick booked, not_booked, no_show or invalid');
     const out = MSG.setOutcome(bk, outcome, { by: req.user.name });
     return { ok: true, status: out.status, outcome: out.outcome || null, follow_ups_queued: out.follow_ups_queued || 0 };
   });

@@ -243,7 +243,7 @@
   }
 
   // How a past call went. Picking one starts that outcome's follow-ups and stops the others.
-  const OUTCOMES = { booked: ['Booked on the call', 'won'], not_booked: ['Showed, not booked yet', 'quoted'], no_show: ['No-show', 'lost'] };
+  const OUTCOMES = { booked: ['Booked on the call', 'won'], not_booked: ['Showed, not booked yet', 'quoted'], no_show: ['No-show', 'lost'], invalid: ['Not a valid call', 'cancelled'] };
   function outcomeControl(b) {
     const cur = b.outcome || (b.status === 'no_show' ? 'no_show' : '');
     const pill = cur ? `<span class="pill ${OUTCOMES[cur][1]}">${OUTCOMES[cur][0]}</span>` : '<span class="pill">How did it go?</span>';

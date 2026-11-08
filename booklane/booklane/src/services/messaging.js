@@ -26,7 +26,8 @@ const TRIGGERS = {
 // The outcome each of those triggers waits for, and the triggers tied to a call's outcome.
 const OUTCOME_OF = { no_show: 'no_show', not_booked: 'not_booked', won: 'booked' };
 const TRIGGER_OF = { no_show: 'no_show', not_booked: 'not_booked', booked: 'won' };
-const OUTCOMES = ['booked', 'not_booked', 'no_show'];
+// 'invalid': not a real sales call (already a client, or meant for another department). No follow-ups.
+const OUTCOMES = ['booked', 'not_booked', 'no_show', 'invalid'];
 
 // ---------------------------------------------------------------- merge fields
 
@@ -494,7 +495,8 @@ function hostCheckText(booking, business, host) {
   const tz = host.timezone || business.timezone;
   const who = String(booking.name || booking.email || 'the customer').trim().slice(0, 40);
   return `${business.name}: did your ${T.formatTime(Date.parse(booking.start_utc), tz)} call with ${who}${et ? ` (${et.name})` : ''} happen? `
-    + 'Reply 1 if they booked on the call, 2 if they showed up but have not booked yet, or 3 if it was a no-show.';
+    + 'Reply 1 if they booked on the call, 2 if they showed up but have not booked yet, 3 if it was a no-show, '
+    + 'or 4 if it was not a valid call (already booked or called the wrong department).';
 }
 
 /** Called from the job loop. Sends the after-call question for calls that have just ended. */
@@ -532,16 +534,17 @@ async function sendHostChecks({ now = Date.now() } = {}) {
   return { sent };
 }
 
-/** 'booked', 'not_booked', 'no_show' or null, from a host's reply. */
+/** 'booked', 'not_booked', 'no_show', 'invalid' or null, from a host's reply. */
 function hostAnswerOf(body) {
   const t = String(body || '').trim().toLowerCase().replace(/[.!]+$/, '').replace(/\s+/g, ' ');
   if (/^(1|booked|they booked|booked on the call|won|signed)$/.test(t)) return 'booked';
   if (/^(2|not booked|not yet|not booked yet|showed|showed up|held|thinking)$/.test(t)) return 'not_booked';
+  if (/^(4|invalid|not valid|not a valid call|wrong department|wrong dept|already booked|already a client)$/.test(t)) return 'invalid';
   if (/^(3|no ?-?show|no show up|didn'?t show|did not show|no answer|didn'?t pick up|did not pick up)$/.test(t)) return 'no_show';
   return null;
 }
 
-const OUTCOME_LABEL = { booked: 'booked on the call', not_booked: 'showed up, not booked yet', no_show: 'a no-show' };
+const OUTCOME_LABEL = { booked: 'booked on the call', not_booked: 'showed up, not booked yet', no_show: 'a no-show', invalid: 'not a valid call' };
 
 /**
  * Record how a call went and start the matching follow-ups. The one place an outcome changes, from
@@ -564,6 +567,8 @@ function setOutcome(bookingOrId, outcome, { by } = {}) {
   db.run(`UPDATE scheduled_messages SET status = 'cancelled', skip_reason = 'the call outcome changed'
     WHERE booking_id = ? AND status = 'queued' AND automation_id IN (SELECT id FROM message_automations WHERE trigger IN (${stale.map(() => '?').join(',')}))`, b.id, ...stale);
   if (next === 'no_show') cancelQueued(b.id, 'they did not show up for the call');
+  // Already a client, or the wrong department: nothing after the call applies to them.
+  if (next === 'invalid') cancelQueued(b.id, 'marked not a valid call');
   // Let a re-marked outcome queue its messages again (the outbox key is automation + booking + channel).
   db.run(`DELETE FROM scheduled_messages WHERE booking_id = ? AND status = 'cancelled' AND skip_reason = 'the call outcome changed'`, b.id);
 
@@ -593,7 +598,7 @@ function handleHostReply(number, body, now = Date.now()) {
   const answer = hostAnswerOf(body);
   if (!answer) {
     // A short reply that is not 1, 2 or 3 is almost certainly a fumbled answer: say how to answer.
-    if (String(body || '').trim().length <= 20 && !sms.keywordOf(body)) return { action: 'host_check_help', reply: 'Please reply 1 if they booked on the call, 2 if they showed up but have not booked yet, or 3 if it was a no-show.' };
+    if (String(body || '').trim().length <= 20 && !sms.keywordOf(body)) return { action: 'host_check_help', reply: 'Please reply 1 if they booked on the call, 2 if they showed up but have not booked yet, 3 if it was a no-show, or 4 if it was not a valid call.' };
     return null;
   }
   const b = pending[0];

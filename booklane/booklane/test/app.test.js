@@ -3143,7 +3143,7 @@ test('after the call the host is texted once and answers 1, 2 or 3', () => withA
 
   let view = await req('GET', '/api/admin/automations', null, { cookie: ownerCookie });
   assert.equal(view.data.host_check.enabled, false, 'off by default');
-  assert.match(view.data.host_check.sample, /Reply 1 if they booked on the call, 2 if they showed up but have not booked yet, or 3 if it was a no-show/);
+  assert.match(view.data.host_check.sample, /Reply 1 if they booked on the call, 2 if they showed up but have not booked yet, 3 if it was a no-show, or 4 if it was not a valid call \(already booked or called the wrong department\)/);
   const followUp = db.run("INSERT INTO scheduled_messages (business_id, booking_id, channel, to_addr, status, send_after) VALUES (?,?,'email','x@x.dev','queued',?)", bizId, id, Date.now() + 86400000).lastId;
 
   assert.equal((await MSG.sendHostChecks()).sent, 0, 'not sent while switched off');
@@ -3156,7 +3156,7 @@ test('after the call the host is texted once and answers 1, 2 or 3', () => withA
   // A fumbled short answer gets told how to answer; nothing changes.
   const help = await twilioPost({ From: '+18325557000', To: '+18325550000', Body: 'ok', MessageSid: 'SM_hc_0' });
   assert.equal(help.action, 'host_check_help');
-  assert.match(help.body, /Please reply 1 .* 2 .* or 3/);
+  assert.match(help.body, /Please reply 1 .* 2 .* 3 .* or 4/);
 
   const r = await twilioPost({ From: '+18325557000', To: '+18325550000', Body: '3', MessageSid: 'SM_hc_1' });
   assert.equal(r.status, 200);
@@ -3281,3 +3281,31 @@ test('admins can set a team member\'s mobile number on People', async () => {
   assert.equal(db.get('SELECT phone FROM users WHERE id = ?', someone.id).phone, null);
   assert.equal((await req('PATCH', '/api/admin/team/999999', { phone: '8325554411' }, { cookie: ownerCookie })).status, 404);
 });
+
+test('host answer 4 marks the call not valid and stops every follow-up', () => withAnyHour(async () => {
+  freshLimits(); stubTwilio();
+  const { bizId, owner, id } = pastCall(30);
+  db.run("UPDATE users SET phone = '(832) 555-7000' WHERE id = ?", owner.id);
+  await req('PUT', '/api/admin/automations/host-check', { enabled: true, after_min: 10 }, { cookie: ownerCookie });
+  // An after-call thank-you and some not-booked nudges are waiting.
+  const thanks = db.run("INSERT INTO scheduled_messages (business_id, booking_id, channel, to_addr, status, send_after) VALUES (?,?,'email','x@x.dev','queued',?)", bizId, id, Date.now() + 86400000).lastId;
+  await req('POST', '/api/admin/automations/templates', { group: 'not_booked' }, { cookie: ownerCookie });
+  db.run("UPDATE bookings SET outcome = NULL WHERE id = ?", id);
+  await MSG.sendHostChecks();
+  for (const word of ['4', 'wrong department', 'Already booked']) assert.equal(MSG.hostAnswerOf(word), 'invalid', word);
+  const r = await twilioPost({ From: '+18325557000', To: '+18325550000', Body: '4', MessageSid: 'SM_hc_4' });
+  assert.equal(r.action, 'host_check');
+  assert.match(r.body, /Got it, Dana is marked not a valid call\./);
+  const b = db.get('SELECT status, outcome FROM bookings WHERE id = ?', id);
+  assert.deepEqual([b.status, b.outcome], ['confirmed', 'invalid'], 'not counted as a no-show');
+  assert.equal(db.get('SELECT status FROM scheduled_messages WHERE id = ?', thanks).status, 'cancelled');
+  assert.equal(db.get("SELECT COUNT(*) c FROM scheduled_messages WHERE booking_id = ? AND status = 'queued'", id).c, 0, 'nothing goes out after an invalid call');
+  // From Bookings too.
+  const set = await req('POST', `/api/admin/bookings/${id}/outcome`, { outcome: 'not_booked' }, { cookie: ownerCookie });
+  assert.ok(set.data.follow_ups_queued > 0);
+  const back = await req('POST', `/api/admin/bookings/${id}/outcome`, { outcome: 'invalid' }, { cookie: ownerCookie });
+  assert.equal(back.data.outcome, 'invalid');
+  assert.equal(db.get("SELECT COUNT(*) c FROM scheduled_messages WHERE booking_id = ? AND status = 'queued'", id).c, 0);
+  await req('PUT', '/api/admin/automations/host-check', { enabled: false, after_min: 10 }, { cookie: ownerCookie });
+  db.run('DELETE FROM message_automations WHERE business_id = ? AND template_key IS NOT NULL', bizId);
+}));
