@@ -57,12 +57,16 @@ function readPayload(body) {
     }
   };
   walk(typeof body === 'object' && body ? body : {});
+  // Exact names first, then customer-ish ones; never a rep's or staff member's details.
+  const notStaff = (k) => !/^(rep|staff|venue|user|admin)/.test(k);
   const pick = (...names) => {
-    for (const n of names) for (const [k, v] of Object.entries(flat)) if ((k === n || k.endsWith(n)) && v !== null && v !== undefined && String(v).trim() !== '') return String(v).trim();
+    const has = (v) => v !== null && v !== undefined && String(v).trim() !== '';
+    for (const n of names) if (has(flat[n])) return String(flat[n]).trim();
+    for (const n of names) for (const [k, v] of Object.entries(flat)) if (k.endsWith(n) && notStaff(k) && has(v)) return String(v).trim();
     return '';
   };
   const email = pick('email', 'emailaddress').toLowerCase();
-  const phones = Object.entries(flat).filter(([k, v]) => /(phone|telephone|mobile|cell)/.test(k) && v).map(([, v]) => sms.normalizeNumber(String(v))).filter(Boolean);
+  const phones = Object.entries(flat).filter(([k, v]) => /(phone|telephone|mobile|cell)/.test(k) && notStaff(k) && v).map(([, v]) => sms.normalizeNumber(String(v))).filter(Boolean);
   return {
     email: isEmail(email) ? email : '',
     phones: [...new Set(phones)],

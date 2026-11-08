@@ -3384,3 +3384,11 @@ test('a BoothBook booking sent by a Zap marks the customer booked and stops the 
   assert.equal(off.data.enabled, false);
   db.run('DELETE FROM message_automations WHERE business_id = ? AND template_key IS NOT NULL', bizId);
 }));
+
+test('the BoothBook payload reader prefers the customer over the sales rep', () => {
+  const CRM2 = require('../src/services/crm-sync');
+  const p = CRM2.readPayload({ rep: { email: 'rep@company.com', telephone: '8325550000' }, customer: { email: 'Client@Example.com', telephone: '7135551212' }, 'Booking ID': '190' });
+  assert.equal(p.email, 'client@example.com');
+  assert.deepEqual(p.phones, ['+17135551212']);
+  assert.equal(CRM2.readPayload({ email: 'a@b.co', rep_email: 'r@b.co' }).email, 'a@b.co');
+});
