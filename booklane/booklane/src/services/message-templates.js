@@ -24,9 +24,9 @@ const TEMPLATES = [
       'Thanks for booking time with us. We are looking forward to chatting with you on {{when}}.',
       'Where: {{location|We will send the details before the call.}}\nWith: {{host|our team}}',
       'If something comes up, you can move or cancel the call with the button below.',
-      'Talk soon,\n{{business_name}}',
+      'Talk soon,\n{{sign_off}}',
     ].join('\n\n'),
-    sms_body: "Hi {{first_name|there}}, you're booked with {{business_name}} for {{weekday}} at {{time}}. We look forward to chatting with you! Need to change it? {{manage_url}} Reply STOP to opt out.",
+    sms_body: "Hi {{first_name|there}}, you're booked with {{business_name}} for {{weekday}} at {{time}}. We look forward to chatting with you! Need to change it? {{manage_url}} - {{from_name}}. Reply STOP to opt out.",
   },
   {
     key: 'call-3-days',
@@ -39,9 +39,9 @@ const TEMPLATES = [
       'Just a heads-up that we have a call with you coming up on {{when}}.',
       'Where: {{location|We will send the details before the call.}}\nWith: {{host|our team}}',
       'If the day no longer works, you can pick a new time with the button below.',
-      'Talk soon,\n{{business_name}}',
+      'Talk soon,\n{{sign_off}}',
     ].join('\n\n'),
-    sms_body: 'Hi {{first_name|there}}, a heads-up from {{business_name}}: we are chatting with you {{weekday}} at {{time}}. Need a different time? {{manage_url}} Reply STOP to opt out.',
+    sms_body: "Hi {{first_name|there}}, a heads-up: we are chatting with you {{weekday}} at {{time}}. Need a different time? {{manage_url}} - {{from_name}}. Reply STOP to opt out.",
   },
   {
     key: 'call-1-day',
@@ -54,9 +54,9 @@ const TEMPLATES = [
       'A quick reminder that we are chatting with you tomorrow, {{when}}.',
       'Where: {{location|We will send the details before the call.}}\nWith: {{host|our team}}',
       'If you have questions you would like us to cover, just reply to this email and we will come ready.',
-      'See you then,\n{{business_name}}',
+      'See you then,\n{{sign_off}}',
     ].join('\n\n'),
-    sms_body: 'Hi {{first_name|there}}, reminder: your call with {{business_name}} is tomorrow at {{time}}. Need to change it? {{manage_url}} Reply STOP to opt out.',
+    sms_body: "Hi {{first_name|there}}, reminder: our call is tomorrow at {{time}}. Need to change it? {{manage_url}} - {{from_name}}. Reply STOP to opt out.",
   },
   {
     key: 'call-2-hours',
@@ -69,9 +69,9 @@ const TEMPLATES = [
       'Just a reminder that we are chatting with you today at {{time}} ({{timezone}}).',
       'Where: {{location|We will send the details shortly.}}\nWith: {{host|our team}}',
       'Running late or need another time? Use the button below and we will make it work.',
-      'Talk soon,\n{{business_name}}',
+      'Talk soon,\n{{sign_off}}',
     ].join('\n\n'),
-    sms_body: 'Hi {{first_name|there}}, {{business_name}} here. We are chatting with you today at {{time}}. Talk soon! Reply STOP to opt out.',
+    sms_body: "Hi {{first_name|there}}, we are chatting with you today at {{time}}. Talk soon! - {{from_name}}. Reply STOP to opt out.",
   },
   {
     key: 'call-15-min',
@@ -83,9 +83,9 @@ const TEMPLATES = [
       'Hi {{first_name|there}},',
       'We will be chatting with you in about 15 minutes, at {{time}}.',
       'Where: {{location|We will reach out to you.}}',
-      'Talk in a few,\n{{host|Our team}}\n{{business_name}}',
+      'Talk in a few,\n{{sign_off}}',
     ].join('\n\n'),
-    sms_body: 'Hi {{first_name|there}}, we will be chatting with you in about 15 minutes ({{time}}). Talk soon! - {{business_name}}. Reply STOP to opt out.',
+    sms_body: "Hi {{first_name|there}}, we will be chatting with you in about 15 minutes ({{time}}). Talk soon! - {{from_name}}. Reply STOP to opt out.",
   },
 
   // ---------------- They did not show up: get them back on the calendar, or offer a proposal by text.
@@ -100,9 +100,9 @@ const TEMPLATES = [
       'We were looking forward to chatting with you at {{time}} today, but it looks like we missed each other. No worries at all, life happens!',
       'You can grab a new time that works better with the button below, or here: {{rebook_url}}',
       'Prefer not to hop on a call? Just reply to this email (or reply PROPOSAL to our text) and we will send you a proposal so you can look it over on your own time.',
-      'Talk soon,\n{{business_name}}',
+      'Talk soon,\n{{sign_off}}',
     ].join('\n\n'),
-    sms_body: 'Hi {{first_name|there}}, sorry we missed you today! Pick a new time here: {{rebook_url}} Or reply PROPOSAL and we will text you a proposal instead. - {{business_name}}. Reply STOP to opt out.',
+    sms_body: "Hi {{first_name|there}}, sorry we missed you today! Pick a new time here: {{rebook_url}} Or reply PROPOSAL and we will text you a proposal instead. - {{from_name}}. Reply STOP to opt out.",
   },
   {
     key: 'noshow-1-day', group: 'no_show',
@@ -115,9 +115,9 @@ const TEMPLATES = [
       'Just following up since we did not get to connect yesterday. We would still love to help.',
       'Pick any open time here: {{rebook_url}}',
       'Or, if a call is hard to fit in right now, reply PROPOSAL to our text (or just reply to this email) and we will send everything over in writing.',
-      'Thanks,\n{{business_name}}',
+      'Thanks,\n{{sign_off}}',
     ].join('\n\n'),
-    sms_body: 'Hi {{first_name|there}}, {{business_name}} here. Still want to chat? Grab a time: {{rebook_url}} or reply PROPOSAL and we will text you one. Reply STOP to opt out.',
+    sms_body: "Hi {{first_name|there}}, still want to chat? Grab a time: {{rebook_url}} or reply PROPOSAL and we will text you one. - {{from_name}}. Reply STOP to opt out.",
   },
   {
     key: 'noshow-4-days', group: 'no_show',
@@ -130,9 +130,9 @@ const TEMPLATES = [
       'We have not been able to connect yet, so this is a quick last check-in. If you are still looking, we would be happy to help.',
       'Book a time here: {{rebook_url}}',
       'Or reply PROPOSAL to our text and we will send a proposal your way. If your plans have changed, no reply needed. We wish you the best!',
-      '{{business_name}}',
+      '{{sign_off}}',
     ].join('\n\n'),
-    sms_body: 'Hi {{first_name|there}}, last check-in from {{business_name}}. Still looking? Book here: {{rebook_url}} or reply PROPOSAL for a proposal by text. Reply STOP to opt out.',
+    sms_body: "Hi {{first_name|there}}, last check-in. Still looking? Book here: {{rebook_url}} or reply PROPOSAL for a proposal by text. - {{from_name}}. Reply STOP to opt out.",
   },
 
   // ---------------- They showed up but have not booked yet: keep the conversation going.
@@ -147,9 +147,9 @@ const TEMPLATES = [
       'Thank you for taking the time to chat with us today. It was great learning about your plans.',
       'Want to look it all over again? {{quote_url|Just reply to this email and we will send your proposal over.}}',
       'If any questions come up as you think it over, reply to this email or text us back. We are happy to help.',
-      'Talk soon,\n{{host|Our team}}\n{{business_name}}',
+      'Talk soon,\n{{sign_off}}',
     ].join('\n\n'),
-    sms_body: 'Hi {{first_name|there}}, thanks for chatting with {{business_name}} today! Any questions as you think it over, just text us back. Want the proposal by text? Reply PROPOSAL. Reply STOP to opt out.',
+    sms_body: "Hi {{first_name|there}}, thanks for chatting with us today! Any questions as you think it over, just text back. Want the proposal by text? Reply PROPOSAL. - {{from_name}}. Reply STOP to opt out.",
   },
   {
     key: 'notbooked-2-days', group: 'not_booked',
@@ -161,9 +161,9 @@ const TEMPLATES = [
       'Hi {{first_name|there}},',
       'Just checking in after our call. Did any questions come up that we can help with?',
       'Happy to hop on another quick call too: {{rebook_url}}',
-      'Thanks,\n{{business_name}}',
+      'Thanks,\n{{sign_off}}',
     ].join('\n\n'),
-    sms_body: 'Hi {{first_name|there}}, {{business_name}} checking in. Any questions since our call? Just text back, or reply PROPOSAL and we will text you a proposal. Reply STOP to opt out.',
+    sms_body: "Hi {{first_name|there}}, checking in. Any questions since our call? Just text back, or reply PROPOSAL and we will text you a proposal. - {{from_name}}. Reply STOP to opt out.",
   },
   {
     key: 'notbooked-5-days', group: 'not_booked',
@@ -175,9 +175,9 @@ const TEMPLATES = [
       'Hi {{first_name|there}},',
       'We would love to be part of your plans. Our calendar fills up, so if you are ready, we can lock in your date today.',
       'Just reply to this email, text us back, or call us at {{business_phone|the number on our website}}.',
-      'Thanks,\n{{business_name}}',
+      'Thanks,\n{{sign_off}}',
     ].join('\n\n'),
-    sms_body: 'Hi {{first_name|there}}, ready to lock in your date with {{business_name}}? Our calendar fills up, so text us back and we will get you set. Reply STOP to opt out.',
+    sms_body: "Hi {{first_name|there}}, ready to lock in your date? Our calendar fills up, so text back and we will get you set. - {{from_name}}. Reply STOP to opt out.",
   },
   {
     key: 'notbooked-10-days', group: 'not_booked',
@@ -190,9 +190,9 @@ const TEMPLATES = [
       'We know there is a lot to decide. If it helps, we can send an updated proposal or set up another quick call to go over anything.',
       'Book a time: {{rebook_url}}',
       'Or simply reply to this email. Either way, we are here when you are ready.',
-      '{{business_name}}',
+      '{{sign_off}}',
     ].join('\n\n'),
-    sms_body: 'Hi {{first_name|there}}, still deciding? {{business_name}} can text you an updated proposal (reply PROPOSAL) or set up a quick call: {{rebook_url}} Reply STOP to opt out.',
+    sms_body: "Hi {{first_name|there}}, still deciding? We can text you an updated proposal (reply PROPOSAL) or set up a quick call: {{rebook_url}} - {{from_name}}. Reply STOP to opt out.",
   },
 ].map((t) => Object.freeze({
   // Shared by every template: both channels, calls only. A "before" reminder that would arrive late
@@ -214,4 +214,81 @@ const GROUPS = [
 
 const byKey = (key) => TEMPLATES.find((t) => t.key === key) || null;
 
-module.exports = { TEMPLATES, GROUPS, byKey };
+// Earlier wording of each template. A company's copy still exactly matching one of these was never
+// edited, so it is upgraded to the current wording on boot (see refreshUntouchedCopies in messaging).
+const PREVIOUS = {
+ "call-booked": [
+  {
+   "body_html": "Hi {{first_name|there}},\n\nThanks for booking time with us. We are looking forward to chatting with you on {{when}}.\n\nWhere: {{location|We will send the details before the call.}}\nWith: {{host|our team}}\n\nIf something comes up, you can move or cancel the call with the button below.\n\nTalk soon,\n{{business_name}}",
+   "sms_body": "Hi {{first_name|there}}, you're booked with {{business_name}} for {{weekday}} at {{time}}. We look forward to chatting with you! Need to change it? {{manage_url}} Reply STOP to opt out."
+  }
+ ],
+ "call-3-days": [
+  {
+   "body_html": "Hi {{first_name|there}},\n\nJust a heads-up that we have a call with you coming up on {{when}}.\n\nWhere: {{location|We will send the details before the call.}}\nWith: {{host|our team}}\n\nIf the day no longer works, you can pick a new time with the button below.\n\nTalk soon,\n{{business_name}}",
+   "sms_body": "Hi {{first_name|there}}, a heads-up from {{business_name}}: we are chatting with you {{weekday}} at {{time}}. Need a different time? {{manage_url}} Reply STOP to opt out."
+  }
+ ],
+ "call-1-day": [
+  {
+   "body_html": "Hi {{first_name|there}},\n\nA quick reminder that we are chatting with you tomorrow, {{when}}.\n\nWhere: {{location|We will send the details before the call.}}\nWith: {{host|our team}}\n\nIf you have questions you would like us to cover, just reply to this email and we will come ready.\n\nSee you then,\n{{business_name}}",
+   "sms_body": "Hi {{first_name|there}}, reminder: your call with {{business_name}} is tomorrow at {{time}}. Need to change it? {{manage_url}} Reply STOP to opt out."
+  }
+ ],
+ "call-2-hours": [
+  {
+   "body_html": "Hi {{first_name|there}},\n\nJust a reminder that we are chatting with you today at {{time}} ({{timezone}}).\n\nWhere: {{location|We will send the details shortly.}}\nWith: {{host|our team}}\n\nRunning late or need another time? Use the button below and we will make it work.\n\nTalk soon,\n{{business_name}}",
+   "sms_body": "Hi {{first_name|there}}, {{business_name}} here. We are chatting with you today at {{time}}. Talk soon! Reply STOP to opt out."
+  }
+ ],
+ "call-15-min": [
+  {
+   "body_html": "Hi {{first_name|there}},\n\nWe will be chatting with you in about 15 minutes, at {{time}}.\n\nWhere: {{location|We will reach out to you.}}\n\nTalk in a few,\n{{host|Our team}}\n{{business_name}}",
+   "sms_body": "Hi {{first_name|there}}, we will be chatting with you in about 15 minutes ({{time}}). Talk soon! - {{business_name}}. Reply STOP to opt out."
+  }
+ ],
+ "noshow-same-day": [
+  {
+   "body_html": "Hi {{first_name|there}},\n\nWe were looking forward to chatting with you at {{time}} today, but it looks like we missed each other. No worries at all, life happens!\n\nYou can grab a new time that works better with the button below, or here: {{rebook_url}}\n\nPrefer not to hop on a call? Just reply to this email (or reply PROPOSAL to our text) and we will send you a proposal so you can look it over on your own time.\n\nTalk soon,\n{{business_name}}",
+   "sms_body": "Hi {{first_name|there}}, sorry we missed you today! Pick a new time here: {{rebook_url}} Or reply PROPOSAL and we will text you a proposal instead. - {{business_name}}. Reply STOP to opt out."
+  }
+ ],
+ "noshow-1-day": [
+  {
+   "body_html": "Hi {{first_name|there}},\n\nJust following up since we did not get to connect yesterday. We would still love to help.\n\nPick any open time here: {{rebook_url}}\n\nOr, if a call is hard to fit in right now, reply PROPOSAL to our text (or just reply to this email) and we will send everything over in writing.\n\nThanks,\n{{business_name}}",
+   "sms_body": "Hi {{first_name|there}}, {{business_name}} here. Still want to chat? Grab a time: {{rebook_url}} or reply PROPOSAL and we will text you one. Reply STOP to opt out."
+  }
+ ],
+ "noshow-4-days": [
+  {
+   "body_html": "Hi {{first_name|there}},\n\nWe have not been able to connect yet, so this is a quick last check-in. If you are still looking, we would be happy to help.\n\nBook a time here: {{rebook_url}}\n\nOr reply PROPOSAL to our text and we will send a proposal your way. If your plans have changed, no reply needed. We wish you the best!\n\n{{business_name}}",
+   "sms_body": "Hi {{first_name|there}}, last check-in from {{business_name}}. Still looking? Book here: {{rebook_url}} or reply PROPOSAL for a proposal by text. Reply STOP to opt out."
+  }
+ ],
+ "notbooked-same-day": [
+  {
+   "body_html": "Hi {{first_name|there}},\n\nThank you for taking the time to chat with us today. It was great learning about your plans.\n\nWant to look it all over again? {{quote_url|Just reply to this email and we will send your proposal over.}}\n\nIf any questions come up as you think it over, reply to this email or text us back. We are happy to help.\n\nTalk soon,\n{{host|Our team}}\n{{business_name}}",
+   "sms_body": "Hi {{first_name|there}}, thanks for chatting with {{business_name}} today! Any questions as you think it over, just text us back. Want the proposal by text? Reply PROPOSAL. Reply STOP to opt out."
+  }
+ ],
+ "notbooked-2-days": [
+  {
+   "body_html": "Hi {{first_name|there}},\n\nJust checking in after our call. Did any questions come up that we can help with?\n\nHappy to hop on another quick call too: {{rebook_url}}\n\nThanks,\n{{business_name}}",
+   "sms_body": "Hi {{first_name|there}}, {{business_name}} checking in. Any questions since our call? Just text back, or reply PROPOSAL and we will text you a proposal. Reply STOP to opt out."
+  }
+ ],
+ "notbooked-5-days": [
+  {
+   "body_html": "Hi {{first_name|there}},\n\nWe would love to be part of your plans. Our calendar fills up, so if you are ready, we can lock in your date today.\n\nJust reply to this email, text us back, or call us at {{business_phone|the number on our website}}.\n\nThanks,\n{{business_name}}",
+   "sms_body": "Hi {{first_name|there}}, ready to lock in your date with {{business_name}}? Our calendar fills up, so text us back and we will get you set. Reply STOP to opt out."
+  }
+ ],
+ "notbooked-10-days": [
+  {
+   "body_html": "Hi {{first_name|there}},\n\nWe know there is a lot to decide. If it helps, we can send an updated proposal or set up another quick call to go over anything.\n\nBook a time: {{rebook_url}}\n\nOr simply reply to this email. Either way, we are here when you are ready.\n\n{{business_name}}",
+   "sms_body": "Hi {{first_name|there}}, still deciding? {{business_name}} can text you an updated proposal (reply PROPOSAL) or set up a quick call: {{rebook_url}} Reply STOP to opt out."
+  }
+ ]
+};
+
+module.exports = { TEMPLATES, GROUPS, PREVIOUS, byKey };

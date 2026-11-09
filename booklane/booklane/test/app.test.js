@@ -3542,3 +3542,51 @@ test('push keys: pem rebuilt from a one-line paste', () => {
   const fixed = require('../src/lib/push').normalizePem(oneLine);
   assert.doesNotThrow(() => crypto.sign('sha256', Buffer.from('x'), { key: fixed, dsaEncoding: 'ieee-p1363' }));
 });
+
+test('template messages are signed by the host on the call, or by the company alone', () => {
+  const { bizId, owner, id } = pastCall(30);
+  const biz = db.get('SELECT name FROM businesses WHERE id = ?', bizId).name;
+  const hostName = db.get('SELECT name FROM users WHERE id = ?', owner.id).name;
+  const first = hostName.split(/\s+/)[0];
+  let ctx = MSG.contextFor(db.get('SELECT * FROM bookings WHERE id = ?', id));
+  assert.equal(ctx.sign_off, `${hostName}\n${biz}`);
+  assert.equal(ctx.from_name, `${first} at ${biz}`);
+  // Every template signs with these, never a bare company name or "Our team".
+  for (const t of TPL.TEMPLATES) {
+    assert.match(t.body_html, /\{\{sign_off\}\}$/, `${t.key} email ends with the sign-off`);
+    assert.match(t.sms_body, /- \{\{from_name\}\}\. Reply STOP to opt out\.$/, `${t.key} text is signed`);
+    assert.ok(!/Our team/.test(t.body_html), `${t.key} has no "Our team" fallback`);
+    assert.equal(smsLib.segmentInfo(t.sms_body).encoding, 'GSM-7');
+  }
+  const email = MSG.render(TPL.byKey('call-1-day').body_html, ctx).text;
+  assert.ok(email.endsWith(`See you then,\n${hostName}\n${biz}`), email);
+  assert.ok(MSG.render(TPL.byKey('noshow-same-day').sms_body, ctx).text.includes(`- ${first} at ${biz}.`));
+
+  // A market calendar is not a person: company only.
+  const market = db.get('SELECT id FROM users WHERE COALESCE(is_resource,0) = 1 LIMIT 1');
+  if (market) {
+    ctx = MSG.contextFor({ ...db.get('SELECT * FROM bookings WHERE id = ?', id), host_user_id: market.id });
+    assert.equal(ctx.sign_off, biz);
+    assert.equal(ctx.from_name, biz);
+    assert.ok(MSG.render(TPL.byKey('call-1-day').body_html, ctx).text.endsWith(`See you then,\n${biz}`));
+  }
+});
+
+test('unedited copies of a template pick up new wording; edited ones are left alone', () => {
+  const bizId = db.get('SELECT id FROM businesses WHERE slug = ?', bizSlug).id;
+  const oldBody = TPL.PREVIOUS['call-1-day'][0].body_html;
+  const oldSms = TPL.PREVIOUS['call-1-day'][0].sms_body;
+  const untouched = db.run(`INSERT INTO message_automations (business_id, name, channel, trigger, offset_min, subject, body_html, sms_body, active, template_key)
+    VALUES (?, 'Old copy', 'both', 'before', 1440, 's', ?, ?, 0, 'call-1-day')`, bizId, oldBody, oldSms).lastId;
+  const edited = db.run(`INSERT INTO message_automations (business_id, name, channel, trigger, offset_min, subject, body_html, sms_body, active, template_key)
+    VALUES (?, 'Edited copy', 'both', 'before', 1440, 's', 'My own words', ?, 0, 'call-1-day')`, bizId, oldSms).lastId;
+  assert.ok(MSG.refreshUntouchedCopies() >= 2);
+  const a = db.get('SELECT body_html, sms_body FROM message_automations WHERE id = ?', untouched);
+  assert.equal(a.body_html, TPL.byKey('call-1-day').body_html);
+  assert.equal(a.sms_body, TPL.byKey('call-1-day').sms_body);
+  const b = db.get('SELECT body_html, sms_body FROM message_automations WHERE id = ?', edited);
+  assert.equal(b.body_html, 'My own words', 'an edited email is never overwritten');
+  assert.equal(b.sms_body, TPL.byKey('call-1-day').sms_body, 'its untouched text still updates');
+  assert.equal(MSG.refreshUntouchedCopies(), 0, 'running again changes nothing');
+  db.run('DELETE FROM message_automations WHERE id IN (?, ?)', untouched, edited);
+});

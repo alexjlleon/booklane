@@ -48,6 +48,9 @@ const VARIABLES = [
   ['market', 'The calendar it is on, e.g. Houston'],
   ['location', 'Where it happens'],
   ['host', 'Who is running it'],
+  ['sign_off', 'Sign-off: the host\'s name and the company, or just the company when no person is assigned'],
+  ['from_name', 'Short sign-off for texts: "Ben at Weddings Unlimited", or just the company'],
+  ['host_first_name', 'The host\'s first name (empty for a market calendar)'],
   ['services', 'Services they showed interest in'],
   ['booking_number', 'Their booking number, when they gave one'],
   ['manage_url', 'Link to reschedule or cancel'],
@@ -90,6 +93,7 @@ function contextFor(booking) {
   const serviceList = [...services].filter(Boolean);
 
   const first = String(booking.name || '').trim().split(/\s+/)[0] || '';
+  const person = host && !host.is_resource && String(host.name || '').trim() ? String(host.name).trim() : '';
   return {
     _booking: booking, _business: business, _et: et, _lead: lead, _services: serviceList,
     _calendar_name: cal ? cal.name : null, _start: start, _tz: tz,
@@ -108,6 +112,11 @@ function contextFor(booking) {
     market: cal ? cal.name : '',
     location: booking.location || '',
     host: host && !host.is_resource ? host.name : (cal ? cal.name : ''),
+    // Signed by the person on the call now (a handed-off call signs as the new host), or by the
+    // company alone when nobody is: market calendars like "Houston" are not people.
+    host_first_name: person ? person.split(/\s+/)[0] : '',
+    sign_off: person ? `${person}\n${business.name}` : business.name,
+    from_name: person ? `${person.split(/\s+/)[0]} at ${business.name}` : business.name,
     services: serviceList.join(', '),
     booking_number: answers.booking_number ? String(answers.booking_number) : '',
     manage_url: B.linkFor(business, `/booking/${booking.token}`),
@@ -372,7 +381,8 @@ function sampleContext(business) {
     session: 'Engagement Session', duration: '90 minutes',
     when: T.formatDateTime(start, tz), date: T.formatDateTime(start, tz, { hour: undefined, minute: undefined, timeZoneName: undefined, year: undefined }),
     time: T.formatTime(start, tz), weekday: new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'long' }).format(new Date(start)), timezone: tz,
-    market: 'Houston', location: 'Hermann Park, Houston', host: 'Houston', services: 'Photography, Photo Booth',
+    market: 'Houston', location: 'Hermann Park, Houston', host: 'Jordan Lee', services: 'Photography, Photo Booth',
+    host_first_name: 'Jordan', sign_off: `Jordan Lee\n${business.name}`, from_name: `Jordan at ${business.name}`,
     booking_number: 'WU-10432',
     manage_url: B.linkFor(business, '/booking/sample'), rebook_url: B.pageUrl(business, 'discovery-call'), quote_url: '',
     business_name: business.name, business_phone: business.phone || '', business_email: business.email || '', website: business.website || '',
@@ -485,6 +495,32 @@ function handleInboundSms({ from, to, body, businessId, sid: providerSid }) {
     try { const alerted = alertTeamOfReply(bizId, number, body); if (alerted) return alerted; } catch (e) { console.error('[reply alert]', e.message); }
   }
   return { action: 'logged', number, keyword: word };
+}
+
+// ---------------------------------------------------------------- template copies
+
+/**
+ * Bring companies' copies of the shared templates up to the current wording, but only copies
+ * nobody has edited: a body still exactly matching an earlier version of its template. Email and
+ * text are checked separately, so editing one leaves the other free to update. Runs on boot.
+ */
+function refreshUntouchedCopies() {
+  const TPL = require('./message-templates');
+  let updated = 0;
+  for (const a of db.all('SELECT id, template_key, body_html, sms_body FROM message_automations WHERE template_key IS NOT NULL')) {
+    const now = TPL.byKey(a.template_key);
+    const before = TPL.PREVIOUS[a.template_key] || [];
+    if (!now) continue;
+    const sets = [];
+    const args = [];
+    if (a.body_html !== now.body_html && before.some((p) => p.body_html === a.body_html)) { sets.push('body_html = ?'); args.push(now.body_html); }
+    if (a.sms_body !== now.sms_body && before.some((p) => p.sms_body === a.sms_body)) { sets.push('sms_body = ?'); args.push(now.sms_body); }
+    if (!sets.length) continue;
+    db.run(`UPDATE message_automations SET ${sets.join(', ')} WHERE id = ?`, ...args, a.id);
+    updated++;
+  }
+  if (updated) console.log(`[templates] ${updated} unedited template cop${updated === 1 ? 'y' : 'ies'} updated to the current wording`);
+  return updated;
 }
 
 // ---------------------------------------------------------------- after-call check to the host
@@ -701,7 +737,7 @@ function summary(businessId) {
 module.exports = {
   VARIABLES, TRIGGERS, contextFor, render, matches, hydrateAutomation, dueAt, holdForQuietHours,
   scheduleFor, cancelQueued, rescheduleQueued, processDue, sendOne, isOptedOut,
-  sendHostChecks, handleHostReply, hostAnswerOf, hostCheckText, setOutcome, OUTCOMES, alertTeamOfReply,
+  refreshUntouchedCopies, sendHostChecks, handleHostReply, hostAnswerOf, hostCheckText, setOutcome, OUTCOMES, alertTeamOfReply,
   preview, sampleContext, sendTest, describeTiming, handleInboundSms,
   listAutomations, listQueue, summary,
 };

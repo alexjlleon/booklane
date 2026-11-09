@@ -221,6 +221,7 @@ if (require.main === module) {
   // notice and re-upload; it marks itself done, so it runs once per catalog and never again.
   CATALOG_REPAIR.repairAll();
   const port = Number(process.env.PORT) || 3000;
+  try { MSG.refreshUntouchedCopies(); } catch (e) { console.error('[templates]', e.message); }
   http.createServer(app.handler).listen(port, () => {
     console.log(`${APP_NAME} running on ${baseUrl()} (port ${port})`);
     setInterval(runJobs, Number(process.env.JOB_INTERVAL_MS) || 60000).unref();
