@@ -15,6 +15,9 @@
 const LAYOUTS = ['full', 'minimal', 'thin', 'visual'];
 const PROGRESS = ['bar', 'steps', 'dots', 'count', 'none'];
 const DATE_DISPLAYS = ['calendar', 'typed', 'picker'];
+// The time picker: a row of days and a grid of times, the month calendar, or days on phones and
+// the month on wider screens.
+const CALENDAR_STYLES = ['auto', 'days', 'month'];
 const FONTS = {
   'Plus Jakarta Sans': 'sans', Inter: 'sans', 'DM Sans': 'sans', Poppins: 'sans', Montserrat: 'sans', 'Work Sans': 'sans', Nunito: 'sans',
   'Playfair Display': 'serif', 'Cormorant Garamond': 'serif', Lora: 'serif', 'Libre Baskerville': 'serif', 'EB Garamond': 'serif',
@@ -46,6 +49,8 @@ const BASE = {
   auto_advance: false,
   // Dates.
   date_display: 'calendar',
+  // The calendar step.
+  calendar_style: 'auto',
   // Escape hatch.
   custom_css: '',
 };
@@ -159,8 +164,20 @@ function sanitizeStyle(raw) {
     image_fit: pick(s.image_fit, ['cover', 'contain'], d.image_fit),
     auto_advance: boolOr(s.auto_advance, d.auto_advance),
     date_display: pick(s.date_display, DATE_DISPLAYS, d.date_display),
+    calendar_style: pick(s.calendar_style, CALENDAR_STYLES, d.calendar_style),
     custom_css: cleanCss(s.custom_css),
   };
+}
+
+/**
+ * A booking page's look. Pages saved before looks existed get the Full layout set up the way the
+ * booking page always looked: choices as a list, the phone's date picker, single picks moving on
+ * by themselves, and the old "Show the progress bar" switch.
+ */
+function bookingStyle(settings) {
+  const st = settings || {};
+  if (st.style && typeof st.style === 'object') return sanitizeStyle(st.style);
+  return sanitizeStyle(Object.assign(defaultsFor('full'), { option_style: 'list', date_display: 'picker', auto_advance: true, progress: st.show_progress === false ? 'none' : 'bar' }));
 }
 
 /** The Google Fonts stylesheet a style needs, or '' when it only uses the built-in or system fonts. */
@@ -173,4 +190,4 @@ function fontHref(style) {
   return 'https://fonts.googleapis.com/css2?' + fams.map((f) => `family=${encodeURIComponent(f).replace(/%20/g, '+')}:wght@${weights(f)}`).join('&') + '&display=swap';
 }
 
-module.exports = { LAYOUTS, PROGRESS, DATE_DISPLAYS, FONTS, BASE, PRESETS, LAYOUT_INFO, defaultsFor, sanitizeStyle, cleanUrl, cleanCss, fontHref };
+module.exports = { LAYOUTS, PROGRESS, DATE_DISPLAYS, CALENDAR_STYLES, FONTS, bookingStyle, BASE, PRESETS, LAYOUT_INFO, defaultsFor, sanitizeStyle, cleanUrl, cleanCss, fontHref };

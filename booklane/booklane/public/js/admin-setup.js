@@ -82,13 +82,14 @@
             </div>
             ${A.field('Final button text', `<input class="input" data-bind="book_button" maxlength="40" value="${esc((et.settings && et.settings.book_button) || '')}" placeholder="Book my call">`, 'What the button says on the last step, like Book my consultation or Reserve my spot. Leave it empty for Book my call.')}
             ${A.toggle('active', et.active, 'Page is live')}
-            ${A.toggle('show_progress', !(et.settings && et.settings.show_progress === false), 'Show the progress bar')}
             ${A.toggle('allow_guests', !(et.settings && et.settings.allow_guests === false), 'Let customers invite guests')}
             ${A.field('Guest invite heading', `<input class="input" data-bind="guest_label" maxlength="60" value="${esc((et.settings && et.settings.guest_label) || '')}" placeholder="Invite someone to this call">`, 'Shown above the guest box on the customer\'s booking page, like Invite someone to your consultation. Leave it empty for Invite someone to this call.')}
           </div>
           <div class="panel"><div class="panel-head"><div><h2>Form steps</h2><p class="desc" style="margin:0">Every step autosaves as a lead. Put Contact info early to capture more people who drop off.</p></div>
             <div class="row">${isNew ? '<button class="btn btn-ghost btn-sm" data-template="quick">Use the short date-first form</button>' : ''}<button class="btn btn-ghost btn-sm" data-add-step>+ Questions step</button><button class="btn btn-ghost btn-sm" data-add-availability>+ Date check</button></div></div><div id="steps" class="stack"></div></div>
         </div><div class="stack">
+          <div class="panel" id="look"><div class="panel-head" style="margin-bottom:0"><div><h2>Look</h2><p class="desc" style="margin:0">${isNew ? 'Save the page first, then choose how it looks.' : `${esc({ full: 'Full', minimal: 'Minimal', thin: 'Thin', visual: 'Images and colors' }[(et.style || {}).layout] || 'Full')} layout, ${esc({ auto: 'row of days on phones', days: 'row of days everywhere', month: 'month calendar everywhere' }[(et.style || {}).calendar_style] || 'row of days on phones')}${et.has_look ? '' : '. The original booking page look'}.`} Layout, colors, fonts, progress, buttons, choices, dates and the calendar, the same options as forms.</p></div>
+            <button type="button" class="btn btn-ghost btn-sm" data-edit-look ${isNew ? 'disabled' : ''}>Change the look</button></div></div>
           <div class="panel" id="limits"><h2>Scheduling rules</h2>
             <div class="grid-2">${A.field('Minimum notice (hours)', `<input class="input" type="number" min="0" step="0.5" id="notice" value="${et.min_notice_min / 60}">`)}${A.field('Book up to (days ahead)', A.input('max_days_ahead', et.max_days_ahead, 'type="number" min="1" data-type="number"'))}</div>
             <div class="grid-2">${A.field('Start times every (min)', A.select('slot_interval_min', et.slot_interval_min, { 10: '10', 15: '15', 20: '20', 30: '30', 45: '45', 60: '60' }))}${A.field('Max per day (0 = no limit)', A.input('daily_limit', et.daily_limit, 'type="number" min="0" data-type="number"'))}</div>
@@ -178,7 +179,7 @@
               <div class="row between"><b class="small">Question ${qi + 1}</b><button class="icon-x" data-remove-q title="Remove question">×</button></div>
               <div class="grid-2">${A.field('Label', `<input class="input" data-qf="label" value="${esc(q.label)}">`)}${A.field('Type', `<select class="select" data-qf="type">${Object.entries(Q_TYPES).map(([k, v]) => `<option value="${k}" ${q.type === k ? 'selected' : ''}>${v}</option>`).join('')}</select>`)}</div>
               ${['choice', 'multi', 'select'].includes(q.type) ? A.field('Options (one per line)', `<textarea class="textarea" rows="3" data-qf="options">${esc((q.options || []).join('\n'))}</textarea>`) : A.field('Placeholder', `<input class="input" data-qf="placeholder" value="${esc(q.placeholder || '')}">`)}
-              <div class="row">${A.toggle('_', q.required, 'Required').replace('data-bind="_"', 'data-qf="required"')}${['choice', 'multi'].includes(q.type) ? A.toggle('_', q.display === 'cards', 'Show as cards').replace('data-bind="_"', 'data-qf="display"') : ''}${q.type === 'multi' || q.type === 'choice' ? A.toggle('_', q.use_services, 'Include quote services').replace('data-bind="_"', 'data-qf="use_services"') : ''}</div>
+              <div class="row">${A.toggle('_', q.required, 'Required').replace('data-bind="_"', 'data-qf="required"')}${['choice', 'multi'].includes(q.type) ? `<select class="select" data-qf="display" style="width:auto;padding:6px 10px;font-size:13px" aria-label="Draw the choices as">${[['list', 'Choices as the Look says'], ['cards', 'Choices as cards'], ['pills', 'Choices as pills'], ['images', 'Choices as photo cards']].map(([v, l]) => `<option value="${v}" ${(q.display || 'list') === v ? 'selected' : ''}>${l}</option>`).join('')}</select>` : ''}${q.type === 'multi' || q.type === 'choice' ? A.toggle('_', q.use_services, 'Include quote services').replace('data-bind="_"', 'data-qf="use_services"') : ''}</div>
               ${routeRows(q)}
             </div>`).join('')}<button class="btn btn-link btn-sm" data-add-q>+ Add question</button>` : ''}
         </div>`).join('');
@@ -194,7 +195,7 @@
           const q = s.questions[Number(qe.dataset.qi)], f = e.target.dataset.qf;
           if (f === 'options') q.options = e.target.value.split('\n').map((x) => x.trim()).filter(Boolean);
           else if (f === 'required' || f === 'use_services') q[f] = e.target.checked;
-          else if (f === 'display') q.display = e.target.checked ? 'cards' : 'list';
+          else if (f === 'display') q.display = e.target.value || 'list';
           else q[f] = e.target.value;
           if (f === 'type') renderSteps();
         }
@@ -240,6 +241,10 @@
           const at = et.steps.findIndex((x) => x.type === 'schedule');
           et.steps.splice(at < 0 ? et.steps.length : at, 0, { key: '', type: 'availability', title: 'Checking your date…', subtitle: '', date_question_id: 'event_date', available_text: '', unavailable_text: '', cta: 'Set up a call' });
           renderSteps();
+        }
+        if (e.target.closest('[data-edit-look]')) {
+          const all = (A.cache.et && A.cache.et.event_types) || [];
+          return A.editBookingLook(et, all, () => { A.cache.et = null; A.render(); });
         }
         if (e.target.closest('[data-add-step]')) { et.steps.push({ key: '', type: 'questions', title: 'A few more details', subtitle: '', questions: [{ id: '', label: 'Your question', type: 'text', options: [], required: false }] }); renderSteps(); }
         if (e.target.closest('[data-save]')) {

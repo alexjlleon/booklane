@@ -1,10 +1,16 @@
-/* Multi-step booking flow with partial lead capture */
+/* Multi-step booking flow with partial lead capture.
+
+   How it looks comes from the page's look (eventType.style, see src/services/form-style.js),
+   drawn by public/js/look.js, the same engine custom forms use. In preview (the admin's Look
+   editor) nothing is saved or booked, and the editor sends new looks over postMessage. */
 (function () {
   'use strict';
   const { esc, api, icons, $, $$ } = BL;
   const D = BL.data, biz = D.business, et = D.eventType;
   const params = new URLSearchParams(location.search);
   const storeKey = `lead:${biz.slug}:${et.slug}`;
+  const S = Object.assign({}, et.style || {});
+  const PREVIEW = !!D.preview;
 
   const st = {
     i: 0, tz: BL.guessTz(), slot: null, answers: {}, contact: { first_name: '', last_name: '', email: '', phone: '', sms_consent: false },
@@ -13,6 +19,7 @@
     // page offers rather than nothing at all.
     placeId: ((et.places || [])[0] || {}).id || null,
     guests: [], guestDraft: '', guestsOpen: false, guestError: null,
+    typed: {}, calMonth: {},   // typed dates in progress, and the month each inline date calendar shows
   };
   const MAX_GUESTS = 5;
   const guestsOn = () => (et.settings || {}).allow_guests !== false;
@@ -40,6 +47,7 @@
 
   let leadPromise = null;
   function ensureLead() {
+    if (PREVIEW) return Promise.resolve(null);
     if (st.leadToken) return Promise.resolve(st.leadToken);
     if (!leadPromise) {
       leadPromise = api('POST', `/api/public/b/${biz.slug}/leads`, { source: 'booking', event_type_slug: et.slug, meta: BL.leadMeta() })
@@ -52,26 +60,44 @@
   function capture(patch, immediate) { ensureLead().then((t) => t && saver.queue(Object.assign(progressPatch(), patch), immediate)); }
 
   // --------- Rendering ---------
-  function side() {
+  const logoHtml = () => BL.Look.logoHtml(S, biz);
+  const titleOf = () => bookingEt().name;
+  const descOf = () => (!routeTarget() && et.description ? et.description : '');
+
+  /** Length, where, who, and the time they picked. Refreshed in place when they pick one. */
+  function meta() {
     const hosts = (et.hosts || []).map((h) => h.name).join(', ');
-    return `<aside class="booker-side">
-      <div class="biz">${BL.logo(biz)}<div class="biz-name">${esc(biz.name)}</div></div>
-      <div><h1 class="event-title">${esc(bookingEt().name)}</h1>${!routeTarget() && et.description ? `<p class="muted desc" style="margin:8px 0 0">${esc(et.description)}</p>` : ''}</div>
-      <div class="meta-list">
+    return `<div class="bk-meta"><div class="meta-list">
         <div>${icons.clock}${bookingEt().duration_min} min</div>
         <div>${BL.locIcon(et.location_type)}${esc(et.location_type === 'in_person' && et.location_value ? et.location_value : et.location_label)}</div>
         ${hosts && et.hosts.length === 1 ? `<div>${icons.user}${esc(hosts)}</div>` : ''}
       </div>
-      ${st.slot ? `<div class="selected-time">${icons.cal.replace('<svg', '<svg width="16" height="16" style="vertical-align:-3px;margin-right:6px"')}${esc(BL.fmtDate(st.slot, st.tz, { weekday: 'short', month: 'short' }))}, ${esc(BL.fmtTime(st.slot, st.tz))}</div>` : ''}
+      ${st.slot ? `<div class="selected-time">${icons.cal.replace('<svg', '<svg width="16" height="16" style="vertical-align:-3px;margin-right:6px"')}${esc(BL.fmtDate(st.slot, st.tz, { weekday: 'short', month: 'short' }))}, ${esc(BL.fmtTime(st.slot, st.tz))}</div>` : ''}</div>`;
+  }
+  function refreshMeta() { const el = $('.bk-meta', app); if (el) el.outerHTML = meta(); }
+
+  function side() {
+    const trust = S.show_trust !== false ? (biz.settings.trust_points || []) : [];
+    const showLogo = S.show_logo !== false, showName = S.show_name !== false;
+    const title = S.show_title !== false, desc = S.show_description !== false && descOf();
+    return `<aside class="booker-side">
+      ${showLogo || showName ? `<div class="biz">${showLogo ? logoHtml() : ''}${showName ? `<div class="biz-name">${esc(biz.name)}</div>` : ''}</div>` : ''}
+      ${title || desc ? `<div>${title ? `<h1 class="event-title">${esc(titleOf())}</h1>` : ''}${desc ? `<p class="muted desc" style="margin:8px 0 0">${esc(desc)}</p>` : ''}</div>` : ''}
+      ${meta()}
       ${biz.settings.urgency_text ? `<div class="urgency">${esc(biz.settings.urgency_text)}</div>` : ''}
-      <ul class="trust">${(biz.settings.trust_points || []).map((t) => `<li>${esc(t)}</li>`).join('')}</ul>
-      ${BL.about([routeTarget() ? '' : et.description], biz.settings.trust_points)}
+      ${trust.length ? `<ul class="trust">${trust.map((t) => `<li>${esc(t)}</li>`).join('')}</ul>` : ''}
+      ${BL.about([S.show_description !== false ? descOf() : ''], trust)}
     </aside>`;
   }
+
+  /** One column: banner, logo, title, and the call's details under them. */
+  const header = () => BL.Look.header(S, biz, { title: titleOf(), description: descOf(), extra: meta() });
 
   function field(name, label, input, required) {
     return `<div class="field"><label for="f-${name}">${esc(label)}${required ? ' <span class="req">*</span>' : ''}</label>${input}</div>`;
   }
+  // With labels hidden by the look, the placeholder carries the label.
+  const hidden = () => S.show_labels === false;
 
   // "We're available!" — answered from the dates the business has marked as taken.
   function renderAvailability(step) {
@@ -142,12 +168,13 @@
   function renderContact(step) {
     const f = step.fields || {};
     const c = st.contact;
-    const inp = (name, type, auto, ph) => `<input class="input" id="f-${name}" name="${name}" type="${type}" autocomplete="${auto}" value="${esc(c[name] || '')}" placeholder="${esc(ph || '')}" data-contact>`;
+    const inp = (name, type, auto, ph, label, req) => `<input class="input" id="f-${name}" name="${name}" type="${type}" autocomplete="${auto}" value="${esc(c[name] || '')}" placeholder="${esc(hidden() ? label + (req ? ' *' : '') : ph || '')}" data-contact>`;
     const show = (k) => f[k] !== 'hidden';
+    const rq = { first_name: f.first_name === 'required', last_name: f.last_name === 'required', email: f.email !== 'optional', phone: f.phone === 'required' };
     return `<form class="step-form" novalidate>
-      <div class="grid-2">${show('first_name') ? field('first_name', 'First name', inp('first_name', 'text', 'given-name'), f.first_name === 'required') : ''}${show('last_name') ? field('last_name', 'Last name', inp('last_name', 'text', 'family-name'), f.last_name === 'required') : ''}</div>
-      ${show('email') ? field('email', 'Email', inp('email', 'email', 'email', 'you@example.com'), f.email !== 'optional') : ''}
-      ${show('phone') ? field('phone', 'Phone', inp('phone', 'tel', 'tel', '(555) 555-5555'), f.phone === 'required') : ''}
+      <div class="grid-2">${show('first_name') ? field('first_name', 'First name', inp('first_name', 'text', 'given-name', '', 'First name', rq.first_name), rq.first_name) : ''}${show('last_name') ? field('last_name', 'Last name', inp('last_name', 'text', 'family-name', '', 'Last name', rq.last_name), rq.last_name) : ''}</div>
+      ${show('email') ? field('email', 'Email', inp('email', 'email', 'email', 'you@example.com', 'Email', rq.email), rq.email) : ''}
+      ${show('phone') ? field('phone', 'Phone', inp('phone', 'tel', 'tel', '(555) 555-5555', 'Phone', rq.phone), rq.phone) : ''}
       ${guestsOn() ? renderGuests() : ''}
       ${show('sms_consent') ? `<label class="check"><input type="checkbox" name="sms_consent" data-contact ${c.sms_consent ? 'checked' : ''}><span>${esc(biz.settings.sms_consent_text)}</span></label>` : ''}
       ${biz.settings.privacy_note ? `<p class="muted small" style="margin-top:14px">${esc(biz.settings.privacy_note)}</p>` : ''}
@@ -159,22 +186,27 @@
     return q.options || [];
   }
 
-  function renderQuestion(q) {
-    const v = st.answers[q.id];
-    const req = q.required;
-    if (q.type === 'choice' || q.type === 'multi') {
-      const multi = q.type === 'multi';
-      const vals = [].concat(v || []);
-      const opts = questionOptions(q).map((o) => `<label class="opt ${multi ? '' : 'radio'} ${vals.includes(o) ? 'is-on' : ''}"><input type="${multi ? 'checkbox' : 'radio'}" name="${esc(q.id)}" value="${esc(o)}" ${vals.includes(o) ? 'checked' : ''} data-q="${esc(q.id)}" data-multi="${multi ? 1 : 0}"><span class="tick"></span><span>${esc(o)}</span></label>`).join('');
-      return `<div class="field" role="group" aria-label="${esc(q.label)}"><span class="label">${esc(q.label)}${req ? ' <span class="req">*</span>' : ''}</span><div class="options ${q.display === 'cards' ? '' : 'list'}"><input type="hidden" name="${esc(q.id)}">${opts}</div></div>`;
-    }
-    if (q.type === 'select') {
-      return field(q.id, q.label, `<select class="select" id="f-${esc(q.id)}" name="${esc(q.id)}" data-q="${esc(q.id)}"><option value="">Select…</option>${(q.options || []).map((o) => `<option ${o === v ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`, req);
-    }
-    if (q.type === 'textarea') return field(q.id, q.label, `<textarea class="textarea" id="f-${esc(q.id)}" name="${esc(q.id)}" data-q="${esc(q.id)}" placeholder="${esc(q.placeholder || '')}">${esc(v || '')}</textarea>`, req);
-    const type = q.type === 'number' ? 'number' : q.type === 'date' ? 'date' : 'text';
-    const min = q.type === 'date' ? ` min="${BL.todayIn(st.tz)}"` : '';
-    return field(q.id, q.label, `<input class="input" id="f-${esc(q.id)}" name="${esc(q.id)}" type="${type}"${min} value="${esc(v || '')}" data-q="${esc(q.id)}" placeholder="${esc(q.placeholder || '')}">`, req);
+  // Questions are drawn by the shared kit, so a booking page can show choices as cards, a list,
+  // pills or photo cards and dates as a calendar, typed boxes or the phone's picker.
+  // "list" is what the old Show as cards switch saved when off, so it means "as the look says".
+  const K = BL.Look.kit({
+    S, st, root: app,
+    questions: () => (steps[st.i] || {}).questions || [],
+    optionsFor: questionOptions,
+    displayOf: (q) => (q.display && q.display !== 'list' ? q.display : ''),
+    onAnswer: (qid, value, { kind, el, changed }) => {
+      const fl = el && el.closest('.field');
+      if (fl && fl.classList.contains('has-error')) { fl.classList.remove('has-error'); const fe = $('.field-error', fl); if (fe) fe.remove(); }
+      if (changed) capture({ answers: { [qid]: value } }, kind !== 'step');
+      if (kind === 'pick') maybeAdvance();
+    },
+  });
+  const renderQuestion = (q) => K.renderQuestion(q);
+  /** A step that is one single pick moves on by itself, if the look says so. */
+  function maybeAdvance() {
+    const step = steps[st.i];
+    if (S.auto_advance === false || !step || step.type !== 'questions' || (step.questions || []).length !== 1 || isLast()) return;
+    setTimeout(() => go(1), 200);
   }
 
   function isLast() { return nextIndex(st.i) === -1; }
@@ -201,28 +233,40 @@
       </label>`).join('')}</div></div>`;
   }
 
+  function stepHead(step) {
+    if (step.type === 'availability' && st.avail && !st.avail.loading) return '';
+    const t = S.show_step_titles !== false && step.title ? `<h2>${esc(step.title)}</h2>` : '';
+    const sub = S.show_subtitles !== false && step.subtitle ? `<p>${esc(step.subtitle)}</p>` : '';
+    return t || sub ? `<div class="step-head">${t}${sub}</div>` : '';
+  }
+
+  function nav(step) {
+    const back = prevIndex(st.i) >= 0 && S.show_back !== false ? `<button type="button" class="btn btn-link" data-back>${icons.left} ${esc(S.back_label || 'Back')}</button>` : '';
+    const label = isLast() ? esc((et.settings || {}).book_button || 'Book my call') : esc(step.type === 'availability' ? (step.cta || 'Set up a call') : (S.continue_label || 'Continue'));
+    return `<div class="step-nav"><div class="nav-left">${back}<span class="save-state ${st.saveState}">${st.saveState === 'saved' ? 'Progress saved' : ''}</span></div>
+      <button type="button" class="btn btn-primary btn-lg f-next" data-next ${st.busy ? 'disabled' : ''}>${st.busy ? '<span class="spinner"></span>' : ''}${label} ${isLast() || st.busy ? '' : icons.right}</button></div>`;
+  }
+
+  let sched = null;
   function render() {
     const step = steps[st.i];
-    const pos = visiblePos(st.i), total = visibleCount();
+    const shown = steps.map((s, i) => i).filter((i) => !st.skip.has(i));
     let body = '';
     if (step.type === 'schedule') body = (routeTarget() ? '' : placeChooser()) + '<div id="scheduler"></div>';
     else if (step.type === 'availability') body = renderAvailability(step);
     else if (step.type === 'contact') body = renderContact(step);
-    else body = `<form class="step-form" novalidate>${(step.questions || []).map(renderQuestion).join('')}</form>`;
-    app.innerHTML = `<div class="shell"><div class="card booker">${side()}
-      <main class="booker-main">
-        ${(et.settings || {}).show_progress === false ? '' : `<div class="progress" aria-label="Step ${pos} of ${total}"><div class="progress-bar"><span style="width:${Math.round((pos / total) * 100)}%"></span></div><div class="progress-count">${pos} / ${total}</div></div>`}
-        ${step.type === 'availability' && st.avail && !st.avail.loading ? '' : `<div class="step-head"><h2>${esc(step.title || '')}</h2>${step.subtitle ? `<p>${esc(step.subtitle)}</p>` : ''}</div>`}
+    else body = `<form class="step-form q-grid" novalidate>${(step.questions || []).map(renderQuestion).join('')}</form>`;
+    const inner = `${BL.Look.progress(S, shown.map((i) => steps[i].title), shown.indexOf(st.i))}
+        ${stepHead(step)}
         ${st.error ? `<div class="form-error" role="alert">${esc(st.error)}</div>` : ''}
         <div class="step-body">${body}</div>
-        <div class="step-nav">
-          <div>${prevIndex(st.i) >= 0 ? `<button type="button" class="btn btn-link" data-back>${icons.left} Back</button>` : `<span class="save-state ${st.saveState}">${st.saveState === 'saved' ? 'Progress saved' : ''}</span>`}</div>
-          ${prevIndex(st.i) >= 0 ? `<span class="save-state ${st.saveState}">${st.saveState === 'saved' ? 'Progress saved' : ''}</span>` : ''}
-          <button type="button" class="btn btn-primary btn-lg" data-next ${st.busy ? 'disabled' : ''}>${st.busy ? '<span class="spinner"></span>' : ''}${isLast() ? esc((et.settings || {}).book_button || 'Book my call') : step.type === 'availability' ? (step.cta || 'Set up a call') : 'Continue'} ${isLast() || st.busy ? '' : icons.right}</button>
-        </div>
-      </main></div></div>${BL.powered()}`;
+        ${nav(step)}`;
+    app.innerHTML = BL.Look.sideLayout(S)
+      ? `<div class="shell"><div class="card booker f-card">${side()}<main class="booker-main">${inner}</main></div></div>${BL.powered()}`
+      : `<div class="shell"><div class="card f-card f-single">${header()}<main class="f-main">${inner}</main></div></div>${BL.powered()}`;
     if (step.type === 'schedule') {
-      BL.Scheduler({ root: $('#scheduler'), slug: biz.slug, eventSlug: bookingEt().slug, tz: st.tz, selected: st.slot, maxDaysAhead: bookingEt().max_days_ahead,
+      sched = BL.Scheduler({ root: $('#scheduler'), slug: biz.slug, eventSlug: bookingEt().slug, tz: st.tz, selected: st.slot, maxDaysAhead: bookingEt().max_days_ahead,
+        calendarStyle: S.calendar_style,
         dateCheck: { business: biz, onEvent: (date, available) => {
           st.answers.event_date = date;
           capture({ answers: { event_date: date, date_available: available ? 'yes' : 'already booked' } }, true);
@@ -233,16 +277,15 @@
           const label = `${BL.fmtDate(iso, st.tz, { weekday: 'short', month: 'short', year: 'numeric' })} at ${BL.fmtTime(iso, st.tz)} (${st.tz})`;
           st.answers.requested_time = label;
           capture({ answers: { requested_time: label } }, true);
-          const sideEl = $('.booker-side');
-          if (sideEl) sideEl.outerHTML = side();
-          // On a phone they press Continue, as the bar under the times says.
-          if (!BL.isPhone()) setTimeout(() => go(1), 180);
+          refreshMeta();
+          // With the row of days they press Continue, as the bar under the times says.
+          if (!(sched && sched.days)) setTimeout(() => go(1), 180);
         },
       });
     }
     if (step.type === 'availability') checkDate(step);
     const focusable = $('.step-form .input, .step-form .select, .step-form .textarea');
-    if (focusable && window.innerWidth > 860 && !BL.data.embed) focusable.focus({ preventScroll: true });
+    if (focusable && window.innerWidth > 860 && !BL.data.embed && !PREVIEW) focusable.focus({ preventScroll: true });
   }
 
   // --------- Validation ---------
@@ -267,6 +310,8 @@
     if (step.type === 'questions') {
       for (const q of step.questions || []) {
         const v = st.answers[q.id];
+        const bad = K.dateProblem(q);
+        if (bad) { errors[q.id] = bad; continue; }
         if (q.required && (v == null || v === '' || (Array.isArray(v) && !v.length))) errors[q.id] = 'Required';
       }
     }
@@ -295,6 +340,7 @@
   }
 
   async function book() {
+    if (PREVIEW) { st.error = 'Preview only. Nothing was booked.'; return render(); }
     st.busy = true; render();
     try {
       await ensureLead();
@@ -325,16 +371,19 @@
     if (remove) { st.guests = st.guests.filter((g) => g !== remove.dataset.guestRemove); return repaintGuests(); }
     if (e.target.closest('[data-guest-open]')) { st.guestsOpen = true; return repaintGuests(); }
     if (e.target.closest('[data-guest-add]')) { commitGuest(); return repaintGuests(); }
+    if (K.click(e)) return;
     if (e.target.closest('[data-next]')) { e.preventDefault(); go(1); }
     else if (e.target.closest('[data-back]')) { e.preventDefault(); go(-1); }
   });
   app.addEventListener('submit', (e) => { e.preventDefault(); go(1); });
   app.addEventListener('keydown', (e) => {
+    if (K.keydown(e)) return;
     if (e.key === 'Enter' && e.target.matches('[data-guest-input]')) { e.preventDefault(); commitGuest(); return repaintGuests(); }
     if (e.key === 'Enter' && e.target.matches('input.input')) { e.preventDefault(); go(1); } });
   function onInput(e) {
     const t = e.target;
     if (t.hasAttribute('data-guest-input')) { st.guestDraft = t.value; return; }
+    if (K.typed(t, e.type === 'change')) return;
     if (t.hasAttribute('data-place')) {
       st.placeId = t.value;
       const chosen = (et.places || []).find((p) => p.id === t.value);
@@ -356,17 +405,14 @@
       if (t.dataset.multi === '1') st.answers[id] = $$(`input[data-q="${CSS.escape(id)}"]:checked`, app).map((x) => x.value);
       else st.answers[id] = t.value;
       // A different calendar means a time picked earlier may not exist on it.
-      if (bookingEt().slug !== before) { st.slot = null; const sideEl = $('.booker-side'); if (sideEl) sideEl.outerHTML = side(); }
+      if (bookingEt().slug !== before) { st.slot = null; const sideEl = $('.booker-side'); if (sideEl) sideEl.outerHTML = side(); else refreshMeta(); }
       if (t.closest('.opt')) $$(`input[data-q="${CSS.escape(id)}"]`, app).forEach((x) => x.closest('.opt').classList.toggle('is-on', x.checked));
       capture({ answers: { [id]: st.answers[id] } }, t.type === 'radio' || t.type === 'checkbox' || e.type === 'change');
-      if (t.type === 'radio') {
-        const step = steps[st.i];
-        if ((step.questions || []).length === 1 && !isLast()) setTimeout(() => go(1), 200);
-      }
+      if (t.type === 'radio' && e.type === 'change') maybeAdvance();
     }
   }
   app.addEventListener('input', onInput);
-  app.addEventListener('change', (e) => { if (e.target.type === 'checkbox' || e.target.type === 'radio' || e.target.tagName === 'SELECT' || e.target.type === 'date') onInput(e); });
+  app.addEventListener('change', (e) => { const t = e.target; if (['checkbox', 'radio', 'date', 'number', 'range'].includes(t.type) || t.tagName === 'SELECT' || t.hasAttribute('data-dpart')) onInput(e); });
 
   // Accepts ?event_date=…&first_name=…&phone=…&email=… from a short CTA on the website.
   async function prefillFromUrl() {
@@ -397,6 +443,8 @@
 
   // --------- Boot: resume a saved lead or prefill from a quote ---------
   async function boot() {
+    BL.Look.apply(S, biz);
+    if (PREVIEW) return startPreview();
     const resume = params.get('resume') || (BL.store.get(storeKey) || {}).token;
     if (resume) {
       try {
@@ -435,5 +483,19 @@
     if (st.skip.has(st.i)) st.i = steps.findIndex((s) => s.type === 'schedule');
     render();
   }
+  // The Look editor's live preview: the real page, fed each change of look as it is made.
+  function startPreview() {
+    window.addEventListener('message', (e) => {
+      if (e.origin !== location.origin || !e.data || e.data.type !== 'availvo:booking-preview') return;
+      for (const k of Object.keys(S)) delete S[k];
+      Object.assign(S, e.data.style || {});
+      if (typeof e.data.step === 'number') { st.i = Math.max(0, Math.min(e.data.step, steps.length - 1)); st.error = null; }
+      BL.Look.apply(S, biz);
+      render();
+    });
+    if (window.parent !== window) window.parent.postMessage({ type: 'availvo:booking-preview-ready' }, location.origin);
+    render();
+  }
+
   boot();
 })();

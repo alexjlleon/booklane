@@ -17,6 +17,9 @@
       root = root.querySelector('[data-sched]');
     }
     const dcs = { type: dcTypes.length ? dcTypes[0][0] : null, date: '', busy: false, result: null, run: 0 };
+    // "days": a row of days and a grid of times. "month": the month calendar. "auto": days on
+    // phones, the month on wider screens. Set by the page's look.
+    const daysMode = () => opts.calendarStyle === 'days' || (opts.calendarStyle !== 'month' && BL.isPhone());
     const today = () => BL.todayIn(st.tz);
     const monthOf = (d) => d.slice(0, 7);
     const addMonths = (m, n) => { const [y, mo] = m.split('-').map(Number); const d = new Date(Date.UTC(y, mo - 1 + n, 1)); return d.toISOString().slice(0, 7); };
@@ -58,7 +61,7 @@
       st.loading = true; render();
       let days;
       try {
-        if (BL.isPhone()) await loadStrip(month);
+        if (daysMode()) await loadStrip(month);
         days = await load(month);
       } catch (e) { st.loading = false; root.innerHTML = `<div class="form-error">${esc(e.message)}</div>`; return; }
       st.loading = false;
@@ -102,7 +105,7 @@
 
     function render() {
       syncBar();
-      if (BL.isPhone()) return renderPhone();
+      if (daysMode()) return renderPhone();
       const days = st.cache[cacheKey(st.month)] || {};
       const slots = st.day && days[st.day] ? days[st.day] : [];
       const slotsHtml = st.loading
@@ -165,7 +168,7 @@
       const row = ready ? tiles(today(), st.stripTo || st.month) : Array.from({ length: 5 }, () => '<div class="skeleton day-tile-sk"></div>').join('');
       root.innerHTML = `<div class="sched-m">
         <section class="sched-card">
-          <div class="sched-card-head"><strong>Pick a day</strong><button type="button" class="sched-link" data-all aria-expanded="${st.allDates}">${st.allDates ? 'Fewer dates' : 'All dates'} ${icons.right}</button></div>
+          <div class="sched-card-head"><strong>Pick a day</strong><span class="sched-head-tools">${st.allDates ? '' : `<button type="button" class="icon-btn strip-arrow" data-strip-go="-1" aria-label="Earlier days">${icons.left}</button><button type="button" class="icon-btn strip-arrow" data-strip-go="1" aria-label="Later days">${icons.right}</button>`}<button type="button" class="sched-link" data-all aria-expanded="${st.allDates}">${st.allDates ? 'Fewer dates' : 'All dates'} ${icons.right}</button></span></div>
           ${st.allDates ? monthHtml() : `<div class="day-strip" data-strip>${row}</div>`}
         </section>
         <section class="sched-card">
@@ -198,10 +201,10 @@
       const next = nav && nav.querySelector('[data-next]');
       if (!next) return;
       let hint = nav.querySelector('.sched-hint');
-      const phone = BL.isPhone();
-      if (!next.querySelector('.spinner')) next.disabled = phone && !st.selected;
-      nav.classList.toggle('sched-nav', phone);
-      if (!phone) { if (hint) hint.remove(); return; }
+      const days = daysMode();
+      if (!next.querySelector('.spinner')) next.disabled = days && !st.selected;
+      nav.classList.toggle('sched-nav', days);
+      if (!days) { if (hint) hint.remove(); return; }
       if (!hint) { nav.insertAdjacentHTML('afterbegin', '<div class="sched-hint" role="status"></div>'); hint = nav.querySelector('.sched-hint'); }
       const text = st.selected ? `${BL.fmtDate(st.selected, st.tz, { weekday: 'short', month: 'short' })} at ${fullTime(st.selected)}` : 'Select a time to continue';
       if (hint.textContent !== text) hint.textContent = text;
@@ -279,9 +282,11 @@
       const day = e.target.closest('[data-day]');
       if (day && !day.disabled) {
         st.day = day.dataset.day;
-        if (BL.isPhone()) { st.month = monthOf(st.day); if (st.allDates) { st.allDates = false; st.center = true; } }
+        if (daysMode()) { st.month = monthOf(st.day); if (st.allDates) { st.allDates = false; st.center = true; } }
         render(); return;
       }
+      const go = e.target.closest('[data-strip-go]');
+      if (go) { const strip = root.querySelector('[data-strip]'); if (strip) strip.scrollBy({ left: Number(go.dataset.stripGo) * strip.clientWidth * 0.8, behavior: 'smooth' }); return; }
       if (e.target.closest('[data-all]')) { st.allDates = !st.allDates; st.center = true; render(); return; }
       const slot = e.target.closest('[data-slot]');
       if (slot) { st.selected = slot.dataset.slot; render(); opts.onSelect && opts.onSelect(st.selected); }
@@ -306,6 +311,6 @@
 
     const startMonth = st.selected ? new Intl.DateTimeFormat('en-CA', { timeZone: st.tz, year: 'numeric', month: '2-digit' }).format(new Date(st.selected)).slice(0, 7) : monthOf(today());
     show(startMonth);
-    return { get tz() { return st.tz; }, get selected() { return st.selected; }, refresh() { st.cache = {}; st.stripTo = ''; show(st.month); } };
+    return { get tz() { return st.tz; }, get selected() { return st.selected; }, get days() { return daysMode(); }, refresh() { st.cache = {}; st.stripTo = ''; show(st.month); } };
   };
 })();

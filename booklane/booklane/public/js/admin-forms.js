@@ -162,6 +162,255 @@
     visual: '<div class="lt lt-vis"><i class="main"><b class="ban"></b><b class="logo"></b><span class="pics"><b></b><b></b><b></b></span><b class="btn pill"></b></i></div>',
   };
 
+  /**
+   * The Look editor: layout cards and every setting, for a form or a booking page.
+   * ctx: { layouts, fonts, brand_color, logo_url, kind: 'form' | 'booking' }.
+   */
+  function lookPanel(s, ctx) {
+    const { layouts, fonts, kind } = ctx;
+    const data = ctx;
+    const form = kind !== 'booking';
+    const isFull = s.layout === 'full';
+    return `<div class="panel">
+        <b>Layout</b>
+        <div class="help" style="margin:4px 0 12px">Picking one sets everything below to suit it. Your colours, images, fonts and custom CSS are kept.</div>
+        <div class="layout-pick">${layouts.map((l) => `<button type="button" class="layout-card ${s.layout === l.id ? 'on' : ''}" data-layout="${l.id}">
+          ${THUMB[l.id] || ''}<span class="lc-name">${esc(l.name)}</span><span class="lc-blurb">${esc(l.blurb)}</span></button>`).join('')}</div>
+      </div>
+
+      <div class="look">
+      ${section('Progress', `<div class="grid-2">
+          ${A.field('Show progress as', sel('progress', s.progress, { bar: 'A bar', steps: 'Named steps', dots: 'Dots', count: 'Step 2 of 4', none: 'Hide it' }))}
+          ${s.progress === 'bar' ? `<div class="field"><label>&nbsp;</label>${tog('progress_count', s.progress_count, 'Show 2 / 4 beside the bar')}</div>` : ''}
+        </div>`, true)}
+
+      ${section('What shows', `<div class="tog-grid">
+          ${tog('show_logo', s.show_logo, 'Logo')}
+          ${tog('show_name', s.show_name, 'Business name')}
+          ${tog('show_title', s.show_title, form ? 'Form title' : 'Page title')}
+          ${tog('show_description', s.show_description, 'Description')}
+          ${isFull ? tog('show_sidebar', s.show_sidebar, 'Side panel') : ''}
+          ${tog('show_trust', s.show_trust, 'Trust points')}
+          ${tog('show_step_titles', s.show_step_titles, 'Step headings')}
+          ${tog('show_subtitles', s.show_subtitles, 'Step subheadings')}
+          ${tog('show_labels', s.show_labels, 'Field labels (off puts them inside the box)')}
+          ${tog('show_back', s.show_back, 'Back button')}
+        </div>`, true)}
+
+      ${section('Colors', `<div class="grid-2">
+          ${A.field('Accent (buttons, selected choices)', color('accent', s.accent, data.brand_color || '#6d4aff'), 'Blank uses your brand colour.')}
+          ${A.field('Button text', color('button_text', s.button_text, '#ffffff'), 'Blank picks black or white to suit the accent.')}
+          ${A.field('Page background', color('background', s.background, '#f6f4f1'))}
+          ${A.field('Card', color('surface', s.surface, '#ffffff'))}
+          ${A.field('Text', color('text', s.text, '#1c1a22'))}
+        </div>`, true)}
+
+      ${section('Images', `
+          ${A.field('Logo', imagePick('data-st="logo_url"', s.logo_url, data.logo_url ? 'Blank uses the logo from your business settings.' : 'No logo in your business settings yet, so the first letter of the name is used.'))}
+          ${A.field('Banner across the top', imagePick('data-st="header_image"', s.header_image, 'Wide photos work best, about 1600 × 500.'))}
+          ${A.field('Banner height (px)', num('header_height', s.header_height, 'min="60" max="420" step="10"'))}
+          ${A.field('Page background photo', imagePick('data-st="background_image"', s.background_image))}
+          ${A.field(`Darken the background photo (${s.overlay}%)`, `<input type="range" min="0" max="85" step="5" data-st="overlay" value="${esc(s.overlay)}" style="width:100%">`)}
+        `, s.layout === 'visual')}
+
+      ${section('Text', `<div class="grid-2">
+          ${A.field('Font', sel('font', s.font, Object.fromEntries(fonts.map((f) => [f, f]))))}
+          ${A.field('Heading font', sel('heading_font', s.heading_font, Object.fromEntries([['', 'Same as the text']].concat(fonts.map((f) => [f, f])))))}
+          ${A.field('Text size (px)', num('font_size', s.font_size, 'min="12" max="20"'))}
+          ${A.field('Heading size (px)', num('heading_size', s.heading_size, 'min="14" max="44"'))}
+        </div>`)}
+
+      ${section('Size and shape', `<div class="grid-2">
+          ${A.field('Width (px)', num('width', s.width, 'min="0" max="1400" step="10"'), '0 means the layout\'s own width.')}
+          ${A.field('Spacing', sel('density', s.density, { compact: 'Compact', comfortable: 'Comfortable', spacious: 'Spacious' }))}
+          ${A.field('Card corners (px)', num('radius', s.radius, 'min="0" max="40"'))}
+          ${A.field('Field corners (px)', num('field_radius', s.field_radius, 'min="0" max="30"'))}
+          ${A.field('Line up', sel('align', s.align, { left: 'Left', center: 'Centered' }))}
+          <div class="field"><label>&nbsp;</label><div class="stack" style="gap:8px">${tog('shadow', s.shadow, 'Shadow')}${tog('border', s.border, 'Border')}</div></div>
+        </div>`)}
+
+      ${section('Buttons', `<div class="grid-2">
+          ${A.field('Shape', sel('button_shape', s.button_shape, { square: 'Square', rounded: 'Rounded', pill: 'Pill' }))}
+          ${A.field('Style', sel('button_style', s.button_style, { filled: 'Filled', outline: 'Outline' }))}
+          ${A.field('Next button says', txt('continue_label', s.continue_label))}
+          ${A.field('Back button says', txt('back_label', s.back_label))}
+        </div>${tog('button_full', s.button_full, 'Full-width button')}<div class="help" style="margin-top:6px">${form ? "The last step's button is set on the Settings tab." : "The last step's button is set under Basics on the page."}</div>`)}
+
+      ${section('Choices', `<div class="grid-2">
+          ${A.field('Draw choices as', sel('option_style', s.option_style, { cards: 'Cards', list: 'A list', pills: 'Pills', images: 'Photo cards' }), form ? 'Each question can override this.' : 'Each question can override this. Photo cards show the first letter of each choice.')}
+          ${A.field('Columns', sel('option_columns', s.option_columns, { auto: 'Fit the space', 1: '1', 2: '2', 3: '3', 4: '4' }))}
+          ${A.field('Photo shape', sel('image_shape', s.image_shape, { square: 'Square', wide: 'Wide', tall: 'Tall', circle: 'Circle' }))}
+          ${A.field('Photo fit', sel('image_fit', s.image_fit, { cover: 'Fill the frame', contain: 'Show the whole picture' }))}
+        </div>${tog('auto_advance', s.auto_advance, 'Move on as soon as they pick (steps with a single pick-one question)')}`)}
+
+      ${section('Dates', A.field('Date questions show as', sel('date_display', s.date_display, { calendar: 'A calendar to click', typed: 'Type the numbers (MM / DD / YYYY)', picker: "The phone's date picker" }), form ? 'Each date question can override this under More options.' : ''))}
+
+      ${section('Calendar', `${A.field('Picking a time', sel('calendar_style', s.calendar_style || 'auto', { auto: 'Row of days on phones, month calendar on computers', days: 'Row of days and a grid of times everywhere', month: 'Month calendar everywhere' }))}
+          <div class="help">The row of days shows how many times are open each day, with a Continue button that waits for a time. The month calendar moves on as soon as a time is picked.</div>`, true)}
+
+      ${section('Custom CSS', A.field('Your own CSS', `<textarea class="textarea mono" rows="6" data-st="custom_css" placeholder=".f-title { letter-spacing: .02em; }">${esc(s.custom_css || '')}</textarea>`, `Applies to this ${form ? 'form' : 'page'} only. Useful classes: <code>.f-card</code>, <code>.f-title</code>, <code>.step-head</code>, <code>.opt</code>, <code>.f-next</code>, <code>.day-tile</code>, <code>.time-grid .slot</code>.`))}
+      </div>`;
+  }
+
+  /** Reads the Look controls inside `pane` back into `style`. */
+  function readLook(pane, style) {
+    $$('[data-st]', pane).forEach((el) => {
+      const k = el.dataset.st;
+      if (el.type === 'checkbox') style[k] = el.checked;
+      else if (el.type === 'number' || el.type === 'range') style[k] = el.value === '' ? 0 : Number(el.value);
+      else style[k] = el.value;
+    });
+    if (style.option_columns !== 'auto') style.option_columns = Number(style.option_columns) || 'auto';
+    return style;
+  }
+  // Brand pieces travel with you from layout to layout; structure comes from the new one.
+  const LAYOUT_KEEPS = ['accent', 'background', 'surface', 'text', 'button_text', 'background_image', 'overlay', 'header_image', 'logo_url', 'font', 'heading_font', 'custom_css', 'continue_label', 'back_label', 'calendar_style'];
+
+  /** Uploads one image chosen with the hidden file input, then hands back its address. */
+  function pickImage(root, onDone) {
+    const input = $('[data-file]', root);
+    input.value = '';
+    input.onchange = () => {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      if (file.size > 5 * 1024 * 1024) return A.toast('That image is too large. Keep it under 5MB.', true);
+      const reader = new FileReader();
+      reader.onload = async () => {
+        try { const r = await A.guard(() => api('POST', '/uploads', { data: reader.result }), 'Image uploaded'); onDone(r.url); } catch (e) { /* toast shown */ }
+      };
+      reader.readAsDataURL(file);
+    };
+    input.click();
+  }
+
+  // ---------------- the booking page Look editor ----------------
+  /**
+   * A booking page's look, in a drawer beside a live preview of the real page. Saves just the look,
+   * so nothing else on the page editor is touched. `et` must be saved already (the preview is of it).
+   */
+  async function editBookingLook(et, others, onSaved) {
+    const data = await api('GET', '/forms');
+    const layouts = (data.styles && data.styles.layouts) || [];
+    const fonts = (data.styles && data.styles.fonts) || ['Plus Jakarta Sans'];
+    const defaultsFor = (id) => Object.assign({}, (layouts.find((l) => l.id === id) || layouts[0] || {}).defaults || {});
+    // The way booking pages looked before looks existed.
+    const ORIGINAL = Object.assign(defaultsFor('full'), { option_style: 'list', date_display: 'picker', auto_advance: true, progress: 'bar', calendar_style: 'auto' });
+    let style = Object.assign(defaultsFor('full'), et.style || ORIGINAL);
+    const ctx = { layouts, fonts, brand_color: data.brand_color || A.me.business.brand_color, logo_url: data.logo_url || A.me.business.logo_url, kind: 'booking' };
+    const sources = [['', 'Copy a look from…'], ['original', 'The original booking page look']]
+      .concat((data.forms || []).map((f) => [`f:${f.id}`, `Form: ${f.name}`]))
+      .concat((others || []).filter((o) => o.id !== et.id && o.kind !== 'session').map((o) => [`b:${o.id}`, `Booking page: ${o.name}`]));
+    const lookOf = (key) => {
+      if (key === 'original') return ORIGINAL;
+      const [k, id] = key.split(':');
+      const hit = k === 'f' ? (data.forms || []).find((f) => String(f.id) === id) : (others || []).find((o) => String(o.id) === id);
+      return hit && hit.style;
+    };
+
+    A.drawer(`<div class="form-builder">
+      <div class="fb-edit">
+        <div class="drawer-head"><div><div class="small muted">Look of the booking page</div><h2>${esc(et.name)}</h2></div>
+          <div class="row" style="gap:6px"><button type="button" class="btn btn-ghost btn-sm fb-preview-toggle" data-toggle-preview>Preview</button><button class="icon-x" data-close-drawer aria-label="Close">&times;</button></div></div>
+        <div class="panel" style="padding:12px 14px"><div class="row" style="gap:8px;flex-wrap:nowrap"><select class="select" data-copy-look aria-label="Copy a look">${sources.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('')}</select></div>
+          <div class="help" style="margin-top:6px">Starts from another form's or page's look. Nothing is saved until you press Save look.</div></div>
+        <form id="look-form"><div data-pane="look">${lookPanel(style, ctx)}</div>
+          <div class="row between fb-actions"><span class="small muted">Applies to this page only.</span>
+            <div class="row"><button type="button" class="btn btn-ghost" data-close-drawer>Cancel</button><button type="submit" class="btn btn-primary">Save look</button></div></div>
+        </form>
+        <input type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden data-file>
+      </div>
+      <div class="fb-preview">
+        <div class="fb-preview-bar">
+          <div class="row" style="gap:8px"><span class="small muted">Live preview</span><select class="select" data-preview-step style="width:auto;padding:4px 8px;font-size:13px" aria-label="Step to preview">${(et.steps || []).map((x, i) => `<option value="${i}">${i + 1}. ${esc(x.title || x.type)}</option>`).join('')}</select></div>
+          <div class="seg" role="group" aria-label="Preview size"><button type="button" data-device="desktop">Desktop</button><button type="button" class="on" data-device="phone">Phone</button></div>
+        </div>
+        <div class="fb-frame-wrap phone"><iframe class="fb-frame" src="/app/booking-preview/${et.id}" title="Booking page preview"></iframe></div>
+      </div>
+    </div>`, (root) => {
+      root.classList.add('drawer-form');
+      const pane = () => $('[data-pane="look"]', root);
+      const frame = $('.fb-frame', root);
+      let ready = false, timer = null, step = null;
+      const send = () => {
+        if (!ready || !frame.contentWindow) return;
+        readLook(pane(), style);
+        frame.contentWindow.postMessage({ type: 'availvo:booking-preview', style, step }, location.origin);
+        step = null;
+      };
+      const later = () => { clearTimeout(timer); timer = setTimeout(send, 160); };
+      const repaint = (fresh) => {
+        if (!fresh) readLook(pane(), style);
+        const open = $$('.look-sec', root).filter((d) => d.open).map((d) => d.dataset.sec);
+        pane().innerHTML = lookPanel(style, ctx);
+        $$('.look-sec', root).forEach((d) => { d.open = open.includes(d.dataset.sec); });
+        send();
+      };
+      const onMsg = (e) => {
+        if (e.origin !== location.origin || !e.data || e.data.type !== 'availvo:booking-preview-ready' || e.source !== frame.contentWindow) return;
+        ready = true;
+        // The page opens on its calendar step, the part a look changes most.
+        const sched = (et.steps || []).findIndex((x) => x.type === 'schedule');
+        step = sched < 0 ? 0 : sched;
+        const pick = $('[data-preview-step]', root); if (pick) pick.value = String(step);
+        send();
+      };
+      window.addEventListener('message', onMsg);
+      const gone = new MutationObserver(() => { if (!document.body.contains(root)) { window.removeEventListener('message', onMsg); gone.disconnect(); } });
+      gone.observe(document.body, { childList: true });
+
+      root.addEventListener('click', (e) => {
+        const t = e.target;
+        if (t.closest('[data-toggle-preview]')) { root.classList.toggle('show-preview'); return; }
+        const dev = t.closest('[data-device]');
+        if (dev) { $$('[data-device]', root).forEach((b) => b.classList.toggle('on', b === dev)); $('.fb-frame-wrap', root).classList.toggle('phone', dev.dataset.device === 'phone'); return; }
+        const lay = t.closest('[data-layout]');
+        if (lay) {
+          readLook(pane(), style);
+          const kept = Object.fromEntries(LAYOUT_KEEPS.map((k) => [k, style[k]]));
+          style = Object.assign(defaultsFor(lay.dataset.layout), kept, { layout: lay.dataset.layout });
+          return repaint(true);
+        }
+        const clr = t.closest('[data-clear-st]');
+        if (clr) { const inp = $(`[data-st="${clr.dataset.clearSt}"]`, root); if (inp) inp.value = ''; return send(); }
+        const up = t.closest('[data-upload]');
+        if (up) { const target = $('input[data-st]', up.closest('.img-pick')); return pickImage(root, (url) => { target.value = url; repaint(); }); }
+        const ci = t.closest('[data-clear-img]');
+        if (ci) { const target = $('input[data-st]', ci.closest('.img-pick')); if (target) { target.value = ''; repaint(); } }
+      });
+      root.addEventListener('input', (e) => {
+        const t = e.target;
+        if (t.dataset.stColor) { const box = $(`[data-st="${t.dataset.stColor}"]`, root); if (box) box.value = t.value; }
+        if (t.dataset.st && /^#[0-9a-f]{6}$/i.test(t.value)) { const c = $(`[data-st-color="${t.dataset.st}"]`, root); if (c) c.value = t.value; }
+        if (t.dataset.st === 'overlay') { const lab = t.closest('.field') && $('label', t.closest('.field')); if (lab) lab.textContent = `Darken the background photo (${t.value}%)`; }
+        if (t.dataset.st || t.dataset.stColor) later();
+      });
+      root.addEventListener('change', (e) => {
+        const t = e.target;
+        if (t.matches('[data-copy-look]')) {
+          const src = t.value && lookOf(t.value);
+          t.value = '';
+          if (!src) return;
+          style = Object.assign(defaultsFor(src.layout || 'full'), JSON.parse(JSON.stringify(src)));
+          A.toast('Look copied. Press Save look to keep it.');
+          return repaint(true);
+        }
+        if (t.matches('[data-preview-step]')) { step = Number(t.value); return send(); }
+        if (t.matches('[data-st="show_sidebar"], [data-st="progress"], [data-st="logo_url"], [data-st="header_image"], [data-st="background_image"]')) return repaint();
+        if (t.dataset.st) later();
+      });
+      $('#look-form', root).addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        readLook(pane(), style);
+        try {
+          await A.guard(() => api('PATCH', `/event-types/${et.id}`, { style }), 'Look saved');
+          A.closeDrawer();
+          if (onSaved) onSaved();
+        } catch (err) { /* toast shown */ }
+      });
+    });
+  }
+  A.editBookingLook = editBookingLook;
+
   // ---------------- the builder ----------------
   function editForm(x, data) {
     const steps = JSON.parse(JSON.stringify(x ? x.steps : []));
@@ -287,87 +536,8 @@
         </div>
       </div>`;
 
-    // ----- Look tab -----
-    const lookTab = () => {
-      const s = style;
-      const isFull = s.layout === 'full';
-      return `<div class="panel">
-        <b>Layout</b>
-        <div class="help" style="margin:4px 0 12px">Picking one sets everything below to suit it. Your colours, images, fonts and custom CSS are kept.</div>
-        <div class="layout-pick">${layouts.map((l) => `<button type="button" class="layout-card ${s.layout === l.id ? 'on' : ''}" data-layout="${l.id}">
-          ${THUMB[l.id] || ''}<span class="lc-name">${esc(l.name)}</span><span class="lc-blurb">${esc(l.blurb)}</span></button>`).join('')}</div>
-      </div>
-
-      <div class="look">
-      ${section('Progress', `<div class="grid-2">
-          ${A.field('Show progress as', sel('progress', s.progress, { bar: 'A bar', steps: 'Named steps', dots: 'Dots', count: 'Step 2 of 4', none: 'Hide it' }))}
-          ${s.progress === 'bar' ? `<div class="field"><label>&nbsp;</label>${tog('progress_count', s.progress_count, 'Show 2 / 4 beside the bar')}</div>` : ''}
-        </div>`, true)}
-
-      ${section('What shows', `<div class="tog-grid">
-          ${tog('show_logo', s.show_logo, 'Logo')}
-          ${tog('show_name', s.show_name, 'Business name')}
-          ${tog('show_title', s.show_title, 'Form title')}
-          ${tog('show_description', s.show_description, 'Description')}
-          ${isFull ? tog('show_sidebar', s.show_sidebar, 'Side panel') : ''}
-          ${tog('show_trust', s.show_trust, 'Trust points')}
-          ${tog('show_step_titles', s.show_step_titles, 'Step headings')}
-          ${tog('show_subtitles', s.show_subtitles, 'Step subheadings')}
-          ${tog('show_labels', s.show_labels, 'Field labels (off puts them inside the box)')}
-          ${tog('show_back', s.show_back, 'Back button')}
-        </div>`, true)}
-
-      ${section('Colors', `<div class="grid-2">
-          ${A.field('Accent (buttons, selected choices)', color('accent', s.accent, data.brand_color || '#6d4aff'), 'Blank uses your brand colour.')}
-          ${A.field('Button text', color('button_text', s.button_text, '#ffffff'), 'Blank picks black or white to suit the accent.')}
-          ${A.field('Page background', color('background', s.background, '#f6f4f1'))}
-          ${A.field('Card', color('surface', s.surface, '#ffffff'))}
-          ${A.field('Text', color('text', s.text, '#1c1a22'))}
-        </div>`, true)}
-
-      ${section('Images', `
-          ${A.field('Logo', imagePick('data-st="logo_url"', s.logo_url, data.logo_url ? 'Blank uses the logo from your business settings.' : 'No logo in your business settings yet, so the first letter of the name is used.'))}
-          ${A.field('Banner across the top', imagePick('data-st="header_image"', s.header_image, 'Wide photos work best, about 1600 × 500.'))}
-          ${A.field('Banner height (px)', num('header_height', s.header_height, 'min="60" max="420" step="10"'))}
-          ${A.field('Page background photo', imagePick('data-st="background_image"', s.background_image))}
-          ${A.field(`Darken the background photo (${s.overlay}%)`, `<input type="range" min="0" max="85" step="5" data-st="overlay" value="${esc(s.overlay)}" style="width:100%">`)}
-        `, s.layout === 'visual')}
-
-      ${section('Text', `<div class="grid-2">
-          ${A.field('Font', sel('font', s.font, Object.fromEntries(fonts.map((f) => [f, f]))))}
-          ${A.field('Heading font', sel('heading_font', s.heading_font, Object.fromEntries([['', 'Same as the text']].concat(fonts.map((f) => [f, f])))))}
-          ${A.field('Text size (px)', num('font_size', s.font_size, 'min="12" max="20"'))}
-          ${A.field('Heading size (px)', num('heading_size', s.heading_size, 'min="14" max="44"'))}
-        </div>`)}
-
-      ${section('Size and shape', `<div class="grid-2">
-          ${A.field('Width (px)', num('width', s.width, 'min="0" max="1400" step="10"'), '0 means the layout\'s own width.')}
-          ${A.field('Spacing', sel('density', s.density, { compact: 'Compact', comfortable: 'Comfortable', spacious: 'Spacious' }))}
-          ${A.field('Card corners (px)', num('radius', s.radius, 'min="0" max="40"'))}
-          ${A.field('Field corners (px)', num('field_radius', s.field_radius, 'min="0" max="30"'))}
-          ${A.field('Line up', sel('align', s.align, { left: 'Left', center: 'Centered' }))}
-          <div class="field"><label>&nbsp;</label><div class="stack" style="gap:8px">${tog('shadow', s.shadow, 'Shadow')}${tog('border', s.border, 'Border')}</div></div>
-        </div>`)}
-
-      ${section('Buttons', `<div class="grid-2">
-          ${A.field('Shape', sel('button_shape', s.button_shape, { square: 'Square', rounded: 'Rounded', pill: 'Pill' }))}
-          ${A.field('Style', sel('button_style', s.button_style, { filled: 'Filled', outline: 'Outline' }))}
-          ${A.field('Next button says', txt('continue_label', s.continue_label))}
-          ${A.field('Back button says', txt('back_label', s.back_label))}
-        </div>${tog('button_full', s.button_full, 'Full-width button')}<div class="help" style="margin-top:6px">The last step's button is set on the Settings tab.</div>`)}
-
-      ${section('Choices', `<div class="grid-2">
-          ${A.field('Draw choices as', sel('option_style', s.option_style, { cards: 'Cards', list: 'A list', pills: 'Pills', images: 'Photo cards' }), 'Each question can override this.')}
-          ${A.field('Columns', sel('option_columns', s.option_columns, { auto: 'Fit the space', 1: '1', 2: '2', 3: '3', 4: '4' }))}
-          ${A.field('Photo shape', sel('image_shape', s.image_shape, { square: 'Square', wide: 'Wide', tall: 'Tall', circle: 'Circle' }))}
-          ${A.field('Photo fit', sel('image_fit', s.image_fit, { cover: 'Fill the frame', contain: 'Show the whole picture' }))}
-        </div>${tog('auto_advance', s.auto_advance, 'Move on as soon as they pick (steps with a single pick-one question)')}`)}
-
-      ${section('Dates', A.field('Date questions show as', sel('date_display', s.date_display, { calendar: 'A calendar to click', typed: 'Type the numbers (MM / DD / YYYY)', picker: "The phone's date picker" }), 'Each date question can override this under More options.'))}
-
-      ${section('Custom CSS', A.field('Your own CSS', `<textarea class="textarea mono" rows="6" data-st="custom_css" placeholder=".f-title { letter-spacing: .02em; }">${esc(s.custom_css || '')}</textarea>`, 'Applies to this form only. Useful classes: <code>.f-card</code>, <code>.f-title</code>, <code>.step-head</code>, <code>.opt</code>, <code>.f-next</code>.'))}
-      </div>`;
-    };
+    // ----- Look tab (shared with booking pages, see lookPanel) -----
+    const lookTab = () => lookPanel(style, { layouts, fonts, brand_color: data.brand_color, logo_url: data.logo_url, kind: 'form' });
 
     // ----- Settings tab -----
     const settingsTab = () => `<div class="panel stack">
@@ -576,7 +746,7 @@
         if (lay) {
           harvestStyle(root);
           // Brand pieces travel with you from layout to layout; structure comes from the new one.
-          const keep = ['accent', 'background', 'surface', 'text', 'button_text', 'background_image', 'overlay', 'header_image', 'logo_url', 'font', 'heading_font', 'custom_css', 'continue_label', 'back_label'];
+          const keep = LAYOUT_KEEPS;
           const kept = Object.fromEntries(keep.map((k) => [k, style[k]]));
           style = Object.assign(defaultsFor(lay.dataset.layout), kept, { layout: lay.dataset.layout });
           repaint(root, 'look', { styleIsFresh: true });

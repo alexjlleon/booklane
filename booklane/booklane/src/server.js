@@ -120,12 +120,26 @@ app.get('/app/form-preview', (req, res) => {
   const FSTYLE = require('./services/form-style');
   const b = B.byId(req.membership.id);
   res.html(page({ title: 'Form preview', business: b, bodyClass: 'form-page',
-    scripts: ['common.js', 'scheduler.js', 'form.js'],
+    scripts: ['common.js', 'look.js', 'scheduler.js', 'form.js'],
     data: {
       preview: true,
       business: { id: b.id, slug: b.slug, name: b.name, logo_url: b.logo_url, brand_color: b.brand_color, timezone: b.timezone, phone: b.phone, email: b.email, website: b.website, settings: B.publicSettings(b) },
       form: { slug: 'preview', name: '', description: '', steps: [], copy: FORMS.FORM_SETTINGS, shape: {}, style: FSTYLE.defaultsFor('full') },
     } }));
+});
+
+// The booking page Look editor's live preview: the real saved page, running booking.js with nothing
+// saved or booked, restyled by the editor over postMessage as each setting changes.
+app.get('/app/booking-preview/:id', (req, res) => {
+  requireAuth(req);
+  if (!req.membership) throw new HttpError(403, 'Create or join a business first');
+  const b = B.byId(req.membership.id);
+  const et = db.get("SELECT * FROM event_types WHERE id = ? AND business_id = ?", Number(req.params.id) || 0, b.id);
+  if (!et) throw new HttpError(404, 'Booking page not found');
+  const data = require('./routes/public').bookingPageData(b, et);
+  res.html(page({ title: 'Booking page preview', business: b, bodyClass: 'form-page booking-page',
+    scripts: ['common.js', 'look.js', 'scheduler.js', 'booking.js'],
+    data: Object.assign(data, { preview: true }) }));
 });
 
 app.get('/oauth/:provider/start', (req, res) => {

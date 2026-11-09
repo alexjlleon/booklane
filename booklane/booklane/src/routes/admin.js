@@ -87,7 +87,7 @@ function sanitizeSteps(steps) {
       step.questions = (Array.isArray(s.questions) ? s.questions : []).slice(0, 15).map((q, j) => ({
         id: slugify(q.id || q.label || `q${j + 1}`).replace(/-/g, '_') || `q${j + 1}`, label: clampStr(q.label || 'Question', 160), type: Q_TYPES.includes(q.type) ? q.type : 'text',
         options: Array.isArray(q.options) ? q.options.map((o) => clampStr(String(o), 120)).filter(Boolean).slice(0, 30) : [],
-        required: !!q.required, placeholder: clampStr(q.placeholder || '', 120), display: q.display === 'cards' ? 'cards' : 'list', use_services: !!q.use_services,
+        required: !!q.required, placeholder: clampStr(q.placeholder || '', 120), display: ['cards', 'pills', 'images'].includes(q.display) ? q.display : 'list', use_services: !!q.use_services,
         routes: cleanRoutes(q),
       }));
     }
@@ -730,7 +730,9 @@ module.exports = function adminRoutes(app) {
   const PRIORITY_NAME = { 3: 'high', 2: 'medium', 1: 'low' };
   function etOut(et) {
     const hostRows = db.all('SELECT user_id, priority FROM event_type_hosts WHERE event_type_id = ?', et.id);
-    return { ...BK.hydrateEt(et), active: !!et.active, hosts: hostRows.map((r) => r.user_id),
+    const h = BK.hydrateEt(et);
+    return { ...h, active: !!et.active, hosts: hostRows.map((r) => r.user_id),
+      style: FSTYLE.bookingStyle(h.settings), has_look: !!(h.settings && h.settings.style),
       host_priorities: Object.fromEntries(hostRows.map((r) => [r.user_id, PRIORITY_NAME[r.priority] || 'medium'])),
       bookings_30d: db.get("SELECT COUNT(*) c FROM bookings WHERE event_type_id = ? AND created_at >= datetime('now','-30 days')", et.id).c };
   }
@@ -792,12 +794,14 @@ module.exports = function adminRoutes(app) {
     };
     // Page-level display choices live in settings. Only what this save sends is changed, so a
     // screen that does not know about a setting never resets it.
-    if (b.show_progress !== undefined || b.allow_guests !== undefined || b.book_button !== undefined || b.guest_label !== undefined) {
+    if (b.show_progress !== undefined || b.allow_guests !== undefined || b.book_button !== undefined || b.guest_label !== undefined || b.style !== undefined) {
       const settings = existing ? db.json(existing.settings, {}) : {};
       if (b.show_progress !== undefined) settings.show_progress = bool(b.show_progress);
       if (b.allow_guests !== undefined) settings.allow_guests = bool(b.allow_guests);
       if (b.book_button !== undefined) settings.book_button = clampStr(String(b.book_button || '').trim(), 40);
       if (b.guest_label !== undefined) settings.guest_label = clampStr(String(b.guest_label || '').trim(), 60);
+      // The page's look. null goes back to the original booking-page look.
+      if (b.style !== undefined) { if (b.style && typeof b.style === 'object') settings.style = FSTYLE.sanitizeStyle(b.style); else delete settings.style; }
       f.settings = JSON.stringify(settings);
     }
     let id = existing?.id;

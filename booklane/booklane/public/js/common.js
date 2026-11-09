@@ -129,7 +129,8 @@
     if (!details) return;
     let first = null;
     for (const [k, msg] of Object.entries(details)) {
-      const input = root.querySelector(`[name="${k}"]`);
+      // A date drawn as a calendar or three boxes has no single named input; its wrapper carries the id.
+      const input = root.querySelector(`[name="${CSS.escape(k)}"], [data-group="${CSS.escape(k)}"], [data-typed="${CSS.escape(k)}"]`);
       const field = input && input.closest('.field');
       if (!field) continue;
       field.classList.add('has-error');

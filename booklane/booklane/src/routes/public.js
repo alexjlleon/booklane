@@ -52,6 +52,7 @@ function publicEventType(et, teamsById) {
     places: places.map(PLACES.publicPlace),
     location_label: places[0].label, location_value: places[0].type === 'in_person' ? places[0].value : null,
     max_days_ahead: et.max_days_ahead, color: et.color, steps: et.steps, hosts, settings: et.settings,
+    style: FSTYLE.bookingStyle(et.settings),
     booking_type_id: et.booking_type_id || null,
     // The team is shown on the card, so the customer can see who runs this without it deciding how
     // the page is laid out. An inactive team is simply not named, rather than named and misleading.
@@ -112,6 +113,13 @@ function publicBookingPages(b) {
   return { eventTypes: pages, bookingGroups: ORG.groupByType(b.id, pages) };
 }
 
+/** Everything booking.js needs for one page. The admin's Look preview uses it too. */
+function bookingPageData(b, et) {
+  let services = [];
+  try { services = Q.catalog(b.id).map((s) => s.name); } catch { /* ignore */ }
+  return { business: publicBusiness(b), eventType: Object.assign(publicEventType(et), { steps: stepsWithRoutes(b, et) }), serviceNames: services };
+}
+
 module.exports = function publicRoutes(app) {
   // ---------- Pages ----------
   app.get('/b/:slug', (req, res) => {
@@ -133,10 +141,13 @@ module.exports = function publicRoutes(app) {
   app.get('/b/:slug/:event', (req, res) => {
     const b = getBusiness(req.params.slug);
     const et = getEventType(b, req.params.event);
-    let services = [];
-    try { services = Q.catalog(b.id).map((s) => s.name); } catch { /* ignore */ }
-    res.html(page({ title: `${et.name} · ${b.name}`, description: et.description || b.settings.tagline, business: b, embed: bool(req.query.embed), scripts: ['common.js', 'scheduler.js', 'booking.js'],
-      data: { business: publicBusiness(b), eventType: Object.assign(publicEventType(et), { steps: stepsWithRoutes(b, et) }), serviceNames: services } }));
+    const style = FSTYLE.bookingStyle(et.settings);
+    const fonts = FSTYLE.fontHref(style);
+    res.html(page({ title: `${et.name} · ${b.name}`, description: et.description || b.settings.tagline, business: b, embed: bool(req.query.embed),
+      head: fonts ? `<link href="${fonts}" rel="stylesheet">` : '',
+      bodyClass: `form-page booking-page layout-${style.layout}`,
+      scripts: ['common.js', 'look.js', 'scheduler.js', 'booking.js'],
+      data: bookingPageData(b, et) }));
   });
 
   // ---------- Sessions (market calendars) ----------
@@ -170,7 +181,7 @@ module.exports = function publicRoutes(app) {
     res.html(page({ title: `${f.name} · ${b.name}`, description: f.description || b.settings.tagline, business: b, embed: bool(req.query.embed),
       head: fonts ? `<link href="${fonts}" rel="stylesheet">` : '',
       bodyClass: `form-page layout-${style.layout}`,
-      scripts: ['common.js', 'scheduler.js', 'form.js'],
+      scripts: ['common.js', 'look.js', 'scheduler.js', 'form.js'],
       data: { business: publicBusiness(b), form: FORMS.publicForm(b, f) } }));
   });
 
@@ -538,3 +549,6 @@ function init(){inline();ctas()}
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();})();`, 'application/javascript; charset=utf-8');
   });
 };
+
+// The admin's booking page preview builds the same page data.
+module.exports.bookingPageData = (b, et) => bookingPageData(b, BK.hydrateEt(Object.assign({}, et)));
