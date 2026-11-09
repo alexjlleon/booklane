@@ -17,7 +17,9 @@ const PROVIDERS = {
     clientId: () => process.env.MICROSOFT_CLIENT_ID, clientSecret: () => process.env.MICROSOFT_CLIENT_SECRET,
     authUrl: `https://login.microsoftonline.com/${process.env.MICROSOFT_TENANT || 'common'}/oauth2/v2.0/authorize`,
     tokenUrl: `https://login.microsoftonline.com/${process.env.MICROSOFT_TENANT || 'common'}/oauth2/v2.0/token`,
-    scopes: 'offline_access openid email User.Read Calendars.ReadWrite',
+    // .Shared lets an admin's connection reach a teammate's calendar that was shared with them.
+    // It asks for nothing more about the admin's own mailbox.
+    scopes: 'offline_access openid email User.Read Calendars.ReadWrite Calendars.ReadWrite.Shared',
     extraAuth: { prompt: 'select_account', response_mode: 'query' },
   },
 };
@@ -56,7 +58,7 @@ async function tokenRequest(provider, params) {
 
 const stateRow = (state, provider) => db.get('SELECT * FROM oauth_states WHERE state = ? AND provider = ?', String(state), String(provider));
 
-async function finishAuth(provider, code, state, sessionUserId) {
+async function finishAuth(provider, code, state, sessionUserId, { refuseEmail } = {}) {
   const row = db.get('SELECT * FROM oauth_states WHERE state = ? AND provider = ?', state, provider);
   if (!row || row.created_at < Date.now() - 15 * 60000) throw new Error('This connection link expired. Please try again.');
   if (!sessionUserId || row.user_id !== sessionUserId) throw new Error('Please log in as the person who started connecting this calendar, then try again.');
@@ -72,6 +74,11 @@ async function finishAuth(provider, code, state, sessionUserId) {
       const me = await r.json(); email = me.mail || me.userPrincipalName;
     }
   } catch { /* email is cosmetic */ }
+  // An admin logged in as a teammate who signs in to their own account by mistake would attach the
+  // admin's calendar to the teammate's profile: both calendars would then block both people.
+  if (refuseEmail && email && email.toLowerCase() === String(refuseEmail).toLowerCase()) {
+    throw new Error(`That is your own account (${email}). While logged in as someone, sign in with their account, or use "Through my Outlook" on People instead.`);
+  }
   // Everything from here attaches to whoever this was started for, which may be a market rather
   // than the person who just signed in.
   const owner = row.target_user_id || row.user_id;
@@ -80,6 +87,8 @@ async function finishAuth(provider, code, state, sessionUserId) {
   if (existing) {
     db.run('UPDATE calendar_connections SET access_token=?, refresh_token=COALESCE(?, refresh_token), expires_at=?, last_error=NULL, needs_reconnect=0, alerted_at=NULL WHERE id=?',
       encrypt(t.access_token), t.refresh_token ? encrypt(t.refresh_token) : null, expires, existing.id);
+    // Teammates' calendars reached through this one were broken for the same reason; they are not.
+    db.run('UPDATE calendar_connections SET last_error=NULL, needs_reconnect=0, alerted_at=NULL WHERE via_connection_id = ?', existing.id);
   } else {
     const hasWriter = db.get('SELECT 1 FROM calendar_connections WHERE user_id = ? AND write_events = 1', owner);
     db.run('INSERT INTO calendar_connections (user_id, provider, account_email, access_token, refresh_token, expires_at, write_events) VALUES (?,?,?,?,?,?,?)',
@@ -101,6 +110,79 @@ async function accessToken(conn) {
 }
 
 /**
+ * A teammate's shared calendar has no sign-in of its own: it borrows the admin's Outlook connection
+ * it was set up through. Everything that needs a token asks for it here, so the two kinds of row
+ * look the same to the rest of the app.
+ */
+function sourceOf(conn) {
+  if (!conn.via_connection_id) return conn;
+  const src = db.get('SELECT * FROM calendar_connections WHERE id = ?', conn.via_connection_id);
+  if (!src) throw new Error('This shared calendar needs to be reconnected: the Outlook account it went through was disconnected.');
+  return src;
+}
+async function tokenFor(conn) {
+  const at = await accessToken(sourceOf(conn));
+  if (conn.via_connection_id && conn.needs_reconnect) {
+    db.run('UPDATE calendar_connections SET needs_reconnect = 0, alerted_at = NULL WHERE id = ?', conn.id);
+    conn.needs_reconnect = 0;
+  }
+  return at;
+}
+
+/** Graph address of a connection's calendar: the signed-in person's own, or the one shared with them. */
+const graphCal = (conn) => (conn.mailbox
+  ? `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(conn.mailbox)}/calendar`
+  : 'https://graph.microsoft.com/v1.0/me');
+
+function graphError(data, status, what) {
+  const e = new Error((data && data.error && data.error.message) || `${what} ${status}`);
+  e.status = status; e.code = data && data.error && data.error.code;
+  return e;
+}
+// Graph's ways of saying "you may not look at this mailbox's calendar".
+const noAccess = (e) => e.status === 403 || e.status === 404 || /ErrorAccessDenied|ErrorItemNotFound|ErrorInvalidUser|ErrorFolderNotFound/.test(String(e.code || ''));
+
+/**
+ * The scopes a Microsoft sign-in was granted, read from the access token, or null when the token is
+ * not one that can be read (personal accounts). Only used to explain a refusal, never to decide one.
+ */
+function grantedScopes(accessTokenValue) {
+  try {
+    const part = String(accessTokenValue || '').split('.')[1];
+    const scp = JSON.parse(Buffer.from(part, 'base64url').toString('utf8')).scp;
+    return typeof scp === 'string' ? scp.split(' ') : null;
+  } catch { return null; }
+}
+const hasSharedScope = (at) => { const s = grantedScopes(at); return s === null ? null : s.some((x) => /^Calendars\.(Read|ReadWrite)\.Shared$/i.test(x)); };
+
+/**
+ * Free and busy times for a colleague in the same Microsoft 365 organisation. Works with nothing
+ * shared at all (Outlook shows free/busy to colleagues by default), but gives no detail, so it is
+ * the fallback when the calendar itself cannot be read.
+ */
+async function scheduleEntries(conn, at, fromMs, toMs) {
+  const out = [];
+  const DAY = 86400000;
+  for (let s = fromMs; s < toMs; s += 60 * DAY) {
+    const e = Math.min(toMs, s + 60 * DAY);
+    const r = await fetch('https://graph.microsoft.com/v1.0/me/calendar/getSchedule', {
+      method: 'POST', headers: { Authorization: `Bearer ${at}`, 'Content-Type': 'application/json', Prefer: 'outlook.timezone="UTC"' },
+      body: JSON.stringify({ schedules: [conn.mailbox], startTime: { dateTime: new Date(s).toISOString().slice(0, 19), timeZone: 'UTC' }, endTime: { dateTime: new Date(e).toISOString().slice(0, 19), timeZone: 'UTC' }, availabilityViewInterval: 30 }),
+      signal: AbortSignal.timeout(10000),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw graphError(data, r.status, 'Graph getSchedule');
+    const sched = (data.value || [])[0] || {};
+    if (sched.error) throw Object.assign(new Error(sched.error.message || `Could not read ${conn.mailbox}'s free/busy times`), { code: sched.error.responseCode, status: 403 });
+    for (const it of sched.scheduleItems || []) {
+      const start = Date.parse(String(it.start.dateTime).replace(/Z?$/, 'Z')), end = Date.parse(String(it.end.dateTime).replace(/Z?$/, 'Z'));
+      out.push({ start, end, all_day: end - start >= 23.5 * 3600000, show_as: String(it.status || ''), subject: String(it.subject || ''), inferred: true });
+    }
+  }
+  return out;
+}
+
+/**
  * Errors that only the person can fix by signing in again: access revoked, the sign-in expired, or
  * the stored token can no longer be read. Anything else (a timeout, Google having a bad minute) is
  * recorded but is not a reason to tell anyone to reconnect.
@@ -119,6 +201,7 @@ function markError(conn, e) {
  * regularly stops Google retiring it for being idle.
  */
 async function checkConnection(conn) {
+  if (conn.via_connection_id) return checkShared(conn);
   try {
     conn.expires_at = 0;
     await accessToken(conn);
@@ -131,9 +214,55 @@ async function checkConnection(conn) {
   }
 }
 
+/**
+ * How far an admin's connection can reach into a teammate's calendar:
+ *   edit       read busy times and add bookings to it
+ *   read       read busy times only (shared without edit rights)
+ *   free_busy  nothing shared, but free/busy works inside the same Microsoft 365 organisation
+ *   none       nothing at all (wrong address, or a different organisation)
+ */
+async function checkShared(conn) {
+  const now = Date.now();
+  let at;
+  try {
+    at = await tokenFor(conn);
+  } catch (e) {
+    markError(conn, e);
+    db.run('UPDATE calendar_connections SET checked_at = ? WHERE id = ?', now, conn.id);
+    return { ok: false, reconnect: needsReconnect(e.message), error: e.message };
+  }
+  let level = 'none', note = null;
+  try {
+    const r = await fetch(`${graphCal(conn)}?$select=canEdit,name`, { headers: { Authorization: `Bearer ${at}` }, signal: AbortSignal.timeout(10000) });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw graphError(data, r.status, 'Graph calendar');
+    level = data.canEdit ? 'edit' : 'read';
+    if (!data.canEdit) note = `${conn.mailbox} shared their calendar without edit rights, so busy times are checked but bookings cannot be added to it.`;
+  } catch (e) {
+    if (!noAccess(e)) {
+      markError(conn, e);
+      db.run('UPDATE calendar_connections SET checked_at = ? WHERE id = ?', now, conn.id);
+      return { ok: false, reconnect: false, error: e.message };
+    }
+    try {
+      await scheduleEntries(conn, at, now, now + 86400000);
+      level = 'free_busy';
+    } catch { level = 'none'; }
+    const scoped = hasSharedScope(at);
+    note = scoped === false
+      ? 'Your Outlook sign-in is from before shared calendars were supported. Reconnect your own Outlook once on Calendars, then check again.'
+      : level === 'free_busy'
+        ? `${conn.mailbox} has not shared their calendar with you, so only free/busy times are checked and bookings cannot be added to it. In Outlook they share it with you as "Can edit".`
+        : `Could not reach ${conn.mailbox}'s calendar. Check the address, and that they are in your Microsoft 365 organisation.`;
+  }
+  db.run('UPDATE calendar_connections SET access_level = ?, last_error = ?, checked_at = ? WHERE id = ?', level, note, now, conn.id);
+  return { ok: true, access: level, note, needs_scope: hasSharedScope(at) === false };
+}
+
 /** Tell Google to forget a connection when it is removed here, so no access is left behind. */
 async function revoke(conn) {
-  if (!conn || conn.provider !== 'google') return;
+  // A shared calendar borrows someone else's sign-in, which must stay exactly as it was.
+  if (!conn || conn.provider !== 'google' || conn.via_connection_id) return;
   const t = decrypt(conn.refresh_token) || decrypt(conn.access_token);
   if (!t) return;
   try {
@@ -151,7 +280,7 @@ const busyCache = new Map();
  * reason is sitting in an API response nobody can look at.
  */
 async function fetchBusyEntries(conn, fromMs, toMs) {
-  const at = await accessToken(conn);
+  const at = await tokenFor(conn);
   const out = [];
   if (conn.provider === 'google') {
     const r = await fetch('https://www.googleapis.com/calendar/v3/freeBusy', {
@@ -171,11 +300,22 @@ async function fetchBusyEntries(conn, fromMs, toMs) {
     }
     return out;
   }
-  let url = `https://graph.microsoft.com/v1.0/me/calendarView?startDateTime=${new Date(fromMs).toISOString()}&endDateTime=${new Date(toMs).toISOString()}&$select=subject,start,end,showAs,isCancelled,isAllDay&$top=500`;
+  try { return await calendarViewEntries(conn, at, fromMs, toMs); } catch (e) {
+    // A teammate who has not shared their calendar still has free/busy times we can see.
+    if (!conn.mailbox || !noAccess(e)) throw e;
+    const entries = await scheduleEntries(conn, at, fromMs, toMs);
+    if (conn.access_level !== 'free_busy') db.run("UPDATE calendar_connections SET access_level = 'free_busy' WHERE id = ?", conn.id);
+    return entries;
+  }
+}
+
+async function calendarViewEntries(conn, at, fromMs, toMs) {
+  const out = [];
+  let url = `${graphCal(conn)}/calendarView?startDateTime=${new Date(fromMs).toISOString()}&endDateTime=${new Date(toMs).toISOString()}&$select=subject,start,end,showAs,isCancelled,isAllDay&$top=500`;
   while (url) {
     const r = await fetch(url, { headers: { Authorization: `Bearer ${at}`, Prefer: 'outlook.timezone="UTC"' }, signal: AbortSignal.timeout(10000) });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error?.message || `Graph calendarView ${r.status}`);
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw graphError(data, r.status, 'Graph calendarView');
     for (const ev of data.value || []) {
       if (ev.isCancelled) continue;
       out.push({
@@ -234,7 +374,7 @@ async function createEvent(hostUserId, { summary, description, start, end, atten
   const conn = db.get('SELECT * FROM calendar_connections WHERE user_id = ? AND write_events = 1 ORDER BY id LIMIT 1', hostUserId);
   if (!conn || !isConfigured(conn.provider)) return null;
   try {
-    const at = await accessToken(conn);
+    const at = await tokenFor(conn);
     if (conn.provider === 'google') {
       const body = {
         summary, description, location: locationType === 'google_meet' ? undefined : location,
@@ -257,11 +397,24 @@ async function createEvent(hostUserId, { summary, description, start, end, atten
       attendees: graphAttendees(attendeeEmail, attendeeName, guests),
     };
     if (locationType === 'teams') { body.isOnlineMeeting = true; body.onlineMeetingProvider = 'teamsForBusiness'; }
-    const r = await fetch('https://graph.microsoft.com/v1.0/me/events', {
-      method: 'POST', headers: { Authorization: `Bearer ${at}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(15000),
+    // On a teammate's shared calendar the event is theirs alone: no attendees, because Outlook would
+    // send the customer a second invite from the admin's name. Availvo's own email already invites them.
+    if (conn.mailbox) delete body.attendees;
+    const post = (b) => fetch(`${graphCal(conn)}/events`, {
+      method: 'POST', headers: { Authorization: `Bearer ${at}`, 'Content-Type': 'application/json' }, body: JSON.stringify(b), signal: AbortSignal.timeout(15000),
     });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error?.message || `Graph create event ${r.status}`);
+    let r = await post(body);
+    let data = await r.json().catch(() => ({}));
+    // Someone else's calendar may refuse to make a Teams meeting; the booking still goes on it.
+    if (!r.ok && conn.mailbox && body.isOnlineMeeting && r.status !== 403) {
+      delete body.isOnlineMeeting; delete body.onlineMeetingProvider;
+      r = await post(body); data = await r.json().catch(() => ({}));
+    }
+    if (!r.ok && conn.mailbox && noAccess(graphError(data, r.status, ''))) {
+      db.run("UPDATE calendar_connections SET access_level = CASE WHEN access_level = 'edit' THEN 'read' ELSE access_level END WHERE id = ?", conn.id);
+      throw new Error(`Could not add the booking to ${conn.mailbox}'s calendar: it is not shared with edit rights.`);
+    }
+    if (!r.ok) throw graphError(data, r.status, 'Graph create event');
     return { provider: 'microsoft', connection_id: conn.id, event_id: data.id, join_url: data.onlineMeeting?.joinUrl || null };
   } catch (e) { markError(conn, e); console.warn('[calendar] create event failed:', e.message); return null; } finally { clearBusyCache(hostUserId); }
 }
@@ -270,10 +423,10 @@ async function deleteEvent(ext) {
   const conn = db.get('SELECT * FROM calendar_connections WHERE id = ?', ext.connection_id);
   if (!conn || !isConfigured(conn.provider)) return;
   try {
-    const at = await accessToken(conn);
+    const at = await tokenFor(conn);
     const url = conn.provider === 'google'
       ? `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(conn.calendar_id || 'primary')}/events/${encodeURIComponent(ext.event_id)}?sendUpdates=none`
-      : `https://graph.microsoft.com/v1.0/me/events/${encodeURIComponent(ext.event_id)}`;
+      : `${graphCal(conn)}/events/${encodeURIComponent(ext.event_id)}`;
     await fetch(url, { method: 'DELETE', headers: { Authorization: `Bearer ${at}` }, signal: AbortSignal.timeout(10000) });
     clearBusyCache(conn.user_id);
   } catch (e) { markError(conn, e); }
@@ -284,16 +437,39 @@ async function deleteEvent(ext) {
 async function updateAttendees(ext, { attendeeEmail, attendeeName, guests }) {
   const conn = db.get('SELECT * FROM calendar_connections WHERE id = ?', ext.connection_id);
   if (!conn || !isConfigured(conn.provider)) return;
+  // Events on a shared calendar carry no attendees (see createEvent), so there is nothing to change.
+  if (conn.mailbox) return;
   try {
-    const at = await accessToken(conn);
+    const at = await tokenFor(conn);
     const google = conn.provider === 'google';
     const url = google
       ? `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(conn.calendar_id || 'primary')}/events/${encodeURIComponent(ext.event_id)}?sendUpdates=none`
-      : `https://graph.microsoft.com/v1.0/me/events/${encodeURIComponent(ext.event_id)}`;
+      : `${graphCal(conn)}/events/${encodeURIComponent(ext.event_id)}`;
     const attendees = google ? googleAttendees(attendeeEmail, attendeeName, guests) : graphAttendees(attendeeEmail, attendeeName, guests);
     const r = await fetch(url, { method: 'PATCH', headers: { Authorization: `Bearer ${at}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ attendees }), signal: AbortSignal.timeout(10000) });
     if (!r.ok) throw new Error(`${conn.provider} update event ${r.status}`);
   } catch (e) { markError(conn, e); console.warn('[calendar] update attendees failed:', e.message); }
 }
 
-module.exports = { needsReconnect, checkConnection, revoke, explainBusy, ignoredReason, PROVIDERS, isConfigured, startAuth, finishAuth, stateRow, getBusy, createEvent, updateAttendees, deleteEvent, clearBusyCache };
+/**
+ * Point a teammate's profile at their Outlook calendar, reached through an admin's own Outlook
+ * connection. Saves first and then checks, so the admin is told straight away what it can do.
+ */
+async function addShared({ targetUserId, sourceConn, mailbox }) {
+  const box = String(mailbox || '').trim().toLowerCase();
+  let row = db.get('SELECT * FROM calendar_connections WHERE user_id = ? AND mailbox = ?', targetUserId, box);
+  if (row) {
+    db.run('UPDATE calendar_connections SET via_connection_id = ?, needs_reconnect = 0, alerted_at = NULL, last_error = NULL WHERE id = ?', sourceConn.id, row.id);
+  } else {
+    const hasWriter = db.get('SELECT 1 FROM calendar_connections WHERE user_id = ? AND write_events = 1', targetUserId);
+    const id = db.run('INSERT INTO calendar_connections (user_id, provider, account_email, mailbox, via_connection_id, write_events) VALUES (?,?,?,?,?,?)',
+      targetUserId, 'microsoft', box, box, sourceConn.id, hasWriter ? 0 : 1).lastId;
+    row = { id };
+  }
+  clearBusyCache(targetUserId);
+  const fresh = db.get('SELECT * FROM calendar_connections WHERE id = ?', row.id);
+  const check = await checkShared(fresh);
+  return { id: row.id, ...check };
+}
+
+module.exports = { addShared, checkShared, grantedScopes, needsReconnect, checkConnection, revoke, explainBusy, ignoredReason, PROVIDERS, isConfigured, startAuth, finishAuth, stateRow, getBusy, createEvent, updateAttendees, deleteEvent, clearBusyCache };

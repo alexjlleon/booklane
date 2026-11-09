@@ -73,7 +73,18 @@ app.use((req) => {
     if (origin && origin !== baseUrl() && !(req.headers.host && origin.endsWith('//' + req.headers.host))) throw new HttpError(403, 'Cross-site request blocked');
     if (!(req.headers['content-type'] || '').includes('application/json')) throw new HttpError(415, 'Use JSON');
   }
+  // An admin logged in as a teammate can do their work, but not change who they are: no password,
+  // phones, account deletion, new companies, logins handed to the phone browser, or acting as a third person.
+  if (req.impersonator && req.method !== 'GET' && req.path.startsWith('/api/admin')) {
+    if (ACTING_BLOCKED.some((re) => re.test(req.path))) throw new HttpError(403, `Not while logged in as ${req.user.name}. Go back to your own account first.`);
+    // Every change is recorded against the admin, so the teammate's history stays honest.
+    if (!/^\/api\/admin\/auth\/(stop-acting|logout)$/.test(req.path)) {
+      db.run('INSERT INTO admin_access_log (business_id, actor_id, target_id, action, detail) VALUES (?,?,?,?,?)',
+        req.session.business_id, req.impersonator.id, req.user.id, 'change', `${req.method} ${req.path.replace(/^\/api\/admin/, '')}`.slice(0, 300));
+    }
+  }
 });
+const ACTING_BLOCKED = [/^\/api\/admin\/account\//, /^\/api\/admin\/push\//, /^\/api\/admin\/auth\/(handoff|switch)$/, /^\/api\/admin\/businesses$/, /^\/api\/admin\/team\/[^/]+\/login-as$/];
 
 app.get('/healthz', () => ({ ok: true, db: !!db.get('SELECT 1 x') }));
 
@@ -142,7 +153,11 @@ async function finishCalendarSignIn(req, res) {
   if (req.query.error) return res.redirect(`/app#/calendars?error=${encodeURIComponent(req.query.error_description || req.query.error)}`);
   try {
     if (!calendars.PROVIDERS[p]) throw new HttpError(404, 'Unknown provider');
-    const r = await calendars.finishAuth(p, req.query.code, req.query.state, req.user?.id);
+    const r = await calendars.finishAuth(p, req.query.code, req.query.state, req.user?.id, { refuseEmail: req.impersonator && req.impersonator.email });
+    if (req.impersonator) {
+      db.run('INSERT INTO admin_access_log (business_id, actor_id, target_id, action, detail) VALUES (?,?,?,?,?)',
+        req.session.business_id, req.impersonator.id, req.user.id, 'calendar', `Connected ${calendars.PROVIDERS[p].label}${r.email ? ` (${r.email})` : ''}`);
+    }
     // Land back where they started, so connecting a market does not dump them on their own page.
     res.redirect(`/app#/${r.forTarget ? 'sessions' : 'calendars'}?connected=${encodeURIComponent(r.email || p)}`);
   } catch (e) {

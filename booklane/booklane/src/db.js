@@ -341,6 +341,19 @@ for (const sql of [
   'ALTER TABLE bookings ADD COLUMN outcome_at TEXT',
   // Which phone notifications this person wants from the app: { bookings, leads, replies } (all on when unset).
   "ALTER TABLE users ADD COLUMN push_prefs TEXT NOT NULL DEFAULT '{}'",
+  // "Log in as": an admin's session that acts as a teammate. Who is really at the keyboard, and the
+  // admin's own session to go back to.
+  'ALTER TABLE sessions ADD COLUMN impersonator_id INTEGER',
+  'ALTER TABLE sessions ADD COLUMN return_token TEXT',
+  // A teammate's Outlook calendar reached through an admin's own Outlook connection, because the
+  // teammate shared their calendar with the admin. No sign-in of their own is stored.
+  'ALTER TABLE calendar_connections ADD COLUMN via_connection_id INTEGER',
+  'ALTER TABLE calendar_connections ADD COLUMN mailbox TEXT',
+  'ALTER TABLE calendar_connections ADD COLUMN access_level TEXT',
+  `CREATE TABLE IF NOT EXISTS admin_access_log (
+    id INTEGER PRIMARY KEY, business_id INTEGER, actor_id INTEGER, target_id INTEGER,
+    action TEXT NOT NULL, detail TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))`,
+  'CREATE INDEX IF NOT EXISTS idx_admin_access_target ON admin_access_log (target_id, id)',
 ]) { try { raw.exec(sql); } catch { /* column already exists */ } }
 
 // Booklane no longer takes payments. Drop what the shop, the paid sessions and the card providers

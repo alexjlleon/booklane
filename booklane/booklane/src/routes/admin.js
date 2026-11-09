@@ -3,7 +3,7 @@ const db = require('../db');
 const T = require('../lib/time');
 const { HttpError } = require('../lib/router');
 const { hashPassword, verifyPassword, token, rateLimit } = require('../lib/security');
-const { createSession, destroySession, requireAuth, requireRole, requirePlatformAdmin, isPlatformAdmin, ROLE_RANK } = require('../lib/auth');
+const { createSession, destroySession, requireAuth, requireRole, requirePlatformAdmin, isPlatformAdmin, ROLE_RANK, startActingAs, stopActingAs, actorName, ACT_AS_TTL } = require('../lib/auth');
 const { isEmail, clampStr, int, num, bool, slugify, deepMerge, baseUrl } = require('../lib/util');
 const { sendEmail, layout } = require('../lib/email');
 const { BUSINESS_SETTINGS, DEFAULT_STEPS, QUICK_DATE_STEPS, SESSION_SETTINGS, SESSION_STEPS, LOCATION_TYPES } = require('../defaults');
@@ -43,6 +43,7 @@ function meResponse(req) {
   const cur = req.membership ? B.byId(req.membership.id) : null;
   return { user: req.user, platform_admin: isPlatformAdmin(req.user), business: req.membership ? { ...req.membership, access: cur.access, live: B.isLive(cur), suspended: !!cur.suspended_at, custom_domain: cur.custom_domain || null, public_base: B.baseFor(cur), page_url: B.pageUrl(cur, '') } : null, businesses: req.memberships || [],
     calendar_alerts: require('../services/calendar-health').problemsFor(req.user.id, req.membership),
+    acting_as: req.impersonator ? { by: { id: req.impersonator.id, name: req.impersonator.name }, expires_at: req.session.expires_at } : null,
     app: { base_url: baseUrl(), calendars: Object.fromEntries(Object.entries(calendars.PROVIDERS).map(([k, p]) => [k, { label: p.label, configured: calendars.isConfigured(k) }])), email_provider: appConfig.get('RESEND_API_KEY') ? 'resend' : 'log' } };
 }
 
@@ -115,6 +116,15 @@ function sanitizeService(body) {
       id: id(a.id, a.name || `addon${i}`), name: clampStr(a.name || 'Add-on', 80), price: num(a.price), per: a.per === 'unit' ? 'unit' : 'each', max: int(a.max, 1, 1, 999), description: clampStr(a.description, 300),
     }))),
   };
+}
+
+/** A person's calendar connections, saying which ones are a teammate's calendar reached through someone's Outlook. */
+function connectionsOf(userId) {
+  return db.all(`SELECT c.id, c.provider, c.account_email, c.calendar_id, c.check_busy, c.write_events, c.busy_all_day, c.last_error, c.created_at,
+      c.mailbox, c.access_level, c.needs_reconnect, src.account_email via_email, su.name via_name,
+      (SELECT COUNT(*) FROM calendar_connections d WHERE d.via_connection_id = c.id) shared_count
+    FROM calendar_connections c LEFT JOIN calendar_connections src ON src.id = c.via_connection_id LEFT JOIN users su ON su.id = src.user_id
+    WHERE c.user_id = ? ORDER BY c.id`, userId).map((c) => ({ ...c, shared: !!c.mailbox }));
 }
 
 function maskBusiness(b, req) {
@@ -217,6 +227,35 @@ module.exports = function adminRoutes(app) {
     return { ok: true };
   });
 
+  // ---------- Log in as a teammate ----------
+  app.post('/api/admin/team/:userId/login-as', (req, res) => {
+    requireRole('admin')(req);
+    const uid = int(req.params.userId);
+    if (uid === req.user.id) throw new HttpError(422, 'That is you.');
+    const target = db.get("SELECT u.id, u.name, u.email, u.is_super_admin, COALESCE(u.is_resource,0) is_resource, m.role, m.status FROM users u JOIN memberships m ON m.user_id = u.id WHERE u.id = ? AND m.business_id = ?", uid, bid(req));
+    if (!target || target.is_resource) throw new HttpError(404, 'Team member not found');
+    if (target.status !== 'active') throw new HttpError(422, `${target.name} has not accepted their invite yet, so there is no account to log in to.`);
+    if (target.role === 'owner' && req.membership.role !== 'owner') throw new HttpError(403, 'Only an owner can log in as an owner.');
+    if (target.is_super_admin) throw new HttpError(403, 'The Availvo platform admin cannot be logged in as.');
+    db.run('INSERT INTO admin_access_log (business_id, actor_id, target_id, action, detail) VALUES (?,?,?,?,?)', bid(req), req.user.id, uid, 'login', 'Logged in as them');
+    B.logActivity(bid(req), null, 'team', `${req.user.name} logged in as ${target.name}`);
+    startActingAs(req, res, uid);
+    return { ok: true, name: target.name, minutes: ACT_AS_TTL / 60 };
+  });
+  app.post('/api/admin/auth/stop-acting', (req, res) => {
+    requireAuth(req);
+    if (!req.impersonator) return { ok: true, back: true };
+    db.run('INSERT INTO admin_access_log (business_id, actor_id, target_id, action, detail) VALUES (?,?,?,?,?)', req.session.business_id, req.impersonator.id, req.user.id, 'logout', 'Went back to their own account');
+    return { ok: true, back: stopActingAs(req, res) };
+  });
+  /** Admins who logged in as you, and what they changed, so it is never a secret. */
+  app.get('/api/admin/account/access-log', (req) => {
+    requireAuth(req);
+    return db.all(`SELECT l.action, l.detail, l.created_at, a.name actor, b.name business FROM admin_access_log l
+      LEFT JOIN users a ON a.id = l.actor_id LEFT JOIN businesses b ON b.id = l.business_id
+      WHERE l.target_id = ? ORDER BY l.id DESC LIMIT 50`, req.user.id);
+  });
+
   app.patch('/api/admin/me', (req) => {
     requireAuth(req);
     const b = req.body || {};
@@ -224,6 +263,7 @@ module.exports = function adminRoutes(app) {
     if (b.phone !== undefined) db.run('UPDATE users SET phone = ? WHERE id = ?', clampStr(b.phone, 40), req.user.id);
     if (b.timezone !== undefined) { if (!T.isValidTz(b.timezone)) throw new HttpError(422, 'Unknown timezone'); db.run('UPDATE users SET timezone = ? WHERE id = ?', b.timezone, req.user.id); }
     if (b.new_password) {
+      if (req.impersonator) throw new HttpError(403, `Only ${req.user.name} can change their password.`);
       const u = db.get('SELECT password_hash FROM users WHERE id = ?', req.user.id);
       if (!verifyPassword(b.current_password || '', u.password_hash)) throw new HttpError(422, 'Current password is wrong', { current_password: 'Wrong password' });
       if (String(b.new_password).length < 8) throw new HttpError(422, 'Use at least 8 characters', { new_password: 'Too short' });
@@ -435,7 +475,7 @@ module.exports = function adminRoutes(app) {
     if (b.status !== undefined) {
       if (!STATUSES.includes(b.status)) throw new HttpError(422, 'Unknown status');
       db.run('UPDATE leads SET status = ? WHERE id = ?', b.status, l.id);
-      B.logActivity(l.business_id, l.id, 'status', `${req.user.name} set status to ${b.status.replace(/_/g, ' ')}`);
+      B.logActivity(l.business_id, l.id, 'status', `${actorName(req)} set status to ${b.status.replace(/_/g, ' ')}`);
     }
     if (b.notes !== undefined) db.run('UPDATE leads SET notes = ? WHERE id = ?', clampStr(b.notes, 10000), l.id);
     if (b.contact) L.updateLead(l, { contact: b.contact });
@@ -523,7 +563,7 @@ module.exports = function adminRoutes(app) {
     const noShow = req.body?.no_show !== false;
     // Through setOutcome, so a no-show also starts the no-show follow-ups (and cancels the rest).
     // "They showed up" clears the outcome rather than guessing whether they booked.
-    const out = MSG.setOutcome(bk, noShow ? 'no_show' : (bk.outcome === 'no_show' ? null : bk.outcome), { by: req.user.name });
+    const out = MSG.setOutcome(bk, noShow ? 'no_show' : (bk.outcome === 'no_show' ? null : bk.outcome), { by: actorName(req) });
     return { ok: true, status: out.status, outcome: out.outcome || null };
   });
 
@@ -536,7 +576,7 @@ module.exports = function adminRoutes(app) {
     if (!['confirmed', 'no_show'].includes(bk.status)) throw new HttpError(422, 'A cancelled call has no outcome.');
     const outcome = req.body?.outcome ?? null;
     if (outcome !== null && !MSG.OUTCOMES.includes(outcome)) throw new HttpError(422, 'Pick booked, not_booked, no_show or invalid');
-    const out = MSG.setOutcome(bk, outcome, { by: req.user.name });
+    const out = MSG.setOutcome(bk, outcome, { by: actorName(req) });
     return { ok: true, status: out.status, outcome: out.outcome || null, follow_ups_queued: out.follow_ups_queued || 0 };
   });
 
@@ -565,7 +605,7 @@ module.exports = function adminRoutes(app) {
     requireRole('host')(req);
     const bk = ownBooking(req);
     const updated = await BK.rescheduleBooking(bk, req.body?.start, req.body?.timezone || bk.invitee_tz);
-    if (bk.lead_id) B.logActivity(bid(req), bk.lead_id, 'booking', `Rescheduled by ${req.user.name}`, { booking_id: bk.id });
+    if (bk.lead_id) B.logActivity(bid(req), bk.lead_id, 'booking', `Rescheduled by ${actorName(req)}`, { booking_id: bk.id });
     return { ok: true, start_utc: updated.start_utc, host_user_id: updated.host_user_id };
   });
 
@@ -590,7 +630,7 @@ module.exports = function adminRoutes(app) {
   app.post('/api/admin/bookings/:id/handoff', async (req) => {
     requireRole('host')(req);
     const bk = ownBooking(req);
-    const updated = await BK.reassignBooking(bk, req.body?.user_id, { note: req.body?.note, notifyCustomer: req.body?.notify_customer !== false, by: req.user.name });
+    const updated = await BK.reassignBooking(bk, req.body?.user_id, { note: req.body?.note, notifyCustomer: req.body?.notify_customer !== false, by: actorName(req) });
     return { ok: true, host_user_id: updated.host_user_id };
   });
 
@@ -678,7 +718,7 @@ module.exports = function adminRoutes(app) {
     requireRole('host')(req);
     const bk = db.get('SELECT * FROM bookings WHERE id = ? AND business_id = ?', int(req.params.id), bid(req));
     if (!bk) throw new HttpError(404, 'Booking not found');
-    await BK.cancelBooking(bk, req.body?.reason, req.user.name);
+    await BK.cancelBooking(bk, req.body?.reason, actorName(req));
     return { ok: true };
   });
 
@@ -850,7 +890,7 @@ module.exports = function adminRoutes(app) {
   app.get('/api/admin/calendars', (req) => {
     requireAuth(req);
     return { providers: Object.fromEntries(Object.entries(calendars.PROVIDERS).map(([k, p]) => [k, { label: p.label, configured: calendars.isConfigured(k), redirect_uri: `${baseUrl()}/oauth/${k}/callback` }])),
-      connections: db.all('SELECT id, provider, account_email, calendar_id, check_busy, write_events, busy_all_day, last_error, created_at FROM calendar_connections WHERE user_id = ? ORDER BY id', req.user.id) };
+      connections: connectionsOf(req.user.id) };
   });
   app.patch('/api/admin/calendars/:id', (req) => {
     requireAuth(req);
@@ -895,9 +935,98 @@ module.exports = function adminRoutes(app) {
     const conn = db.get('SELECT * FROM calendar_connections WHERE id = ? AND user_id = ?', int(req.params.id), req.user.id);
     db.run('DELETE FROM calendar_connections WHERE id = ? AND user_id = ?', int(req.params.id), req.user.id);
     calendars.clearBusyCache(req.user.id);
+    // Teammates' calendars that went through this one have nothing to go through any more.
+    if (conn) for (const d of db.all('SELECT id, user_id FROM calendar_connections WHERE via_connection_id = ?', conn.id)) {
+      db.run('DELETE FROM calendar_connections WHERE id = ?', d.id);
+      calendars.clearBusyCache(d.user_id);
+    }
     // Removing it here also removes Availvo's access on Google's side, so nothing is left behind.
     if (conn) calendars.revoke(conn);
     return { ok: true };
+  });
+
+  // ---------- A teammate's calendars, managed by an admin ----------
+  // Same rules as their hours: an admin of this business, and not someone who also works with a
+  // business where this admin has no say, because a calendar connection serves every business.
+  function teammateFor(req, { forWrite = true } = {}) {
+    requireRole('admin')(req);
+    const uid = int(req.params.userId);
+    const m = db.get("SELECT u.id, u.name, u.email, m.role FROM users u JOIN memberships m ON m.user_id = u.id WHERE u.id = ? AND m.business_id = ? AND m.status IN ('active','invited') AND COALESCE(u.is_resource,0) = 0", uid, bid(req));
+    if (!m) throw new HttpError(404, 'Team member not found');
+    if (forWrite && uid !== req.user.id) {
+      if (m.role === 'owner' && req.membership.role !== 'owner') throw new HttpError(403, "Only an owner can change an owner's calendars");
+      const outside = db.get(`SELECT 1 x FROM memberships t WHERE t.user_id = ? AND t.status = 'active' AND NOT EXISTS (
+        SELECT 1 FROM memberships mine WHERE mine.user_id = ? AND mine.business_id = t.business_id AND mine.status = 'active' AND mine.role IN ('owner','admin'))`, uid, req.user.id);
+      if (outside) throw new HttpError(403, `${m.name} also works with another business, so only they can change their calendars`);
+    }
+    return m;
+  }
+  const teammateConn = (req, person) => {
+    const c = db.get('SELECT * FROM calendar_connections WHERE id = ? AND user_id = ?', int(req.params.connId), person.id);
+    if (!c) throw new HttpError(404, 'Not found');
+    return c;
+  };
+  app.get('/api/admin/team/:userId/calendars', (req) => {
+    const person = teammateFor(req, { forWrite: false });
+    return {
+      person: { id: person.id, name: person.name, email: person.email },
+      connections: connectionsOf(person.id),
+      // The admin's own Outlook connections a shared calendar can go through.
+      sources: db.all("SELECT id, account_email, needs_reconnect FROM calendar_connections WHERE user_id = ? AND provider = 'microsoft' AND via_connection_id IS NULL ORDER BY id", req.user.id),
+      microsoft_ready: calendars.isConfigured('microsoft'),
+    };
+  });
+  app.post('/api/admin/team/:userId/calendars/shared', async (req) => {
+    const person = teammateFor(req);
+    const b = req.body || {};
+    const mailbox = String(b.mailbox || person.email || '').trim().toLowerCase();
+    if (!isEmail(mailbox)) throw new HttpError(422, 'Enter their Outlook email address', { mailbox: 'Enter an email address' });
+    if (!calendars.isConfigured('microsoft')) throw new HttpError(422, 'Outlook is not set up on this server');
+    const src = db.get("SELECT * FROM calendar_connections WHERE id = ? AND user_id = ? AND provider = 'microsoft' AND via_connection_id IS NULL", int(b.source_id), req.user.id);
+    if (!src) throw new HttpError(422, 'Connect your own Outlook on Calendars first, then come back here.');
+    if (src.account_email && src.account_email.toLowerCase() === mailbox) throw new HttpError(422, 'That is your own calendar. Enter their address.');
+    const r = await calendars.addShared({ targetUserId: person.id, sourceConn: src, mailbox });
+    B.logActivity(bid(req), null, 'team', `${actorName(req)} linked ${person.name}'s Outlook calendar (${mailbox}) through ${src.account_email || 'their Outlook'}`);
+    return { ...r, connections: connectionsOf(person.id) };
+  });
+  app.post('/api/admin/team/:userId/calendars/:connId/check', async (req) => {
+    const person = teammateFor(req, { forWrite: false });
+    const c = teammateConn(req, person);
+    const r = await calendars.checkConnection(c);
+    return { ...r, connections: connectionsOf(person.id) };
+  });
+  app.patch('/api/admin/team/:userId/calendars/:connId', (req) => {
+    const person = teammateFor(req);
+    const c = teammateConn(req, person);
+    const b = req.body || {};
+    if (b.check_busy !== undefined) db.run('UPDATE calendar_connections SET check_busy = ? WHERE id = ?', bool(b.check_busy) ? 1 : 0, c.id);
+    if (b.write_events !== undefined) {
+      if (bool(b.write_events)) db.run('UPDATE calendar_connections SET write_events = 0 WHERE user_id = ?', person.id);
+      db.run('UPDATE calendar_connections SET write_events = ? WHERE id = ?', bool(b.write_events) ? 1 : 0, c.id);
+    }
+    if (b.busy_all_day !== undefined) db.run('UPDATE calendar_connections SET busy_all_day = ? WHERE id = ?', bool(b.busy_all_day) ? 1 : 0, c.id);
+    calendars.clearBusyCache(person.id);
+    return { ok: true, connections: connectionsOf(person.id) };
+  });
+  app.get('/api/admin/team/:userId/calendars/:connId/busy', async (req) => {
+    const person = teammateFor(req, { forWrite: false });
+    const c = teammateConn(req, person);
+    const days = Math.max(1, Math.min(60, int(req.query.days, 14)));
+    const tz = db.get('SELECT timezone FROM users WHERE id = ?', person.id).timezone;
+    try {
+      const entries = await calendars.explainBusy(c, Date.now(), Date.now() + days * 86400000);
+      return { days, timezone: tz || 'UTC', checking: !!c.check_busy, busy_all_day: !!c.busy_all_day,
+        blocking: entries.filter((e) => !e.ignored).length, ignored: entries.filter((e) => e.ignored).length, entries: entries.slice(0, 200) };
+    } catch (e) { throw new HttpError(502, `Could not read that calendar: ${e.message}`); }
+  });
+  app.delete('/api/admin/team/:userId/calendars/:connId', (req) => {
+    const person = teammateFor(req);
+    const c = teammateConn(req, person);
+    db.run('DELETE FROM calendar_connections WHERE id = ?', c.id);
+    calendars.clearBusyCache(person.id);
+    if (!c.via_connection_id) calendars.revoke(c);
+    B.logActivity(bid(req), null, 'team', `${actorName(req)} removed ${person.name}'s calendar ${c.account_email || c.provider}`);
+    return { ok: true, connections: connectionsOf(person.id) };
   });
 
   // ---------- Booked event dates (drives the "we're available" step) ----------
@@ -1580,7 +1709,7 @@ module.exports = function adminRoutes(app) {
     if (!['draft', 'submitted', 'contract_requested', 'contract_sent', 'signed', 'declined'].includes(st)) throw new HttpError(422, 'Unknown status');
     db.run("UPDATE quotes SET status = ?, updated_at = datetime('now') WHERE id = ?", st, q.id);
     if (q.lead_id) {
-      B.logActivity(q.business_id, q.lead_id, 'quote', `${req.user.name} marked quote as ${st.replace(/_/g, ' ')}`);
+      B.logActivity(q.business_id, q.lead_id, 'quote', `${actorName(req)} marked quote as ${st.replace(/_/g, ' ')}`);
       if (st === 'signed') db.run("UPDATE leads SET status = 'won' WHERE id = ?", q.lead_id);
       if (st === 'declined') db.run("UPDATE leads SET status = 'lost' WHERE id = ?", q.lead_id);
     }
@@ -1611,9 +1740,9 @@ module.exports = function adminRoutes(app) {
     else db.run("INSERT INTO memberships (user_id, business_id, role, status, invite_token) VALUES (?,?,?,'invited',?)", u.id, bid(req), r, inviteToken);
     const business = B.byId(bid(req));
     const url = B.linkFor(business, `/app#/accept/${inviteToken}`);
-    const sent = await sendEmail({ to: u.email, businessId: business.id, subject: `${req.user.name} invited you to ${business.name}`,
-      html: layout(business, { heading: `Join ${business.name}`, body: `<p>${req.user.name.replace(/[<>&]/g, '')} invited you to take calls and manage leads for ${business.name.replace(/[<>&]/g, '')}.</p>`, cta: { label: 'Accept invite', url } }) });
-    B.logActivity(business.id, null, 'team', `${req.user.name} invited ${u.email} as ${r}`);
+    const sent = await sendEmail({ to: u.email, businessId: business.id, subject: `${actorName(req)} invited you to ${business.name}`,
+      html: layout(business, { heading: `Join ${business.name}`, body: `<p>${actorName(req).replace(/[<>&]/g, '')} invited you to take calls and manage leads for ${business.name.replace(/[<>&]/g, '')}.</p>`, cta: { label: 'Accept invite', url } }) });
+    B.logActivity(business.id, null, 'team', `${actorName(req)} invited ${u.email} as ${r}`);
     // Without an email provider the invite only gets logged, so hand the link to the admin to share
     return { ok: true, user_id: u.id, invited: true, invite_url: sent.status === 'sent' ? null : url };
   });

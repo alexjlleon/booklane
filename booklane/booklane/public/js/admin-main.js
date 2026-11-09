@@ -126,19 +126,32 @@
       <div class="cols-even"><form class="panel" id="me-form"><h2>Profile</h2><p class="desc">Your timezone controls how your working hours are read.</p>
         ${A.field('Name', A.input('name', A.me.user.name))}${A.field('Phone', A.input('phone', A.me.user.phone))}${A.field('Timezone', A.tzSelect('timezone', A.me.user.timezone))}
         <button class="btn btn-primary">Save profile</button></form>
-      <form class="panel" id="pw-form"><h2>Change password</h2><p class="desc">Use at least 8 characters.</p>
+      ${A.me.acting_as ? `<div class="panel"><h2>Password, phones and deletion</h2><p class="desc">Only ${esc(A.me.user.name)} can change these, so they are hidden while you are logged in as them.</p></div>` : `<form class="panel" id="pw-form"><h2>Change password</h2><p class="desc">Use at least 8 characters.</p>
         ${A.field('Current password', '<input class="input" type="password" name="current_password" data-bind="current_password" autocomplete="current-password">')}
         ${A.field('New password', '<input class="input" type="password" name="new_password" data-bind="new_password" autocomplete="new-password">')}
-        <button class="btn btn-primary">Update password</button></form></div>
-      <div class="panel" id="push-panel" style="margin-top:16px"><h2>Phone notifications</h2><div class="empty-state"><span class="spinner"></span></div></div>
-      <div class="panel" id="delete-panel" style="margin-top:16px"><h2>Delete your account</h2><div class="empty-state"><span class="spinner"></span></div></div>`,
+        <button class="btn btn-primary">Update password</button></form>`}</div>
+      <div class="panel" id="access-panel" style="margin-top:16px"><h2>Admins who logged in as you</h2><div class="empty-state"><span class="spinner"></span></div></div>
+      ${A.me.acting_as ? '' : `<div class="panel" id="push-panel" style="margin-top:16px"><h2>Phone notifications</h2><div class="empty-state"><span class="spinner"></span></div></div>
+      <div class="panel" id="delete-panel" style="margin-top:16px"><h2>Delete your account</h2><div class="empty-state"><span class="spinner"></span></div></div>`}`,
     mount(root) {
       $('#me-form', root).addEventListener('submit', async (e) => { e.preventDefault(); await A.guard(() => api('PATCH', '/me', A.collect(e.target)), 'Saved'); A.me = await api('GET', '/auth/me'); });
+      renderAccess($('#access-panel', root));
+      if (A.me.acting_as) return;
       $('#pw-form', root).addEventListener('submit', async (e) => { e.preventDefault(); try { await api('PATCH', '/me', A.collect(e.target)); A.toast('Password updated'); e.target.reset(); } catch (err) { A.toast(err.message, true); A.showErrors(e.target, err.details); } });
       renderPush($('#push-panel', root));
       renderDelete($('#delete-panel', root));
     },
   });
+
+  // Admins can log in as you; this is where you see that they did, and what they changed.
+  async function renderAccess(host) {
+    let rows;
+    try { rows = await api('GET', '/account/access-log'); } catch (e) { host.innerHTML = `<h2>Admins who logged in as you</h2><p class="desc">${esc(e.message)}</p>`; return; }
+    const what = (r) => (r.action === 'login' ? 'Logged in as you' : r.action === 'logout' ? 'Went back to their own account' : r.action === 'calendar' ? r.detail : `Changed something: ${r.detail}`);
+    host.innerHTML = `<h2>Admins who logged in as you</h2>
+      ${rows.length ? `<div class="table-wrap"><table class="t"><tbody>${rows.map((r) => `<tr><td class="small" style="white-space:nowrap">${esc(A.dt(r.created_at))}</td><td><b>${esc(r.actor || 'An admin')}</b>${r.business ? ` <span class="small muted">${esc(r.business)}</span>` : ''}</td><td class="small">${esc(what(r))}</td></tr>`).join('')}</tbody></table></div>`
+        : '<p class="desc" style="margin:0">Nobody has. Admins of your company can log in as you to help set things up, and it would show here.</p>'}`;
+  }
 
   // Which phones get notifications, and what about. Phones sign themselves up from inside the app.
   const PUSH_KINDS = [['bookings', 'My calls', 'Booked, moved, cancelled, or passed to me'], ['leads', 'Contract requests', 'When I am on the contract-request alert list'], ['replies', 'Customer texts', 'When I am on the text-replies alert list']];

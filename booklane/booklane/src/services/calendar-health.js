@@ -35,7 +35,8 @@ function audiences(conn) {
     const label = owner.is_resource
       ? (db.get('SELECT name FROM calendar_profiles WHERE user_id = ? AND business_id = ?', owner.id, id) || {}).name || 'A shared calendar'
       : owner.name || owner.email;
-    const to = [...new Set([...(owner.is_resource ? [] : [owner.email]), ...admins].filter(Boolean).map((e) => e.toLowerCase()))];
+    // A shared calendar runs through an admin's Outlook, so only admins can put it right.
+    const to = [...new Set([...(owner.is_resource || conn.via_connection_id ? [] : [owner.email]), ...admins].filter(Boolean).map((e) => e.toLowerCase()))];
     if (to.length) out.push({ businessId: id, to, label, resource: !!owner.is_resource, ownerEmail: owner.is_resource ? null : owner.email });
   }
   return out;
@@ -60,7 +61,7 @@ async function alert(conn) {
         body: `<p style="margin:0 0 12px">${whoHtml}${acct} has stopped responding to ${esc(business.name)}'s booking pages. Until it is reconnected, bookings cannot see the busy times on it and new bookings will not be added to it, so a time that is really taken could be booked.</p>
           <p style="margin:0 0 12px">This usually means the access was removed in the ${conn.provider === 'google' ? 'Google' : 'Microsoft'} account, or the sign-in expired. Reconnecting takes about a minute.</p>
           <p style="margin:0;color:#6b6878;font-size:13px">What the calendar said: ${esc(conn.last_error || 'sign-in no longer accepted')}</p>`,
-        cta: { label: 'Reconnect the calendar', url: B.linkFor(business, a.resource ? '/app#/sessions' : '/app#/calendars') },
+        cta: { label: 'Reconnect the calendar', url: B.linkFor(business, a.resource ? '/app#/sessions' : conn.via_connection_id ? '/app#/team' : '/app#/calendars') },
         footer: esc('We will remind you every few days until it is reconnected.'),
       }),
     });

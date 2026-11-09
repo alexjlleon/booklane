@@ -35,6 +35,11 @@
     if (m < 1) return 'just now'; if (m < 60) return `${m}m ago`; const h = Math.round(m / 60); if (h < 24) return `${h}h ago`; const d = Math.round(h / 24); if (d < 30) return `${d}d ago`; return A.date(s);
   };
   A.label = (s) => String(s || '').replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
+  // How far an admin's Outlook reaches into a teammate's shared calendar.
+  A.accessPill = (level) => {
+    const L = { edit: 'Can add bookings', read: 'Busy times only', free_busy: 'Free/busy only', none: 'No access' };
+    return level ? `<span class="pill access-pill ${esc(level)}">${esc(L[level] || level)}</span>` : '';
+  };
   A.pill = (s) => `<span class="pill ${esc(s)}">${esc(A.label(s))}</span>`;
   A.name = (l) => [l.first_name, l.last_name].filter(Boolean).join(' ') || l.email || l.phone || 'Anonymous visitor';
   A.minToTime = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
@@ -168,6 +173,15 @@
       <button type="button" class="btn btn-sm btn-primary" data-resend-verify>Send it again</button></div>`;
   }
 
+  // An admin logged in as a teammate sees whose account this is on every screen, and the way back.
+  function actingBanner(me) {
+    if (!me.acting_as) return '';
+    const mins = Math.max(0, Math.round((me.acting_as.expires_at - Date.now()) / 60000));
+    return `<div class="acting-bar" role="status"><div><b>You are logged in as ${esc(me.user.name)}.</b>
+      <span>Everything you change is recorded as ${esc(me.acting_as.by.name)} (as ${esc(me.user.name)}), and they can see it on their Account page. Ends by itself in ${mins} minutes.</span></div>
+      <button type="button" class="btn btn-sm" data-stop-acting>Back to my account</button></div>`;
+  }
+
   function shell(active) {
     const me = A.me;
     const biz = me.business;
@@ -176,8 +190,8 @@
       <div class="brand-row"><div class="logo-mark"></div>${esc((window.__BL__ || {}).appName || 'Availvo')}</div>
       <div class="biz-switch"><label class="sr-only" for="bizsel">Business</label><select id="bizsel">${me.businesses.map((b) => `<option value="${b.id}" ${biz && b.id === biz.id ? 'selected' : ''}>${esc(b.name)}</option>`).join('')}<option value="__new">+ Add a business</option></select></div>
       <div class="nav">${NAV.concat(A.me.platform_admin ? [['Platform', null], ['/companies', 'Companies', ICON('<path d="M3 21h18M5 21V7l7-4 7 4v14M9 9h1M14 9h1M9 13h1M14 13h1M9 17h1M14 17h1"/>')]] : []).filter((n) => n[3] !== 'admin' || ['owner', 'admin'].includes((A.me && A.me.business || {}).role)).map((n) => n[1] === null ? `<div class="nav-sec">${n[0]}</div>` : `<a href="#${n[0]}" class="${active === n[0] ? 'active' : ''}">${n[2]}<span>${n[1]}</span></a>`).join('')}</div>
-      <div class="sidebar-foot">${biz ? `<a href="/b/${esc(biz.slug)}" target="_blank" rel="noopener">View booking page ↗</a>` : ''}<a href="#/account">${esc(me.user.name)} · Account</a><button type="button" data-logout>Log out</button></div>
-    </nav><main class="main">${accountBanner(me)}${calendarBanner(me)}<div id="view"></div></main></div>`;
+      <div class="sidebar-foot">${biz ? `<a href="/b/${esc(biz.slug)}" target="_blank" rel="noopener">View booking page ↗</a>` : ''}<a href="#/account">${me.acting_as ? `${esc(me.user.name)} (you are logged in as them)` : `${esc(me.user.name)} · Account`}</a><button type="button" data-logout>Log out</button></div>
+    </nav><main class="main">${actingBanner(me)}${accountBanner(me)}${calendarBanner(me)}<div id="view"></div></main></div>`;
   }
 
   A.render = async () => {
@@ -212,6 +226,13 @@
   document.addEventListener('click', async (e) => {
     if (e.target.closest('[data-menu]')) { A.$('.sidebar').classList.toggle('open'); return; }
     if (e.target.closest('.sidebar a')) A.$('.sidebar') && A.$('.sidebar').classList.remove('open');
+    if (e.target.closest('[data-stop-acting]')) {
+      const r = await A.api('POST', '/auth/stop-acting', {}).catch(() => ({ back: false }));
+      A.me = null;
+      location.hash = r.back ? '#/team' : '#/login';
+      if (r.back) A.render();
+      return;
+    }
     if (e.target.closest('[data-logout]')) { await A.api('POST', '/auth/logout', {}); A.me = null; location.hash = '#/login'; }
     const cp = e.target.closest('[data-copy]');
     if (cp) A.copy(cp.dataset.copy);

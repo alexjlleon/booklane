@@ -112,6 +112,8 @@
           <h1 style="margin-top:6px">${esc(r.name)}</h1><div class="sub">${esc(r.email)} · ${esc(A.label(r.role))} · ${esc(prettyRange(d.range))} ${setupFlags(r)}</div></div>
         <div class="tools">${rangeTabs(`team-stats/${r.id}`, q)}
           <a class="btn btn-ghost" href="#/availability?user_id=${r.id}">Edit hours</a>
+          <button type="button" class="btn btn-ghost" data-cals="${r.id}">Calendars</button>
+          ${A.canActAs(r) ? `<button type="button" class="btn btn-ghost" data-loginas="${r.id}" data-name="${esc(r.name)}">Log in as</button>` : ''}
           <a class="btn btn-ghost" href="#/bookings?host=${r.id}">All bookings</a></div></div>
 
         <div class="stats">
@@ -135,6 +137,10 @@
       root.addEventListener('click', (e) => {
         const rangeBtn = e.target.closest('[data-range]');
         if (rangeBtn) return A.go(`#/team-stats/${p.id}?range=${rangeBtn.dataset.range}`);
+        const cal = e.target.closest('[data-cals]');
+        if (cal) return A.teamCalendars(Number(cal.dataset.cals), () => {});
+        const la = e.target.closest('[data-loginas]');
+        if (la) return A.loginAs(Number(la.dataset.loginas), la.dataset.name);
         A.bookingActions.handle(e, () => A.render());
       });
       root.addEventListener('change', (e) => { A.bookingActions.handleChange(e, () => A.render()); });

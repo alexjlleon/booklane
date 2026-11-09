@@ -162,20 +162,106 @@
   });
 
   // ---------- Team ----------
+  // ---------- Log in as a teammate ----------
+  A.canActAs = (person) => isAdmin() && person && person.id !== A.me.user.id && (person.status || 'active') === 'active'
+    && (person.role !== 'owner' || A.me.business.role === 'owner') && !A.me.acting_as;
+  A.loginAs = async (id, name) => {
+    if (!confirm(`Log in as ${name}?\n\nYou will see Availvo exactly as they do and can change their hours, booking pages and calls. Everything you change is recorded under your name, and they can see it on their Account page. It ends by itself after 2 hours, or press "Back to my account".`)) return;
+    await A.guard(() => api('POST', `/team/${id}/login-as`, {}));
+    A.me = await api('GET', '/auth/me');
+    A.go('#/');
+  };
+
+  // ---------- A teammate's calendars, set up by an admin ----------
+  const SHARE_HELP = `<ol class="small" style="margin:6px 0 0;padding-left:18px;line-height:1.6">
+      <li>In Outlook, they right-click their calendar, then <b>Sharing and permissions</b> (on the web: <b>Share</b>).</li>
+      <li>They add you and choose <b>Can edit</b>, then Share.</li>
+      <li>Come back here and press <b>Check again</b>.</li></ol>
+    <p class="small muted" style="margin:8px 0 0">As the Microsoft 365 admin you can also grant this yourself in Exchange admin, without asking them. Without sharing, Availvo still sees when they are busy but cannot add bookings to their calendar.</p>`;
+
+  A.teamCalendars = async (userId, done) => {
+    let d;
+    try { d = await api('GET', `/team/${userId}/calendars`); } catch (e) { A.toast(e.message, true); return; }
+    const conns = (list) => (list.length ? `<div class="stack" style="gap:10px">${list.map((c) => `<div style="border:1px solid var(--line);border-radius:12px;padding:12px 14px">
+        <div class="row between" style="gap:10px;align-items:flex-start"><div><b>${esc(c.account_email || c.provider)}</b>
+          <div class="small muted">${c.shared ? `Through ${esc(c.via_name || 'an admin')}'s Outlook${c.via_email ? ` (${esc(c.via_email)})` : ''}` : `${c.provider === 'google' ? 'Google Calendar' : 'Outlook'}, signed in by ${esc(d.person.name)}`}</div></div>${A.accessPill(c.access_level)}</div>
+        ${c.last_error ? `<div class="small" style="margin-top:6px;color:${c.shared && c.access_level && c.access_level !== 'none' ? 'var(--warn)' : 'var(--err)'}">${esc(c.last_error)}</div>` : ''}
+        <div class="row" style="gap:18px;flex-wrap:wrap;margin-top:10px">${A.toggle('_', c.check_busy, 'Check for conflicts').replace('data-bind="_"', `data-tconn="${c.id}" data-k="check_busy"`)}
+          ${A.toggle('_', c.write_events, 'Add new bookings here').replace('data-bind="_"', `data-tconn="${c.id}" data-k="write_events"`)}</div>
+        <div class="row" style="gap:6px;flex-wrap:wrap;margin-top:10px">${c.shared ? `<button type="button" class="btn btn-ghost btn-sm" data-tcheck="${c.id}">Check again</button>` : ''}<button type="button" class="btn btn-ghost btn-sm" data-tbusy="${c.id}">What is it blocking?</button><button type="button" class="btn btn-danger btn-sm" data-tremove="${c.id}">Remove</button></div>
+      </div>`).join('')}</div>` : `<p class="muted">${esc(d.person.name)} has no calendar connected, so only their weekly hours and existing bookings decide when they are free.</p>`);
+    const linkForm = () => {
+      if (!d.microsoft_ready) return '<div class="warn-box">Outlook is not set up on this server.</div>';
+      if (!d.sources.length) return `<div class="warn-box">First connect your own Outlook on <a href="#/calendars">Calendars</a>. Their calendar is then reached through yours, with no password of theirs.</div>`;
+      return `<form id="share-form" class="stack">
+        ${A.field('Their Outlook address', `<input class="input" name="mailbox" type="email" value="${esc(d.person.email)}">`)}
+        ${d.sources.length > 1 ? A.field('Through your Outlook', `<select class="select" name="source_id">${d.sources.map((x) => `<option value="${x.id}">${esc(x.account_email || 'Outlook')}</option>`).join('')}</select>`) : `<input type="hidden" name="source_id" value="${d.sources[0].id}"><p class="small muted" style="margin:0">Through your Outlook, ${esc(d.sources[0].account_email || '')}.</p>`}
+        <div><button class="btn btn-primary">Link their calendar</button></div></form>`;
+    };
+    const paint = (el) => {
+      el.innerHTML = `<div class="drawer-head"><div><div class="small muted">Calendars</div><h2>${esc(d.person.name)}</h2></div><button class="icon-x" data-close-drawer aria-label="Close">&times;</button></div>
+        <div class="panel"><h3 style="margin-top:0">Connected</h3>${conns(d.connections)}<div data-tbusy-out style="margin-top:12px"></div></div>
+        <div class="panel"><h3 style="margin-top:0">Link their Outlook through yours</h3>
+          <p class="desc">For people on your Microsoft 365. Availvo reads their busy times and puts their bookings on their calendar using your Outlook sign-in, so they never have to sign in and nothing breaks if their password changes.</p>
+          ${linkForm()}<details style="margin-top:12px"><summary class="small"><b>How they share their calendar with you</b></summary>${SHARE_HELP}</details></div>
+        <div class="panel"><h3 style="margin-top:0">Or have them connect it</h3><p class="desc" style="margin:0">${esc(d.person.name)} can connect Google or Outlook themselves on Calendars${A.canActAs({ id: d.person.id, role: 'host' }) ? ', or you can log in as them and do it with their sign-in' : ''}.</p></div>`;
+    };
+    A.drawer('', (el) => {
+      paint(el);
+      const refresh = (r) => { if (r && r.connections) d.connections = r.connections; paint(el); if (done) done(); };
+      el.addEventListener('submit', async (e) => {
+        if (e.target.id !== 'share-form') return;
+        e.preventDefault();
+        const body = Object.fromEntries(new FormData(e.target));
+        body.source_id = Number(body.source_id);
+        try {
+          const r = await api('POST', `/team/${userId}/calendars/shared`, body);
+          A.toast(r.access === 'edit' ? 'Linked. Bookings will go on their calendar.' : r.ok === false ? `Saved, but: ${r.error}` : 'Linked. See the note about sharing.', r.ok === false || r.access === 'none');
+          refresh(r);
+        } catch (err) { A.toast(err.message, true); A.showErrors(e.target, err.details); }
+      });
+      el.addEventListener('change', async (e) => {
+        const c = e.target.dataset.tconn;
+        if (!c) return;
+        try { refresh(await api('PATCH', `/team/${userId}/calendars/${c}`, { [e.target.dataset.k]: e.target.checked })); A.toast('Updated'); } catch (err) { A.toast(err.message, true); paint(el); }
+      });
+      el.addEventListener('click', async (e) => {
+        const ck = e.target.closest('[data-tcheck]');
+        if (ck) {
+          ck.disabled = true; ck.textContent = 'Checking…';
+          try { const r = await api('POST', `/team/${userId}/calendars/${ck.dataset.tcheck}/check`, {}); A.toast(r.ok === false ? r.error : r.access === 'edit' ? 'Shared with edit rights. All set.' : (r.note || 'Checked'), r.ok === false); refresh(r); } catch (err) { A.toast(err.message, true); paint(el); }
+          return;
+        }
+        const rm = e.target.closest('[data-tremove]');
+        if (rm) {
+          if (!confirm(`Remove this calendar from ${d.person.name}?`)) return;
+          try { refresh(await api('DELETE', `/team/${userId}/calendars/${rm.dataset.tremove}`)); A.toast('Removed'); } catch (err) { A.toast(err.message, true); }
+          return;
+        }
+        const b = e.target.closest('[data-tbusy]');
+        if (b) {
+          const out = $('[data-tbusy-out]', el);
+          out.innerHTML = '<p class="muted">Reading their calendar…</p>';
+          try { out.innerHTML = A.busyReport(await api('GET', `/team/${userId}/calendars/${b.dataset.tbusy}/busy?days=14`)); } catch (err) { out.innerHTML = `<div class="warn-box">${esc(err.message)}</div>`; }
+        }
+      });
+    });
+  };
+
   A.route('/team', {
     title: 'People',
     async render() {
       const rows = await api('GET', '/team');
       return `<div class="topbar"><div><h1>People</h1><div class="sub">Who can take calls or manage this business. Group them into teams on <a href="#/org">Teams &amp; types</a>. Level decides who gets sales calls: 3 or more services go to Senior staff, 2 to Junior staff, 1 to Staff, stepping down a level when nobody is free.</div></div></div>
-        <div class="cols-2"><div class="panel" style="padding-bottom:6px"><div class="table-wrap"><table class="t"><thead><tr><th>Person</th><th>Role</th><th>Level</th><th>Teams</th><th>Setup</th><th></th></tr></thead><tbody>
+        <div class="stack"><div class="panel" style="padding-bottom:6px"><div class="table-wrap"><table class="t"><thead><tr><th>Person</th><th>Role</th><th>Level</th><th>Teams</th><th>Setup</th><th></th></tr></thead><tbody>
           ${rows.map((m) => `<tr><td><b>${esc(m.name)}</b>${m.id === A.me.user.id ? ' <span class="small muted">(you)</span>' : ''}${m.status === 'invited' ? ' <span class="pill partial">Invite pending</span>' : ''}<div class="small muted">${esc(m.email)}</div>
               ${isAdmin() ? `<input class="input btn-sm" style="margin-top:4px;max-width:190px" type="tel" data-phone="${m.id}" value="${esc(m.phone || '')}" placeholder="Mobile number" title="For the after-call text asking how the call went">` : (m.phone ? `<div class="small muted">${esc(m.phone)}</div>` : '')}</td>
             <td>${isAdmin() ? `<select class="select btn-sm" data-role="${m.id}" style="width:auto">${['host', 'admin', 'owner'].map((r) => `<option ${m.role === r ? 'selected' : ''}>${r}</option>`).join('')}</select>` : A.pill(m.role)}</td>
             <td>${isAdmin() ? `<select class="select btn-sm" data-level="${m.id}" style="width:auto" title="Decides who gets sales calls by how many services were picked">${[['senior', 'Senior staff'], ['junior', 'Junior staff'], ['staff', 'Staff']].map(([v, l]) => `<option value="${v}" ${(m.level || 'staff') === v ? 'selected' : ''}>${l}</option>`).join('')}</select>` : `<span class="small">${esc({ senior: 'Senior staff', junior: 'Junior staff' }[m.level] || 'Staff')}</span>`}</td>
             <td class="small">${(m.teams || []).length ? m.teams.map((t) => `<span class="pill">${esc(t.name)}</span>`).join(' ') : '<span class="muted">—</span>'}</td>
             <td class="small">${m.has_hours ? '<span class="pill booked">Hours set</span>' : '<span class="pill partial">No hours</span>'} ${m.calendars.length ? `<span class="pill booked">${m.calendars.length} calendar</span>` : '<span class="pill">No calendar</span>'}</td>
-            <td class="num">${isAdmin() ? `<a class="btn btn-ghost btn-sm" href="#/availability?user_id=${m.id}">Hours</a>${m.id !== A.me.user.id ? ` <button class="icon-x" data-remove="${m.id}" title="Remove">×</button>` : ''}` : ''}</td></tr>`).join('')}</tbody></table></div></div>
-        ${isAdmin() ? `<form class="panel" id="invite"><h2>Invite a team member</h2><p class="desc">They get an email link to join and set their own password.</p>
+            <td class="num">${isAdmin() ? `<div class="row" style="gap:6px;flex-wrap:wrap;justify-content:flex-end;min-width:150px"><a class="btn btn-ghost btn-sm" href="#/availability?user_id=${m.id}">Hours</a> <button type="button" class="btn btn-ghost btn-sm" data-cals="${m.id}">Calendars</button>${A.canActAs(m) ? ` <button type="button" class="btn btn-ghost btn-sm" data-loginas="${m.id}" data-name="${esc(m.name)}">Log in as</button>` : ''}${m.id !== A.me.user.id ? ` <button class="icon-x" data-remove="${m.id}" title="Remove">×</button>` : ''}</div>` : ''}</td></tr>`).join('')}</tbody></table></div></div>
+        ${isAdmin() ? `<form class="panel" id="invite" style="max-width:560px"><h2>Invite a team member</h2><p class="desc">They get an email link to join and set their own password.</p>
           ${A.field('Name', '<input class="input" name="name">')}${A.field('Email', '<input class="input" name="email" type="email">')}
           ${A.field('Role', '<select class="select" name="role"><option value="host">Host (takes calls, sees leads)</option><option value="admin">Admin (manages settings)</option><option value="owner">Owner</option></select>')}
           <button class="btn btn-primary">Send invite</button><div id="invite-out" style="margin-top:12px"></div></form>` : ''}</div>`;
@@ -193,7 +279,12 @@
         } catch (err) { A.toast(err.message, true); A.showErrors(f, err.details); }
       });
       root.addEventListener('change', async (e) => { const ph = e.target.dataset.phone; if (ph) { await A.guard(() => api('PATCH', `/team/${ph}`, { phone: e.target.value }), e.target.value.trim() ? 'Mobile number saved' : 'Mobile number removed').catch(() => {}); return; } const lv = e.target.dataset.level; if (lv) { await A.guard(() => api('PATCH', `/team/${lv}`, { level: e.target.value }), 'Level updated').catch(() => A.render()); return; } const r = e.target.dataset.role; if (r) { await A.guard(() => api('PATCH', `/team/${r}`, { role: e.target.value }), 'Role updated').catch(() => A.render()); } });
-      root.addEventListener('click', async (e) => { const r = e.target.closest('[data-remove]'); if (r && confirm('Remove this person from the business?')) { await A.guard(() => api('DELETE', `/team/${r.dataset.remove}`), 'Removed'); A.render(); } });
+      root.addEventListener('click', async (e) => {
+        const cal = e.target.closest('[data-cals]');
+        if (cal) return A.teamCalendars(Number(cal.dataset.cals), () => {});
+        const la = e.target.closest('[data-loginas]');
+        if (la) return A.loginAs(Number(la.dataset.loginas), la.dataset.name);
+        const r = e.target.closest('[data-remove]'); if (r && confirm('Remove this person from the business?')) { await A.guard(() => api('DELETE', `/team/${r.dataset.remove}`), 'Removed'); A.render(); } });
     },
   });
 
