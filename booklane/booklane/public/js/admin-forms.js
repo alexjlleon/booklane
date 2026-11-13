@@ -145,11 +145,11 @@
   const txt = (key, val, attrs) => `<input class="input" data-st="${key}" value="${esc(val ?? '')}" ${attrs || ''}>`;
   const color = (key, val, placeholder) => `<div class="color-pick"><input type="color" data-st-color="${key}" value="${esc(val || placeholder || '#6d4aff')}" aria-label="Pick a colour"><input class="input" data-st="${key}" value="${esc(val || '')}" placeholder="Default" maxlength="7"><button type="button" class="btn btn-link btn-sm" data-clear-st="${key}" title="Use the default">Reset</button></div>`;
   // An image: a thumbnail, an Upload button, and the address, which can also be pasted.
-  const imagePick = (attr, val, hint) => `<div class="img-pick">
+  const imagePick = (attr, val, hint, kind) => `<div class="img-pick">
       <div class="img-thumb ${val ? '' : 'empty'}" ${val ? `style="background-image:url('${esc(val)}')"` : ''}></div>
       <div class="img-pick-main">
         <div class="row" style="gap:6px;flex-wrap:nowrap"><input class="input" ${attr} value="${esc(val || '')}" placeholder="Upload, or paste an https:// address">
-          <button type="button" class="btn btn-ghost btn-sm" data-upload>Upload</button>${val ? '<button type="button" class="btn btn-link btn-sm" data-clear-img>Remove</button>' : ''}</div>
+          <button type="button" class="btn btn-ghost btn-sm" data-upload="${kind || 'image'}">Upload</button>${val ? '<button type="button" class="btn btn-link btn-sm" data-clear-img>Remove</button>' : ''}</div>
         ${hint ? `<div class="help">${hint}</div>` : ''}
       </div></div>`;
   const section = (title, body, open) => `<details class="look-sec" ${open ? 'open' : ''} data-sec="${esc(title)}"><summary>${esc(title)}</summary><div class="look-body">${body}</div></details>`;
@@ -169,6 +169,9 @@
   function lookPanel(s, ctx) {
     const { layouts, fonts, kind } = ctx;
     const data = ctx;
+    const kit = ctx.brand || {};
+    const kitFont = kit.font_file ? 'your uploaded font' : (kit.font || 'Plus Jakarta Sans');
+    const kitHeading = kit.heading_font_file ? 'your uploaded font' : (kit.heading_font || 'same as the text');
     const form = kind !== 'booking';
     const isFull = s.layout === 'full';
     return `<div class="panel">
@@ -199,14 +202,17 @@
 
       ${section('Colors', `<div class="grid-2">
           ${A.field('Accent (buttons, selected choices)', color('accent', s.accent, data.brand_color || '#6d4aff'), 'Blank uses your brand colour.')}
-          ${A.field('Button text', color('button_text', s.button_text, '#ffffff'), 'Blank picks black or white to suit the accent.')}
-          ${A.field('Page background', color('background', s.background, '#f6f4f1'))}
-          ${A.field('Card', color('surface', s.surface, '#ffffff'))}
-          ${A.field('Text', color('text', s.text, '#1c1a22'))}
-        </div>`, true)}
+          ${A.field('Button text', color('button_text', s.button_text, kit.button_text || '#ffffff'), 'Blank picks black or white to suit the accent.')}
+          ${A.field('Page background', color('background', s.background, kit.background || '#f6f4f1'))}
+          ${A.field('Card', color('surface', s.surface, kit.surface || '#ffffff'))}
+          ${A.field('Text', color('text', s.text, kit.text || '#1c1a22'))}
+          ${A.field('Headings', color('heading_color', s.heading_color, kit.heading_color || kit.text || '#1c1a22'))}
+        </div>
+        ${A.field('Behind it when embedded on a website', sel('embed_background', s.embed_background || 'auto', { auto: 'This look\'s page background if it has one, otherwise as your brand kit says', transparent: 'See-through, so the website shows behind it', color: 'Filled with the page background colour' }))}
+        <div class="help">Anything left blank here comes from your <a href="#/settings/brand">brand kit</a>.</div>`, true)}
 
       ${section('Images', `
-          ${A.field('Logo', imagePick('data-st="logo_url"', s.logo_url, data.logo_url ? 'Blank uses the logo from your business settings.' : 'No logo in your business settings yet, so the first letter of the name is used.'))}
+          ${A.field('Logo', imagePick('data-st="logo_url"', s.logo_url, (data.logo_url ? 'Blank uses the logo from your brand kit.' : 'No logo in your brand kit yet, so the first letter of the name is used.') + ' Square or wider than tall, at least 160 pixels on the shorter side.', 'logo'))}
           ${A.field('Banner across the top', imagePick('data-st="header_image"', s.header_image, 'Wide photos work best, about 1600 × 500.'))}
           ${A.field('Banner height (px)', num('header_height', s.header_height, 'min="60" max="420" step="10"'))}
           ${A.field('Page background photo', imagePick('data-st="background_image"', s.background_image))}
@@ -214,10 +220,10 @@
         `, s.layout === 'visual')}
 
       ${section('Text', `<div class="grid-2">
-          ${A.field('Font', sel('font', s.font, Object.fromEntries(fonts.map((f) => [f, f]))))}
-          ${A.field('Heading font', sel('heading_font', s.heading_font, Object.fromEntries([['', 'Same as the text']].concat(fonts.map((f) => [f, f])))))}
-          ${A.field('Text size (px)', num('font_size', s.font_size, 'min="12" max="20"'))}
-          ${A.field('Heading size (px)', num('heading_size', s.heading_size, 'min="14" max="44"'))}
+          ${A.field('Font', sel('font', s.font || '', Object.fromEntries([['', `Brand font (${kitFont})`]].concat(fonts.map((f) => [f, f])))))}
+          ${A.field('Heading font', sel('heading_font', s.heading_font || '', Object.fromEntries([['', `Brand heading font (${kitHeading})`], ['same', 'Same as the text']].concat(fonts.map((f) => [f, f])))))}
+          ${A.field('Text size (px)', num('font_size', s.font_size || 0, 'min="0" max="22"'), `0 uses your brand size (${kit.font_size || 15}).`)}
+          ${A.field('Heading size (px)', num('heading_size', s.heading_size || 0, 'min="0" max="48"'), `0 uses your brand size (${kit.heading_size || 26}).`)}
         </div>`)}
 
       ${section('Size and shape', `<div class="grid-2">
@@ -264,23 +270,11 @@
     return style;
   }
   // Brand pieces travel with you from layout to layout; structure comes from the new one.
-  const LAYOUT_KEEPS = ['accent', 'background', 'surface', 'text', 'button_text', 'background_image', 'overlay', 'header_image', 'logo_url', 'font', 'heading_font', 'custom_css', 'continue_label', 'back_label', 'calendar_style'];
+  const LAYOUT_KEEPS = ['accent', 'background', 'surface', 'text', 'heading_color', 'embed_background', 'button_text', 'background_image', 'overlay', 'header_image', 'logo_url', 'font', 'heading_font', 'custom_css', 'continue_label', 'back_label', 'calendar_style'];
 
-  /** Uploads one image chosen with the hidden file input, then hands back its address. */
-  function pickImage(root, onDone) {
-    const input = $('[data-file]', root);
-    input.value = '';
-    input.onchange = () => {
-      const file = input.files && input.files[0];
-      if (!file) return;
-      if (file.size > 5 * 1024 * 1024) return A.toast('That image is too large. Keep it under 5MB.', true);
-      const reader = new FileReader();
-      reader.onload = async () => {
-        try { const r = await A.guard(() => api('POST', '/uploads', { data: reader.result }), 'Image uploaded'); onDone(r.url); } catch (e) { /* toast shown */ }
-      };
-      reader.readAsDataURL(file);
-    };
-    input.click();
+  /** Uploads one image the person chooses, then hands back its address. A logo is size-checked. */
+  function pickImage(root, onDone, kind) {
+    A.pickUpload({ kind: kind === 'logo' ? 'logo' : 'image' }).then((r) => { if (r) onDone(r.url); });
   }
 
   // ---------------- the booking page Look editor ----------------
@@ -296,7 +290,7 @@
     // The way booking pages looked before looks existed.
     const ORIGINAL = Object.assign(defaultsFor('full'), { option_style: 'list', date_display: 'picker', auto_advance: true, progress: 'bar', calendar_style: 'auto' });
     let style = Object.assign(defaultsFor('full'), et.style || ORIGINAL);
-    const ctx = { layouts, fonts, brand_color: data.brand_color || A.me.business.brand_color, logo_url: data.logo_url || A.me.business.logo_url, kind: 'booking' };
+    const ctx = { layouts, fonts, brand_color: data.brand_color || A.me.business.brand_color, logo_url: data.logo_url || A.me.business.logo_url, brand: data.brand, kind: 'booking' };
     const sources = [['', 'Copy a look from…'], ['original', 'The original booking page look']]
       .concat((data.forms || []).map((f) => [`f:${f.id}`, `Form: ${f.name}`]))
       .concat((others || []).filter((o) => o.id !== et.id && o.kind !== 'session').map((o) => [`b:${o.id}`, `Booking page: ${o.name}`]));
@@ -373,7 +367,7 @@
         const clr = t.closest('[data-clear-st]');
         if (clr) { const inp = $(`[data-st="${clr.dataset.clearSt}"]`, root); if (inp) inp.value = ''; return send(); }
         const up = t.closest('[data-upload]');
-        if (up) { const target = $('input[data-st]', up.closest('.img-pick')); return pickImage(root, (url) => { target.value = url; repaint(); }); }
+        if (up) { const target = $('input[data-st]', up.closest('.img-pick')); return pickImage(root, (url) => { target.value = url; repaint(); }, up.dataset.upload); }
         const ci = t.closest('[data-clear-img]');
         if (ci) { const target = $('input[data-st]', ci.closest('.img-pick')); if (target) { target.value = ''; repaint(); } }
       });
@@ -537,7 +531,7 @@
       </div>`;
 
     // ----- Look tab (shared with booking pages, see lookPanel) -----
-    const lookTab = () => lookPanel(style, { layouts, fonts, brand_color: data.brand_color, logo_url: data.logo_url, kind: 'form' });
+    const lookTab = () => lookPanel(style, { layouts, fonts, brand_color: data.brand_color, logo_url: data.logo_url, brand: data.brand, kind: 'form' });
 
     // ----- Settings tab -----
     const settingsTab = () => `<div class="panel stack">
@@ -696,23 +690,8 @@
     const schedulePreview = (root) => { clearTimeout(previewTimer); previewTimer = setTimeout(() => sendPreview(root), 160); };
 
     // ----- uploads -----
-    function upload(root, onDone) {
-      const input = $('[data-file]', root);
-      input.value = '';
-      input.onchange = () => {
-        const file = input.files && input.files[0];
-        if (!file) return;
-        if (file.size > 5 * 1024 * 1024) return A.toast('That image is too large. Keep it under 5MB.', true);
-        const reader = new FileReader();
-        reader.onload = async () => {
-          try {
-            const r = await A.guard(() => api('POST', '/uploads', { data: reader.result }), 'Image uploaded');
-            onDone(r.url);
-          } catch (e) { /* toast shown */ }
-        };
-        reader.readAsDataURL(file);
-      };
-      input.click();
+    function upload(root, onDone, kind) {
+      A.pickUpload({ kind: kind === 'logo' ? 'logo' : 'image' }).then((r) => { if (r) onDone(r.url); });
     }
 
     function wire(root) {
@@ -760,7 +739,7 @@
           const box = up.closest('.img-pick, .opt-row');
           const target = box && $('input[data-st], input[data-s-img], input[data-opt-img]', box);
           if (!target) return;
-          return upload(root, (url) => { target.value = url; repaint(root, target.dataset.st ? 'look' : 'steps'); });
+          return upload(root, (url) => { target.value = url; repaint(root, target.dataset.st ? 'look' : 'steps'); }, up.dataset.upload);
         }
         const ci = t.closest('[data-clear-img]');
         if (ci) {

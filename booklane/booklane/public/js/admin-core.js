@@ -75,6 +75,53 @@
       if (f) { f.classList.add('has-error'); f.insertAdjacentHTML('beforeend', `<div class="field-error">${esc(msg)}</div>`); }
     }
   };
+  // ---- uploads ----
+  const readAsDataUrl = (file) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(new Error('That file could not be read.')); r.readAsDataURL(file); });
+  const loadImage = (src) => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('That image could not be read. Use a PNG, JPG, GIF or WebP.')); i.src = src; });
+  // A logo is shown small, so one bigger than this on its longer side is shrunk before it is sent.
+  const LOGO_FIT = 1200;
+  /**
+   * Lets the person choose a file and uploads it. `kind` is 'image' (banner, background, photo),
+   * 'logo' (also checked for size and shape, and shrunk if it is huge) or 'font'. Resolves with
+   * { url, name, width, height, shape } or null if they cancelled or it was refused (a toast says why).
+   */
+  A.pickUpload = ({ kind = 'image', quiet = false } = {}) => new Promise((resolve) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = kind === 'font' ? '.woff2,.woff,.ttf,.otf,font/woff2,font/woff,font/ttf,font/otf' : 'image/png,image/jpeg,image/gif,image/webp';
+    input.onchange = async () => {
+      const file = input.files && input.files[0];
+      if (!file) return resolve(null);
+      try {
+        if (kind === 'font') {
+          if (file.size > 2 * 1024 * 1024) throw new Error('That font file is too large. Keep it under 2MB (a .woff2 file is the smallest).');
+          const r = await A.api('POST', '/uploads', { data: await readAsDataUrl(file), kind });
+          if (!quiet) A.toast('Font uploaded');
+          return resolve(Object.assign({ name: file.name }, r));
+        }
+        if (file.size > (kind === 'logo' ? 20 : 5) * 1024 * 1024) throw new Error(`That image is too large. Keep it under ${kind === 'logo' ? 20 : 5}MB.`);
+        let data = await readAsDataUrl(file);
+        if (kind === 'logo') {
+          const img = await loadImage(data);
+          const longest = Math.max(img.naturalWidth, img.naturalHeight);
+          if (longest > LOGO_FIT) {
+            const k = LOGO_FIT / longest;
+            const c = document.createElement('canvas');
+            c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+            const g = c.getContext('2d');
+            g.imageSmoothingQuality = 'high';
+            g.drawImage(img, 0, 0, c.width, c.height);
+            // PNG keeps a see-through background; a photo-style JPG stays a JPG.
+            data = file.type === 'image/jpeg' ? c.toDataURL('image/jpeg', 0.92) : c.toDataURL('image/png');
+          }
+        }
+        const r = await A.api('POST', '/uploads', { data, kind: kind === 'logo' ? 'logo' : undefined });
+        if (!quiet) A.toast(kind === 'logo' ? `Logo uploaded (${r.width} × ${r.height})` : 'Image uploaded');
+        resolve(Object.assign({ name: file.name }, r));
+      } catch (e) { A.toast(e.message, true); resolve(null); }
+    };
+    input.click();
+  });
   A.field = (label, input, help) => `<div class="field"><label>${esc(label)}</label>${input}${help ? `<div class="help">${help}</div>` : ''}</div>`;
   A.input = (bind, val, attrs = '') => `<input class="input" data-bind="${bind}" name="${bind}" value="${esc(val ?? '')}" ${attrs}>`;
   A.textarea = (bind, val, attrs = '') => `<textarea class="textarea" data-bind="${bind}" name="${bind}" ${attrs}>${esc(val ?? '')}</textarea>`;

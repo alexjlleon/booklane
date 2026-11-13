@@ -90,6 +90,7 @@ function logActivity(businessId, leadId, type, message, meta = {}) {
 function publicSettings(b) {
   const s = b.settings;
   return {
+    brand: require('./brand').publicKit(b),
     tagline: s.tagline, about: s.about, urgency_text: s.urgency_text, trust_points: s.trust_points,
     sms_consent_text: s.sms_consent_text, privacy_note: s.privacy_note, date_check: s.date_check,
     quote: {

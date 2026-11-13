@@ -18,18 +18,36 @@ const DATE_DISPLAYS = ['calendar', 'typed', 'picker'];
 // The time picker: a row of days and a grid of times, the month calendar, or days on phones and
 // the month on wider screens.
 const CALENDAR_STYLES = ['auto', 'days', 'month'];
-const FONTS = {
-  'Plus Jakarta Sans': 'sans', Inter: 'sans', 'DM Sans': 'sans', Poppins: 'sans', Montserrat: 'sans', 'Work Sans': 'sans', Nunito: 'sans',
-  'Playfair Display': 'serif', 'Cormorant Garamond': 'serif', Lora: 'serif', 'Libre Baskerville': 'serif', 'EB Garamond': 'serif',
-  'Great Vibes': 'script', Parisienne: 'script',
-  System: 'system',
-};
+// Every font on offer, with its kind (for the fallback stack) and the weights Google has for it.
+// Asking Google for a weight a family does not have fails the whole stylesheet, so each family
+// asks only for what it has.
+const W = { full: '400;500;600;700;800', to7: '400;500;600;700', two: '400;700', one: '400' };
+const FONT_LIST = [
+  ['Plus Jakarta Sans', 'sans', W.full], ['Inter', 'sans', W.full], ['DM Sans', 'sans', W.full], ['Poppins', 'sans', W.full],
+  ['Montserrat', 'sans', W.full], ['Work Sans', 'sans', W.full], ['Nunito', 'sans', W.full], ['Open Sans', 'sans', W.full],
+  ['Raleway', 'sans', W.full], ['Manrope', 'sans', W.full], ['Outfit', 'sans', W.full], ['Figtree', 'sans', W.full],
+  ['Mulish', 'sans', W.full], ['Urbanist', 'sans', W.full], ['Sora', 'sans', W.full], ['Roboto', 'sans', '400;500;700'],
+  ['Lato', 'sans', W.two], ['Source Sans 3', 'sans', W.full], ['Josefin Sans', 'sans', W.to7], ['Quicksand', 'sans', W.to7],
+  ['Oswald', 'sans', W.to7], ['Bebas Neue', 'sans', W.one],
+  ['Playfair Display', 'serif', W.full], ['Cormorant Garamond', 'serif', W.to7], ['Lora', 'serif', W.to7],
+  ['Libre Baskerville', 'serif', W.two], ['EB Garamond', 'serif', W.full], ['Merriweather', 'serif', W.two],
+  ['DM Serif Display', 'serif', W.one], ['Fraunces', 'serif', W.full], ['Marcellus', 'serif', W.one], ['Cinzel', 'serif', W.full],
+  ['Italiana', 'serif', W.one], ['Prata', 'serif', W.one],
+  ['Great Vibes', 'script', W.one], ['Parisienne', 'script', W.one], ['Dancing Script', 'script', W.to7],
+  ['Allura', 'script', W.one], ['Sacramento', 'script', W.one],
+  ['System', 'system', ''],
+];
+const FONTS = Object.fromEntries(FONT_LIST.map(([f, kind]) => [f, kind]));
+const FONT_WEIGHTS = Object.fromEntries(FONT_LIST.map(([f, , w]) => [f, w]));
 
 const BASE = {
   layout: 'full',
   // Colours. Blank means "use the business's brand colour" / the built-in palette.
-  accent: '', background: '', surface: '', text: '', button_text: '',
+  accent: '', background: '', surface: '', text: '', heading_color: '', button_text: '',
   background_image: '', overlay: 0,
+  // Embedded on a website: 'auto' shows this look's own background if it has one and otherwise does
+  // what the brand kit says; 'transparent' lets the website show through; 'color' fills it in.
+  embed_background: 'auto',
   header_image: '', header_height: 160,
   logo_url: '',
   // What shows.
@@ -37,8 +55,8 @@ const BASE = {
   show_trust: true, show_step_titles: true, show_subtitles: true, show_labels: true, show_back: true,
   // Progress.
   progress: 'bar', progress_count: true,
-  // Type.
-  font: 'Plus Jakarta Sans', heading_font: '', font_size: 15, heading_size: 26,
+  // Type. Blank and 0 mean "what the brand kit says"; a heading font of 'same' follows the text font.
+  font: '', heading_font: '', font_size: 0, heading_size: 0,
   // Shape and space.
   width: 0, radius: 18, field_radius: 12, density: 'comfortable', align: 'left',
   shadow: true, border: true,
@@ -88,6 +106,8 @@ const LAYOUT_INFO = {
 const isHex = (v) => typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v);
 const pick = (v, list, def) => (list.includes(v) ? v : def);
 const numIn = (v, lo, hi, def) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.round(n))) : def; };
+// A size in px, where 0 means "use the brand kit's".
+const sizeIn = (v, lo, hi, def) => (v === 0 || v === '0' || v === '' ? 0 : numIn(v, lo, hi, def));
 const boolOr = (v, def) => (v === undefined || v === null ? def : v === true || v === 'true' || v === 1 || v === '1' || v === 'on');
 
 /**
@@ -119,11 +139,14 @@ function sanitizeStyle(raw) {
   const cols = s.option_columns === undefined || s.option_columns === null || s.option_columns === ''
     ? d.option_columns : (s.option_columns === 'auto' ? 'auto' : numIn(s.option_columns, 1, 4, 'auto'));
   return {
+    v: 2,
     layout: d.layout,
     accent: isHex(s.accent) ? s.accent.toLowerCase() : '',
     background: isHex(s.background) ? s.background.toLowerCase() : '',
     surface: isHex(s.surface) ? s.surface.toLowerCase() : '',
     text: isHex(s.text) ? s.text.toLowerCase() : '',
+    heading_color: isHex(s.heading_color) ? s.heading_color.toLowerCase() : '',
+    embed_background: pick(s.embed_background, ['auto', 'transparent', 'color'], d.embed_background),
     button_text: isHex(s.button_text) ? s.button_text.toLowerCase() : '',
     background_image: cleanUrl(s.background_image),
     overlay: numIn(s.overlay, 0, 85, d.overlay),
@@ -142,10 +165,10 @@ function sanitizeStyle(raw) {
     show_back: boolOr(s.show_back, d.show_back),
     progress: pick(s.progress, PROGRESS, d.progress),
     progress_count: boolOr(s.progress_count, d.progress_count),
-    font: Object.prototype.hasOwnProperty.call(FONTS, s.font) ? s.font : d.font,
-    heading_font: Object.prototype.hasOwnProperty.call(FONTS, s.heading_font) ? s.heading_font : '',
-    font_size: numIn(s.font_size, 12, 20, d.font_size),
-    heading_size: numIn(s.heading_size, 14, 44, d.heading_size),
+    font: Object.prototype.hasOwnProperty.call(FONTS, s.font) ? s.font : (s.font === '' ? '' : d.font),
+    heading_font: Object.prototype.hasOwnProperty.call(FONTS, s.heading_font) ? s.heading_font : (s.heading_font === 'same' ? 'same' : ''),
+    font_size: s.font_size === undefined || s.font_size === null ? d.font_size : sizeIn(s.font_size, 12, 22, d.font_size),
+    heading_size: s.heading_size === undefined || s.heading_size === null ? d.heading_size : sizeIn(s.heading_size, 14, 48, d.heading_size),
     width: numIn(s.width, 0, 1400, d.width),
     radius: numIn(s.radius, 0, 40, d.radius),
     field_radius: numIn(s.field_radius, 0, 30, d.field_radius),
@@ -180,14 +203,37 @@ function bookingStyle(settings) {
   return sanitizeStyle(Object.assign(defaultsFor('full'), { option_style: 'list', date_display: 'picker', auto_advance: true, progress: st.show_progress === false ? 'none' : 'bar' }));
 }
 
-/** The Google Fonts stylesheet a style needs, or '' when it only uses the built-in or system fonts. */
-function fontHref(style) {
-  const fams = [...new Set([style.font, style.heading_font].filter((f) => f && f !== 'System' && f !== 'Plus Jakarta Sans'))];
+/**
+ * The Google Fonts stylesheet for a set of font names, or '' when none of them needs one. Plus
+ * Jakarta Sans is already on every page, System needs nothing, and unknown names are ignored.
+ */
+function fontsHref(names) {
+  const fams = [...new Set((names || []).filter((f) => f && FONT_WEIGHTS[f] && f !== 'Plus Jakarta Sans'))];
   if (!fams.length) return '';
-  // Asking Google for a weight a family does not have fails the whole stylesheet, so each family
-  // asks only for what it has.
-  const weights = (f) => (FONTS[f] === 'script' ? '400' : ['Libre Baskerville'].includes(f) ? '400;700' : ['Cormorant Garamond', 'Lora'].includes(f) ? '400;500;600;700' : '400;500;600;700;800');
-  return 'https://fonts.googleapis.com/css2?' + fams.map((f) => `family=${encodeURIComponent(f).replace(/%20/g, '+')}:wght@${weights(f)}`).join('&') + '&display=swap';
+  return 'https://fonts.googleapis.com/css2?' + fams.map((f) => `family=${encodeURIComponent(f).replace(/%20/g, '+')}:wght@${FONT_WEIGHTS[f]}`).join('&') + '&display=swap';
+}
+/**
+ * The <link> tags for a set of font names: one stylesheet per family, so a family Google ever
+ * refuses cannot take the others down with it.
+ */
+const fontLinks = (names) => [...new Set((names || []).filter(Boolean))].map((f) => fontsHref([f])).filter(Boolean).map((h) => `<link href="${h}" rel="stylesheet">`).join('');
+/** The stylesheet one look needs for its own fonts (the brand kit's fonts come with the page). */
+const fontHref = (style) => fontsHref([style.font, style.heading_font]);
+const styleFontLinks = (style) => fontLinks([style.font, style.heading_font]);
+
+/**
+ * Looks saved before the brand kit stored the built-in font and sizes outright. Those now mean
+ * "what the brand kit says", so such a look follows the company's brand the moment one is set, and
+ * until then draws exactly as it did. Returns the upgraded look, or null when there is nothing to do.
+ */
+function upgradeStyle(style) {
+  if (!style || typeof style !== 'object' || style.v === 2) return null;
+  const s = Object.assign({}, style);
+  if (s.font === 'Plus Jakarta Sans' || s.font === undefined) s.font = '';
+  else if (!s.heading_font) s.heading_font = 'same';
+  if (Number(s.font_size) === 15) s.font_size = 0;
+  if ((s.layout || 'full') === 'full' && Number(s.heading_size) === 26) s.heading_size = 0;
+  return sanitizeStyle(s);
 }
 
-module.exports = { LAYOUTS, PROGRESS, DATE_DISPLAYS, CALENDAR_STYLES, FONTS, bookingStyle, BASE, PRESETS, LAYOUT_INFO, defaultsFor, sanitizeStyle, cleanUrl, cleanCss, fontHref };
+module.exports = { LAYOUTS, PROGRESS, DATE_DISPLAYS, CALENDAR_STYLES, FONTS, FONT_WEIGHTS, fontsHref, fontLinks, styleFontLinks, upgradeStyle, isHex, bookingStyle, BASE, PRESETS, LAYOUT_INFO, defaultsFor, sanitizeStyle, cleanUrl, cleanCss, fontHref };

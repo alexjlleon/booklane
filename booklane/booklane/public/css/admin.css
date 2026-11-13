@@ -299,3 +299,31 @@ html.in-app { -webkit-tap-highlight-color: transparent; }
 .access-pill.edit { background: #e6f6ee; color: #17744a; }
 .access-pill.read, .access-pill.free_busy { background: #fff4e5; color: #8a4b00; }
 .access-pill.none { background: #fdecec; color: #8a1f1f; }
+
+/* Brand kit */
+.brand-kit > div > .panel + .panel { margin-top: 16px; }
+.kit-preview-col { position: sticky; top: 16px; }
+.kit-logo { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 14px; }
+.kit-logo-thumb { width: 150px; height: 96px; flex: none; border-radius: 12px; border: 1px solid var(--line); display: grid; place-items: center; padding: 10px;
+  background: repeating-conic-gradient(#f1eee8 0 25%, #fff 0 50%) 0 0 / 16px 16px; }
+.kit-logo-thumb img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
+.kit-logo-thumb.empty span { font-size: 12px; color: #8b8795; background: #fff; padding: 2px 8px; border-radius: 999px; }
+.kit-logo-main { flex: 1; min-width: 0; }
+.kit-rules { margin: 10px 0 0; padding-left: 18px; font-size: 13px; color: #4a4655; line-height: 1.55; }
+.kit-file { margin: -6px 0 14px; }
+.kit-stage { position: relative; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; font-family: var(--font); font-size: var(--fs, 15px); color: var(--ink); line-height: 1.5; }
+.kit-site { display: none; position: absolute; inset: 0; padding: 14px; background: linear-gradient(135deg, #2b2f3a, #4a3f55 55%, #7a5c4f); }
+.kit-site span { display: block; height: 10px; border-radius: 6px; background: rgba(255,255,255,.22); margin-bottom: 8px; width: 60%; }
+.kit-site span:nth-child(2) { width: 38%; } .kit-site span:nth-child(3) { width: 48%; }
+.kit-stage.as-embed .kit-site { display: block; }
+.kit-page { position: relative; padding: 26px 18px; background: var(--kit-page-bg, var(--bg)); }
+.kit-stage.as-embed .kit-page { margin: 44px 14px 14px; padding: 8px; border-radius: 4px; }
+.kit-card { padding: 22px; }
+.kit-card .biz { margin-bottom: 16px; }
+.kit-card .step-head { margin-bottom: 14px; }
+.kit-card .step-head h2 { font-size: var(--hs, 26px); font-weight: 800; }
+.kit-card .kit-text { margin: 6px 0 0; color: var(--ink-2); }
+.kit-card .options { grid-template-columns: 1fr 1fr; }
+.kit-card a { color: var(--brand); font-weight: 600; }
+.kit-card .input { font-family: inherit; color: var(--ink); }
+@media (max-width: 1100px) { .kit-preview-col { position: static; } }

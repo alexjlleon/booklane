@@ -9,36 +9,54 @@
   const { esc, icons } = BL;
 
   // ---------- colours, fonts, classes ----------
-  const FONT_KIND = { 'Playfair Display': 'serif', 'Cormorant Garamond': 'serif', Lora: 'serif', 'Libre Baskerville': 'serif', 'EB Garamond': 'serif', 'Great Vibes': 'script', Parisienne: 'script' };
+  // Kind (for the fallback stack) and Google weights of each font on offer. Keep in step with
+  // FONT_LIST in src/services/form-style.js.
+  const FULL = '400;500;600;700;800', TO7 = '400;500;600;700', TWO = '400;700', ONE = '400';
+  const FONT_INFO = {
+    'Plus Jakarta Sans': ['sans', FULL], Inter: ['sans', FULL], 'DM Sans': ['sans', FULL], Poppins: ['sans', FULL], Montserrat: ['sans', FULL],
+    'Work Sans': ['sans', FULL], Nunito: ['sans', FULL], 'Open Sans': ['sans', FULL], Raleway: ['sans', FULL], Manrope: ['sans', FULL],
+    Outfit: ['sans', FULL], Figtree: ['sans', FULL], Mulish: ['sans', FULL], Urbanist: ['sans', FULL], Sora: ['sans', FULL],
+    Roboto: ['sans', '400;500;700'], Lato: ['sans', TWO], 'Source Sans 3': ['sans', FULL], 'Josefin Sans': ['sans', TO7], Quicksand: ['sans', TO7],
+    Oswald: ['sans', TO7], 'Bebas Neue': ['sans', ONE],
+    'Playfair Display': ['serif', FULL], 'Cormorant Garamond': ['serif', TO7], Lora: ['serif', TO7], 'Libre Baskerville': ['serif', TWO],
+    'EB Garamond': ['serif', FULL], Merriweather: ['serif', TWO], 'DM Serif Display': ['serif', ONE], Fraunces: ['serif', FULL],
+    Marcellus: ['serif', ONE], Cinzel: ['serif', FULL], Italiana: ['serif', ONE], Prata: ['serif', ONE],
+    'Great Vibes': ['script', ONE], Parisienne: ['script', ONE], 'Dancing Script': ['script', TO7], Allura: ['script', ONE], Sacramento: ['script', ONE],
+  };
   const fontStack = (f) => {
     if (!f || f === 'System') return 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
-    const kind = FONT_KIND[f];
+    const kind = (FONT_INFO[f] || [])[0];
     return `"${f}", ${kind === 'serif' ? 'Georgia, "Times New Roman", serif' : kind === 'script' ? 'cursive' : 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}`;
   };
   // The server adds the font link for a saved look; a preview can switch fonts, so load on demand.
   function ensureFont(f) {
-    if (!f || f === 'System' || f === 'Plus Jakarta Sans') return;
+    if (!f || !FONT_INFO[f] || f === 'Plus Jakarta Sans') return;
     const id = 'font-' + f.replace(/\W+/g, '-');
     if (document.getElementById(id)) return;
-    const w = FONT_KIND[f] === 'script' ? '400' : f === 'Libre Baskerville' ? '400;700' : (f === 'Cormorant Garamond' || f === 'Lora') ? '400;500;600;700' : '400;500;600;700;800';
     const l = document.createElement('link');
     l.id = id; l.rel = 'stylesheet';
-    l.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(f).replace(/%20/g, '+')}:wght@${w}&display=swap`;
+    l.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(f).replace(/%20/g, '+')}:wght@${FONT_INFO[f][1]}&display=swap`;
     document.head.appendChild(l);
   }
   const rgbOf = (hex) => { const n = parseInt(String(hex).slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
   const isHex = (v) => /^#[0-9a-f]{6}$/i.test(v || '');
   const light = (hex) => { const [r, g, b] = rgbOf(hex).map((c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.45; };
-  const STYLE_CLASSES = /^(layout|density|align|btn|img|fit)-|^(no-shadow|no-border|labels-hidden|has-bg-image|has-custom-bg|fixed-cols|btn-full)$/;
+  const STYLE_CLASSES = /^(layout|density|align|btn|img|fit)-|^(no-shadow|no-border|labels-hidden|has-bg-image|has-custom-bg|embed-clear|fixed-cols|btn-full)$/;
 
+  /**
+   * Puts a look on the page. The company's brand kit is already there (the server writes it into
+   * the page as CSS variables), so this only sets what the look itself says; anything a look
+   * leaves blank, or 0 for a size, stays as the brand kit has it.
+   */
   function apply(S, biz) {
+    const kit = (biz.settings || {}).brand || {};
     const root = document.documentElement;
     root.removeAttribute('style');
     document.body.className = document.body.className.split(' ').filter((c) => c && !STYLE_CLASSES.test(c)).join(' ');
     const r = root.style;
     const accent = isHex(S.accent) ? S.accent : (isHex(biz.brand_color) ? biz.brand_color : null);
     if (accent) { r.setProperty('--brand', accent); r.setProperty('--brand-rgb', rgbOf(accent).join(',')); }
-    r.setProperty('--btn-ink', isHex(S.button_text) ? S.button_text : (accent && light(accent) ? '#1c1a22' : '#ffffff'));
+    r.setProperty('--btn-ink', isHex(S.button_text) ? S.button_text : isHex(kit.button_text) && !isHex(S.accent) ? kit.button_text : (accent && light(accent) ? '#1c1a22' : '#ffffff'));
     if (isHex(S.surface)) { r.setProperty('--surface', S.surface); r.setProperty('--surface-2', `color-mix(in srgb, ${S.surface} 94%, ${light(S.surface) ? '#000' : '#fff'})`); }
     if (isHex(S.text)) {
       r.setProperty('--ink', S.text);
@@ -49,14 +67,19 @@
       r.setProperty('--line', 'color-mix(in srgb, var(--ink) 12%, var(--surface))');
       r.setProperty('--line-2', 'color-mix(in srgb, var(--ink) 22%, var(--surface))');
     }
+    if (isHex(S.heading_color)) r.setProperty('--heading-ink', S.heading_color);
     if (isHex(S.background)) r.setProperty('--bg', S.background);
     if (S.background_image) {
       const o = Math.max(0, Math.min(85, Number(S.overlay) || 0)) / 100;
       r.setProperty('--bg-image', `linear-gradient(rgba(0,0,0,${o}), rgba(0,0,0,${o})), url("${S.background_image}")`);
     }
     ensureFont(S.font); ensureFont(S.heading_font);
-    r.setProperty('--font', fontStack(S.font));
-    r.setProperty('--heading-font', S.heading_font ? fontStack(S.heading_font) : 'var(--font)');
+    if (S.font) r.setProperty('--font', fontStack(S.font));
+    // Headings: this look's own font, the text font ('same'), or left to the brand kit. A look
+    // that changes the text font while the kit has no heading font keeps the two together.
+    if (S.heading_font === 'same') r.setProperty('--heading-font', 'var(--font)');
+    else if (S.heading_font) r.setProperty('--heading-font', fontStack(S.heading_font));
+    else if (S.font && !kit.has_heading_font) r.setProperty('--heading-font', 'var(--font)');
     if (S.font_size) r.setProperty('--fs', `${S.font_size}px`);
     if (S.heading_size) r.setProperty('--hs', `${S.heading_size}px`);
     if (S.radius !== undefined) r.setProperty('--radius', `${S.radius}px`);
@@ -73,7 +96,10 @@
     if (S.border === false) cls.add('no-border');
     if (S.show_labels === false) cls.add('labels-hidden');
     if (S.background_image) cls.add('has-bg-image');
-    if (isHex(S.background) || S.background_image) cls.add('has-custom-bg');
+    // Embedded on a website: see-through, filled in, or (auto) this look's own background if it
+    // has one and otherwise whatever the brand kit says.
+    if (S.embed_background === 'transparent') cls.add('embed-clear');
+    else if (S.embed_background === 'color' || isHex(S.background) || S.background_image) cls.add('has-custom-bg');
     if (S.option_columns && S.option_columns !== 'auto') cls.add('fixed-cols');
     let tag = document.getElementById('form-custom-css');
     if (!tag) { tag = document.createElement('style'); tag.id = 'form-custom-css'; document.head.appendChild(tag); }
@@ -82,7 +108,7 @@
 
   // ---------- page pieces ----------
   const logoUrl = (S, biz) => S.logo_url || biz.logo_url || '';
-  const logoHtml = (S, biz) => (logoUrl(S, biz) ? `<div class="biz-logo"><img src="${esc(logoUrl(S, biz))}" alt="${esc(biz.name)}"></div>` : BL.logo(biz));
+  const logoHtml = (S, biz) => (logoUrl(S, biz) ? `<div class="${BL.logoClass(biz)}"><img src="${esc(logoUrl(S, biz))}" alt="${esc(biz.name)}"></div>` : BL.logo(biz));
   const banner = (S) => (S.header_image ? `<div class="f-banner" style="background-image:url('${esc(S.header_image)}')"></div>` : '');
   /** Two columns (side panel) or one, as the look says. */
   const sideLayout = (S) => (S.layout || 'full') === 'full' && S.show_sidebar !== false;

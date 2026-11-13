@@ -26,6 +26,10 @@ function hexToRgb(hex) {
 function page({ title, description = '', business, scripts = [], styles = ['app.css'], data = {}, body = '<div id="app"></div>', bodyClass = '', embed = false, head = '' }) {
   const brand = business?.brand_color && /^#[0-9a-f]{6}$/i.test(business.brand_color) ? business.brand_color : '#6d4aff';
   const v = ASSET_VERSION;
+  // A company's pages carry its brand kit: colours, fonts, sizes and the embed background.
+  const BRAND = require('./services/brand');
+  const kitCss = business ? BRAND.css(business) : `:root{--brand:${brand};--brand-rgb:${hexToRgb(brand)}}`;
+  const kitFonts = business ? BRAND.fontLinks(business) : '';
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -40,7 +44,8 @@ function page({ title, description = '', business, scripts = [], styles = ['app.
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 ${styles.map((s) => `<link rel="stylesheet" href="/static/css/${s}?v=${v}">`).join('\n')}
-<style>:root{--brand:${brand};--brand-rgb:${hexToRgb(brand)}}</style>
+${kitFonts}
+<style>${kitCss}</style>
 ${head}
 </head>
 <body class="${esc(bodyClass)}${embed ? ' is-embed' : ''}">

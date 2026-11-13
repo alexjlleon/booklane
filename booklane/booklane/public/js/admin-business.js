@@ -289,7 +289,7 @@
   });
 
   // ---------- Settings ----------
-  const TABS = { general: 'Branding & page', domain: 'Domain & email', leads: 'Leads & alerts', quote: 'Quotes', integrations: 'Integrations', emails: 'Email log' };
+  const TABS = { general: 'Business & page', brand: 'Brand kit', domain: 'Domain & email', leads: 'Leads & alerts', quote: 'Quotes', integrations: 'Integrations', emails: 'Email log' };
   const lines = (arr) => (arr || []).join('\n');
 
   async function settingsView(p) {
@@ -307,7 +307,7 @@
         ${A.field('Timezone', A.tzSelect('timezone', b.timezone))}
         <div class="grid-2">${A.field('Public email', A.input('email', b.email))}${A.field('Phone', A.input('phone', b.phone))}</div>
         ${A.field('Website', A.input('website', b.website))}
-        <div class="grid-2">${A.field('Logo URL', A.input('logo_url', b.logo_url, 'placeholder="https://…/logo.png"'))}${A.field('Brand color', A.input('brand_color', b.brand_color, 'type="color" style="height:46px;padding:4px"'))}</div></div>
+        <p class="help">Your logo, colours and fonts are on the <a href="#/settings/brand">Brand kit</a> tab.</p></div>
         <div class="panel"><h2>Page copy</h2>
         ${A.field('Tagline', A.input('settings.tagline', s.tagline))}
         ${A.field('Urgency message (optional)', A.input('settings.urgency_text', s.urgency_text, 'placeholder="Only 4 spots left this week"'))}
@@ -320,6 +320,8 @@
         <p class="help">Meetings use your real open times. Events use the booked event dates on the <a href="#/availability">Availability</a> page, so any date not on that list comes back as open. Keep the list up to date before turning this on.</p>
         ${A.field('When an event date is open (optional)', A.input('settings.date_check.available_text', s.date_check.available_text, 'maxlength="300"'), 'Use {date} for the date they picked.')}
         ${A.field('When an event date is booked (optional)', A.input('settings.date_check.taken_text', s.date_check.taken_text, 'maxlength="300"'), 'Leave these empty to use the standard wording.')}</div></div>`;
+    } else if (tab === 'brand') {
+      body = brandTab(b, await api('GET', '/brand/options'));
     } else if (tab === 'leads') {
       const L = s.leads, N = s.notifications;
       body = `<div class="cols-even"><div class="panel"><h2>Partial leads</h2><p class="desc">When someone stops partway, we keep what they entered and can alert you.</p>
@@ -482,9 +484,165 @@
       </div></div>`;
   }
 
+  // ---------- Brand kit ----------
+  // A colour that may be left blank (meaning "the standard one"): a swatch, the hex, and Reset.
+  const kitColor = (bind, val, fallback) => `<div class="color-pick"><input type="color" data-kit-swatch value="${esc(val || fallback)}" aria-label="Pick a colour"><input class="input" data-bind="${bind}" data-kit-hex data-fallback="${esc(fallback)}" value="${esc(val || '')}" placeholder="Standard" maxlength="7"><button type="button" class="btn btn-link btn-sm" data-kit-reset title="Use the standard colour">Reset</button></div>`;
+  const kitFontFile = (which, k) => {
+    const url = k[`${which}_file`], name = k[`${which}_file_name`];
+    return `<div class="kit-file" data-kit-font="${which}">
+      <input type="hidden" data-bind="settings.brand.${which}_file" value="${esc(url || '')}"><input type="hidden" data-bind="settings.brand.${which}_file_name" value="${esc(name || '')}">
+      ${url ? `<span class="small"><b>${esc(name || 'Your font file')}</b> is in use instead of the font above.</span> <button type="button" class="btn btn-link btn-sm" data-kit-font-clear>Remove</button>` : '<button type="button" class="btn btn-ghost btn-sm" data-kit-font-upload>Upload your own font file</button>'}
+    </div>`;
+  };
+  function brandTab(b, opt) {
+    const k = b.settings.brand;
+    const fonts = Object.fromEntries(opt.fonts.map((f) => [f.name, f.name]));
+    const L = opt.logo;
+    return `<div class="cols-even brand-kit"><div>
+      <div class="panel"><h2>Logo</h2><p class="desc">Shown on every booking page, form and quote.</p>
+        <div class="kit-logo"><div class="kit-logo-thumb ${b.logo_url ? '' : 'empty'}" data-kit-logo-thumb>${b.logo_url ? `<img src="${esc(b.logo_url)}" alt="">` : '<span>No logo yet</span>'}</div>
+          <div class="kit-logo-main"><div class="row" style="gap:6px"><button type="button" class="btn btn-primary btn-sm" data-kit-logo-upload>${b.logo_url ? 'Replace logo' : 'Upload logo'}</button>${b.logo_url ? '<button type="button" class="btn btn-link btn-sm" data-kit-logo-clear>Remove</button>' : ''}</div>
+          <ul class="kit-rules"><li><b>Shape:</b> square, or wider than it is tall (up to ${L.max_ratio} times as wide).</li><li><b>Size:</b> at least ${L.min_side} pixels on the shorter side. ${esc(L.square)} is ideal for a square logo, ${esc(L.wide)} for a wide one.</li><li><b>File:</b> PNG, JPG, GIF or WebP. A PNG with a see-through background looks best.</li><li>A logo that is too small or the wrong shape is not accepted. One that is very large is shrunk for you.</li></ul></div></div>
+        ${A.field('Or the address of a logo on your website', A.input('logo_url', b.logo_url, 'placeholder="https://…/logo.png" data-kit-logo-url'), 'Uploading is better: an uploaded logo is checked for size and cannot go missing.')}
+        ${A.field('How the logo sits', A.select('settings.brand.logo_style', k.logo_style, { plain: 'As it is, in its own shape (best for most logos)', tile: 'Cropped into a rounded square on your accent colour' }))}</div>
+      <div class="panel"><h2>Colours</h2><p class="desc">Leave any of these on Standard to keep the built-in colour.</p>
+        <div class="grid-2">${A.field('Accent (buttons, links, selected choices)', `<div class="color-pick"><input type="color" data-kit-swatch value="${esc(b.brand_color)}" aria-label="Pick a colour"><input class="input" data-bind="brand_color" name="brand_color" data-kit-hex data-required value="${esc(b.brand_color)}" maxlength="7"></div>`)}
+        ${A.field('Text on buttons', kitColor('settings.brand.button_text', k.button_text, '#ffffff'), 'Standard picks black or white to suit the accent.')}
+        ${A.field('Page background', kitColor('settings.brand.background', k.background, '#f6f4f1'))}
+        ${A.field('Card (the box the page sits in)', kitColor('settings.brand.surface', k.surface, '#ffffff'))}
+        ${A.field('Text', kitColor('settings.brand.text', k.text, '#1c1a22'))}
+        ${A.field('Headings', kitColor('settings.brand.heading_color', k.heading_color, k.text || '#1c1a22'), 'Standard matches the text.')}</div></div>
+      <div class="panel"><h2>Fonts</h2>
+        <div class="grid-2"><div>${A.field('Text font', A.select('settings.brand.font', k.font, fonts))}${kitFontFile('font', k)}</div>
+        <div>${A.field('Heading font', A.select('settings.brand.heading_font', k.heading_font, Object.assign({ '': 'Same as the text' }, fonts)))}${kitFontFile('heading_font', k)}</div>
+        ${A.field('Text size (px)', A.input('settings.brand.font_size', k.font_size, 'type="number" min="12" max="22" data-type="number"'), '15 is the standard.')}
+        ${A.field('Heading size (px)', A.input('settings.brand.heading_size', k.heading_size, 'type="number" min="14" max="48" data-type="number"'), '26 is the standard.')}</div>
+        <p class="help">Have a brand font that is not in the list? Upload its file (.woff2, .woff, .ttf or .otf, up to 2MB). Make sure your licence covers use on a website.</p></div>
+      <div class="panel"><h2>When embedded on your website</h2><p class="desc">What sits behind a booking page or form that is embedded on another site.</p>
+        ${A.field('Background', A.select('settings.brand.embed_background', k.embed_background, { transparent: 'See-through, so your website shows behind it', page: 'The page background colour above', custom: 'Its own colour' }))}
+        <div data-kit-embed-color ${k.embed_background === 'custom' ? '' : 'hidden'}>${A.field('Embed background colour', kitColor('settings.brand.embed_color', k.embed_color, '#ffffff'))}</div>
+        <p class="help">The card itself always keeps its own colour. A single page can do something different in its own Look.</p></div>
+      </div>
+      <div class="kit-preview-col"><div class="panel"><div class="row between" style="margin-bottom:10px"><h2 style="margin:0">Preview</h2>
+        <div class="seg" role="group" aria-label="Preview as"><button type="button" class="on" data-kit-view="page">Its own page</button><button type="button" data-kit-view="embed">Embedded</button></div></div>
+        <div class="kit-stage" data-kit-stage><div class="kit-site" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div class="kit-page"><div class="card kit-card">
+            <div class="biz"><span data-kit-logo-slot></span><div class="biz-name">${esc(b.name)}</div></div>
+            <div class="step-head"><h2>Pick a time that suits you</h2><p class="kit-text">A quick call so we can hear about your day and answer your questions.</p></div>
+            <div class="options"><label class="opt radio is-on"><span class="tick"></span><span>Photography</span></label><label class="opt radio"><span class="tick"></span><span>DJ / MC</span></label></div>
+            <div class="field" style="margin-top:12px"><label>Your name</label><input class="input" value="Jordan Avery" readonly tabindex="-1"></div>
+            <div class="row between"><a href="#/settings/brand" onclick="return false">A link</a><button type="button" class="btn btn-primary" tabindex="-1">Continue</button></div>
+          </div></div></div>
+        <p class="help" style="margin-top:10px">A sketch of how your pages will look. Nothing changes for customers until you press Save. Every page follows this kit unless its own Look says otherwise.</p></div></div>
+      </div>`;
+  }
+
+  /** Wires the Brand kit tab: uploads, colour swatches and the live preview. */
+  function brandMount(root, opt) {
+    const info = Object.fromEntries(opt.fonts.map((f) => [f.name, f]));
+    const val = (bind) => { const el = $(`[data-bind="${bind}"]`, root); return el ? el.value.trim() : ''; };
+    const hexOk = (v) => /^#[0-9a-f]{6}$/i.test(v);
+    const SANS = 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+    const stack = (f) => (!f || f === 'System' ? SANS : `"${f}", ${info[f] && info[f].kind === 'serif' ? 'Georgia, serif' : info[f] && info[f].kind === 'script' ? 'cursive' : SANS}`);
+    const ensureFont = (f) => {
+      if (!f || !info[f] || !info[f].weights || f === 'Plus Jakarta Sans') return;
+      const id = 'kitfont-' + f.replace(/\W+/g, '-');
+      if (document.getElementById(id)) return;
+      const l = document.createElement('link'); l.id = id; l.rel = 'stylesheet';
+      l.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(f).replace(/%20/g, '+')}:wght@${info[f].weights}&display=swap`;
+      document.head.appendChild(l);
+    };
+    const rgb = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const light = (h) => { const [r, g, b] = rgb(h).map((c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.45; };
+    let view = 'page';
+
+    function paint() {
+      const stage = $('[data-kit-stage]', root);
+      if (!stage) return;
+      const st = stage.style;
+      st.cssText = '';
+      const accent = hexOk(val('brand_color')) ? val('brand_color') : '#6d4aff';
+      const g = (k) => { const v = val(`settings.brand.${k}`); return hexOk(v) ? v : ''; };
+      st.setProperty('--brand', accent); st.setProperty('--brand-rgb', rgb(accent).join(','));
+      st.setProperty('--btn-ink', g('button_text') || (light(accent) ? '#1c1a22' : '#ffffff'));
+      st.setProperty('--bg', g('background') || '#f6f4f1');
+      st.setProperty('--surface', g('surface') || '#ffffff');
+      const ink = g('text') || '#1c1a22';
+      st.setProperty('--ink', ink); st.setProperty('--ink-2', `color-mix(in srgb, ${ink} 80%, transparent)`); st.setProperty('--muted', `color-mix(in srgb, ${ink} 60%, transparent)`);
+      st.setProperty('--line', 'color-mix(in srgb, var(--ink) 12%, var(--surface))'); st.setProperty('--line-2', 'color-mix(in srgb, var(--ink) 22%, var(--surface))');
+      st.setProperty('--heading-ink', g('heading_color') || ink);
+      // Fonts: an uploaded file wins over the name in the list.
+      const font = val('settings.brand.font'), hfont = val('settings.brand.heading_font');
+      const file = val('settings.brand.font_file'), hfile = val('settings.brand.heading_font_file');
+      ensureFont(font); ensureFont(hfont);
+      let tag = document.getElementById('kit-faces');
+      if (!tag) { tag = document.createElement('style'); tag.id = 'kit-faces'; document.head.appendChild(tag); }
+      const safe = (u) => (/^\/u\/\d+\/[0-9a-f]{24}\.(woff2|woff|ttf|otf)$/.test(u) ? u : '');
+      tag.textContent = (safe(file) ? `@font-face{font-family:"Kit Text";src:url("${safe(file)}")}` : '') + (safe(hfile) ? `@font-face{font-family:"Kit Heading";src:url("${safe(hfile)}")}` : '');
+      st.setProperty('--font', safe(file) ? `"Kit Text", ${stack(font)}` : stack(font));
+      st.setProperty('--heading-font', safe(hfile) ? `"Kit Heading", ${stack(hfont || font)}` : hfont ? stack(hfont) : 'var(--font)');
+      st.setProperty('--fs', `${Math.min(22, Math.max(12, Number(val('settings.brand.font_size')) || 15))}px`);
+      st.setProperty('--hs', `${Math.min(48, Math.max(14, Number(val('settings.brand.heading_size')) || 26))}px`);
+      // Embedded: the website shows behind unless the kit fills it in.
+      const mode = val('settings.brand.embed_background');
+      const embedBg = mode === 'custom' ? (g('embed_color') || 'transparent') : mode === 'page' ? 'var(--bg)' : 'transparent';
+      stage.classList.toggle('as-embed', view === 'embed');
+      st.setProperty('--kit-page-bg', view === 'embed' ? embedBg : 'var(--bg)');
+      const hold = $('[data-kit-embed-color]', root); if (hold) hold.hidden = mode !== 'custom';
+      // Logo
+      const url = val('logo_url');
+      const plain = val('settings.brand.logo_style') === 'plain';
+      const name = (A.me.business.name || '?').trim().charAt(0).toUpperCase();
+      $('[data-kit-logo-slot]', root).innerHTML = url ? `<div class="biz-logo${plain ? ' plain' : ''}"><img src="${esc(url)}" alt=""></div>` : `<div class="biz-logo">${esc(name)}</div>`;
+      const thumb = $('[data-kit-logo-thumb]', root);
+      thumb.classList.toggle('empty', !url);
+      thumb.innerHTML = url ? `<img src="${esc(url)}" alt="">` : '<span>No logo yet</span>';
+    }
+
+    root.addEventListener('input', (e) => {
+      const t = e.target;
+      if (!t.closest('.brand-kit')) return;
+      if (t.matches('[data-kit-swatch]')) { const box = $('[data-kit-hex]', t.closest('.color-pick')); if (box) box.value = t.value; }
+      if (t.matches('[data-kit-hex]') && hexOk(t.value.trim())) { const sw = $('[data-kit-swatch]', t.closest('.color-pick')); if (sw) sw.value = t.value.trim(); }
+      paint();
+    });
+    root.addEventListener('change', (e) => { if (e.target.closest('.brand-kit')) paint(); });
+    root.addEventListener('click', async (e) => {
+      const t = e.target;
+      if (!t.closest('.brand-kit')) return;
+      const reset = t.closest('[data-kit-reset]');
+      if (reset) { const pick = reset.closest('.color-pick'); const box = $('[data-kit-hex]', pick); box.value = ''; $('[data-kit-swatch]', pick).value = box.dataset.fallback; return paint(); }
+      const v = t.closest('[data-kit-view]');
+      if (v) { view = v.dataset.kitView; $$('[data-kit-view]', root).forEach((b) => b.classList.toggle('on', b === v)); return paint(); }
+      if (t.closest('[data-kit-logo-upload]')) {
+        const r = await A.pickUpload({ kind: 'logo', quiet: true });
+        if (!r) return;
+        $('[data-bind="logo_url"]', root).value = r.url;
+        // A wide logo cropped into a square tile loses its ends, so it is shown as it is.
+        if (r.shape === 'wide') $('[data-bind="settings.brand.logo_style"]', root).value = 'plain';
+        A.toast(`Logo uploaded (${r.width} × ${r.height}). Press Save to use it.`);
+        return paint();
+      }
+      if (t.closest('[data-kit-logo-clear]')) { $('[data-bind="logo_url"]', root).value = ''; return paint(); }
+      const fu = t.closest('[data-kit-font-upload]'), fc = t.closest('[data-kit-font-clear]');
+      if (fu || fc) {
+        const box = (fu || fc).closest('[data-kit-font]');
+        const which = box.dataset.kitFont;
+        let url = '', name = '';
+        if (fu) { const r = await A.pickUpload({ kind: 'font', quiet: true }); if (!r) return; url = r.url; name = r.name; }
+        const k = { [`${which}_file`]: url, [`${which}_file_name`]: name };
+        box.outerHTML = kitFontFile(which, k);
+        if (fu) A.toast('Font uploaded. Press Save to use it.');
+        return paint();
+      }
+    });
+    paint();
+  }
+
   function settingsMount(root, p) {
     const tab = p.tab || 'general';
     const form = $('#settings-form', root);
+    if (tab === 'brand') api('GET', '/brand/options').then((opt) => brandMount(root, opt)).catch(() => {});
     // The provider cards manage global credentials with their own endpoints, so they are painted
     // separately and never travel with this form's PATCH.
     if (tab === 'integrations' && A.renderProviders) A.renderProviders($('#provider-cards', root));
@@ -525,6 +683,10 @@
       if (t.hasAttribute('data-save-settings') || t.dataset.test) {
         let body;
         try { body = A.collect(form); } catch (err) { return A.toast(err.message, true); }
+        if (tab === 'brand') {
+          const bad = $$('[data-kit-hex]', root).find((x) => (x.value.trim() || x.hasAttribute('data-required')) && !/^#[0-9a-f]{6}$/i.test(x.value.trim()));
+          if (bad) { bad.focus(); return A.toast('Colours need to be a # and six letters or numbers, like #c9a227.', true); }
+        }
         if (tab === 'quote') {
           body.settings.quote.fields = $$('[data-qfield]', root).map((r) => ({
             id: r.dataset.id || '', label: $('[data-qf=label]', r).value, type: $('[data-qf=type]', r).value,

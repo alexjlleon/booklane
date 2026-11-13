@@ -387,6 +387,23 @@ try {
   }
 } catch (e) { console.error('[db] session settings cleanup failed:', e.message); }
 
+// Looks saved before the brand kit named the built-in font and sizes outright. Those values now
+// mean "what the brand kit says" (see upgradeStyle), so each saved look is rewritten once; a look
+// already carrying v: 2 is skipped, which makes every later boot a no-op.
+try {
+  const { upgradeStyle } = require('./services/form-style');
+  for (const table of ['forms', 'event_types']) {
+    for (const row of raw.prepare(`SELECT id, settings FROM ${table} WHERE settings LIKE '%"style"%'`).all()) {
+      let settings;
+      try { settings = JSON.parse(row.settings || '{}'); } catch { continue; }
+      const next = upgradeStyle(settings && settings.style);
+      if (!next) continue;
+      settings.style = next;
+      raw.prepare(`UPDATE ${table} SET settings = ? WHERE id = ?`).run(JSON.stringify(settings), row.id);
+    }
+  }
+} catch (e) { console.error('[db] look upgrade failed:', e.message); }
+
 const cache = new Map();
 function stmt(sql) {
   let s = cache.get(sql);

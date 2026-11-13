@@ -2495,7 +2495,7 @@ test('form style: each layout fills its own defaults and bad values fall back', 
   assert.equal(junk.layout, 'full');
   assert.equal(junk.accent, '');
   assert.equal(junk.width, 1400);
-  assert.equal(junk.font, 'Plus Jakarta Sans');
+  assert.equal(junk.font, '', 'an unknown font falls back to the brand font');
   assert.equal(junk.option_columns, 4);
   assert.equal(junk.header_image, '');
   assert.equal(junk.background_image, '');
@@ -3589,4 +3589,166 @@ test('unedited copies of a template pick up new wording; edited ones are left al
   assert.equal(b.sms_body, TPL.byKey('call-1-day').sms_body, 'its untouched text still updates');
   assert.equal(MSG.refreshUntouchedCopies(), 0, 'running again changes nothing');
   db.run('DELETE FROM message_automations WHERE id IN (?, ?)', untouched, edited);
+});
+
+
+// ---------- Brand kit: colours, fonts, sizes, embed background, logo and font uploads ----------
+// A real PNG of any size: the header carries the dimensions, which is all a logo check reads.
+function pngOf(width, height) {
+  const zlib = require('node:zlib');
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(zlib.crc32(body) >>> 0);
+    return Buffer.concat([len, body, crc]);
+  };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4); ihdr[8] = 8; ihdr[9] = 2;
+  const raw = Buffer.alloc((width * 3 + 1) * height);
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+}
+
+test('brand kit: a logo must be big enough and square or wide; the answer says what was wrong', async () => {
+  const up = (buf) => req('POST', '/api/admin/uploads', { data: buf.toString('base64'), kind: 'logo' }, { cookie: ownerCookie });
+  const small = await up(pngOf(100, 100));
+  assert.equal(small.status, 422);
+  assert.match(small.data.error, /too small/);
+  assert.match(small.data.error, /100 × 100/);
+  const tall = await up(pngOf(300, 900));
+  assert.equal(tall.status, 422);
+  assert.match(tall.data.error, /taller than it is wide/);
+  const thin = await up(pngOf(2000, 200));
+  assert.equal(thin.status, 422);
+  assert.match(thin.data.error, /too wide and thin/);
+  const huge = await up(pngOf(2600, 2600));
+  assert.equal(huge.status, 422);
+  assert.match(huge.data.error, /too large/);
+
+  const square = await up(pngOf(512, 512));
+  assert.equal(square.status, 200, JSON.stringify(square.data));
+  assert.deepEqual([square.data.width, square.data.height, square.data.shape], [512, 512, 'square']);
+  const wide = await up(pngOf(800, 200));
+  assert.equal(wide.status, 200);
+  assert.equal(wide.data.shape, 'wide');
+  assert.match(wide.data.url, /^\/u\/\d+\/[0-9a-f]{24}\.png$/);
+
+  // The same small picture is still fine as an ordinary image (a photo on a choice, say).
+  const plain = await req('POST', '/api/admin/uploads', { data: pngOf(100, 100).toString('base64') }, { cookie: ownerCookie });
+  assert.equal(plain.status, 200);
+  assert.equal(plain.data.width, 100);
+});
+
+test('brand kit: image sizes are read from JPG, GIF and WebP headers too', () => {
+  const UP = require('../src/services/uploads');
+  const gif = Buffer.concat([Buffer.from('GIF89a', 'ascii'), Buffer.from([0x21, 0x03, 0xcb, 0x00]), Buffer.alloc(8)]);
+  assert.deepEqual(UP.dimensions(gif, 'gif'), { width: 801, height: 203 });
+  // SOI, an APP0 segment to skip, then the frame header: 203 high, 801 wide.
+  const jpg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 0x00, 0x00, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0xcb, 0x03, 0x21, 0x03, 0, 0, 0, 0, 0, 0]);
+  assert.deepEqual(UP.dimensions(jpg, 'jpg'), { width: 801, height: 203 });
+  const vp8x = Buffer.alloc(30); vp8x.write('RIFF', 0, 'ascii'); vp8x.write('WEBPVP8X', 8, 'ascii'); vp8x.writeUIntLE(800, 24, 3); vp8x.writeUIntLE(202, 27, 3);
+  assert.deepEqual(UP.dimensions(vp8x, 'webp'), { width: 801, height: 203 });
+  assert.equal(UP.dimensions(Buffer.from([0xff, 0xd8, 0xff]), 'jpg'), null, 'a cut-off file has no size');
+});
+
+test('brand kit: a font file uploads, is served as a font, and anything else is refused', async () => {
+  const woff2 = Buffer.concat([Buffer.from('wOF2', 'ascii'), Buffer.alloc(60, 7)]);
+  const up = await req('POST', '/api/admin/uploads', { data: woff2.toString('base64'), kind: 'font' }, { cookie: ownerCookie });
+  assert.equal(up.status, 200, JSON.stringify(up.data));
+  assert.match(up.data.url, /^\/u\/\d+\/[0-9a-f]{24}\.woff2$/);
+  const got = await fetch(base + up.data.url);
+  assert.equal(got.status, 200);
+  assert.equal(got.headers.get('content-type'), 'font/woff2');
+  const notFont = await req('POST', '/api/admin/uploads', { data: pngOf(200, 200).toString('base64'), kind: 'font' }, { cookie: ownerCookie });
+  assert.equal(notFont.status, 415);
+  // A font is not an image: it cannot be slipped in as a logo or a banner.
+  const asImage = await req('POST', '/api/admin/uploads', { data: woff2.toString('base64') }, { cookie: ownerCookie });
+  assert.equal(asImage.status, 415);
+});
+
+test('brand kit: saved clean, written into every page, and a page look still overrides it', async () => {
+  const BRAND = require('../src/services/brand');
+  const cookie = await signup('brandkit@example.com', 'Brand Kit Co');
+  const me = await req('GET', '/api/admin/business', null, { cookie });
+  const slug = me.data.slug;
+  assert.equal(me.data.settings.brand.font, 'Plus Jakarta Sans', 'a new company starts on the standard kit');
+
+  const opts = await req('GET', '/api/admin/brand/options', null, { cookie });
+  assert.ok(opts.data.fonts.some((f) => f.name === 'Cinzel' && f.kind === 'serif' && f.weights));
+  assert.equal(opts.data.logo.min_side, 160);
+
+  const font = await req('POST', '/api/admin/uploads', { data: Buffer.concat([Buffer.from('OTTO', 'ascii'), Buffer.alloc(40, 3)]).toString('base64'), kind: 'font' }, { cookie });
+  const logo = await req('POST', '/api/admin/uploads', { data: pngOf(800, 200).toString('base64'), kind: 'logo' }, { cookie });
+  const save = await req('PATCH', '/api/admin/business', { brand_color: '#c9a227', logo_url: logo.data.url, settings: { brand: {
+    background: '#111318', surface: '#1B1E26', text: '#f2efe8', heading_color: '#e7c766', button_text: 'red',
+    font: 'Lora', heading_font: 'Cinzel', heading_font_file: font.data.url, heading_font_file_name: 'Brand<b>Head.otf',
+    font_file: 'https://evil.test/x.woff2', font_size: 99, heading_size: 30, embed_background: 'custom', embed_color: '#2a1f3d', logo_style: 'plain',
+  } } }, { cookie });
+  assert.equal(save.status, 200, JSON.stringify(save.data));
+  const kit = (await req('GET', '/api/admin/business', null, { cookie })).data.settings.brand;
+  assert.equal(kit.surface, '#1b1e26');
+  assert.equal(kit.button_text, '', 'a colour that is not hex is dropped');
+  assert.equal(kit.font_file, '', 'a font file must be one this company uploaded');
+  assert.equal(kit.heading_font_file, font.data.url);
+  assert.equal(kit.heading_font_file_name, 'BrandbHead.otf');
+  assert.equal(kit.font_size, 22, 'sizes are kept in range');
+  assert.equal(kit.logo_style, 'plain');
+
+  // A logo address that is neither an upload nor https is refused.
+  const badLogo = await req('PATCH', '/api/admin/business', { logo_url: 'javascript:alert(1)' }, { cookie });
+  assert.equal(badLogo.status, 422);
+
+  // Every public page carries the kit before any script runs.
+  for (const path of [`/b/${slug}`, `/b/${slug}/quote`]) {
+    const html = (await req('GET', path)).data;
+    assert.match(html, /--brand:#c9a227/);
+    assert.match(html, /--bg:#111318/);
+    assert.match(html, /--ink:#f2efe8/);
+    assert.match(html, /--heading-ink:#e7c766/);
+    assert.match(html, /--btn-ink:#ffffff/);
+    assert.match(html, /--font:"Lora", Georgia/);
+    assert.match(html, /--heading-font:"Brand Heading", "Cinzel"/);
+    assert.match(html, /--fs:22px;--hs:30px/);
+    assert.ok(html.includes(`@font-face{font-family:"Brand Heading";src:url("${font.data.url}") format("opentype")`));
+    assert.match(html, /family=Lora:wght@400;500;600;700&display=swap/);
+    assert.ok(!html.includes('family=Cinzel'), 'the uploaded file replaces the named heading font');
+    assert.match(html, /body\.is-embed:not\(\.embed-clear\)\{background-color:#2a1f3d\}/);
+    assert.ok(html.includes('"logo_style":"plain"'));
+  }
+
+  // Button text suits the accent unless the kit names its own.
+  assert.match(BRAND.css({ brand_color: '#f5e6a8', settings: {} }), /--btn-ink:#1c1a22/, 'dark text on a light accent');
+  assert.match(BRAND.css({ brand_color: '#f5e6a8', settings: { brand: { button_text: '#333333' } } }), /--btn-ink:#333333/);
+
+  // Embed background choices.
+  const b = { brand_color: '#c9a227', settings: { brand: { background: '#111318', embed_background: 'page' } } };
+  assert.equal(BRAND.embedColor(b), '#111318');
+  b.settings.brand.embed_background = 'transparent';
+  assert.equal(BRAND.embedColor(b), '');
+  assert.ok(!BRAND.css(b).includes('is-embed'), 'see-through adds no embed background');
+  // Nothing in a kit can break out of the style tag it is written into.
+  const hostile = BRAND.css({ brand_color: '</style><script>', settings: { brand: { background: '#fff</style>', font: '"; } body { display:none', font_file: '/u/1/x.woff2"); }' } } });
+  assert.ok(!/<|display:none/.test(hostile));
+  assert.match(hostile, /--brand:#6d4aff/);
+
+  // A page's own look: blank and 0 mean "as the brand kit says", and are stored that way.
+  const FS = require('../src/services/form-style');
+  const fresh = FS.sanitizeStyle({});
+  assert.deepEqual([fresh.font, fresh.heading_font, fresh.font_size, fresh.heading_size, fresh.embed_background], ['', '', 0, 0, 'auto']);
+  const own = FS.sanitizeStyle({ font: 'Inter', heading_font: 'same', font_size: 18, heading_size: 0, heading_color: '#ABCDEF', embed_background: 'transparent' });
+  assert.deepEqual([own.font, own.heading_font, own.font_size, own.heading_size, own.heading_color, own.embed_background], ['Inter', 'same', 18, 0, '#abcdef', 'transparent']);
+  assert.equal(FS.sanitizeStyle({ font_size: 5 }).font_size, 12);
+  assert.equal(FS.styleFontLinks(own), '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">');
+});
+
+test('brand kit: looks saved before it are upgraded once, and draw the same until a kit is set', () => {
+  const FS = require('../src/services/form-style');
+  // The old defaults become "as the brand kit says".
+  const old = FS.upgradeStyle({ layout: 'full', font: 'Plus Jakarta Sans', heading_font: '', font_size: 15, heading_size: 26, accent: '#112233' });
+  assert.deepEqual([old.font, old.heading_font, old.font_size, old.heading_size, old.accent, old.v], ['', '', 0, 0, '#112233', 2]);
+  // A look with its own font keeps it, and its headings keep following that font.
+  const custom = FS.upgradeStyle({ layout: 'minimal', font: 'Lora', heading_font: '', font_size: 17, heading_size: 22 });
+  assert.deepEqual([custom.font, custom.heading_font, custom.font_size, custom.heading_size], ['Lora', 'same', 17, 22]);
+  // Another layout's 26 was a choice, not the default, so it stays.
+  assert.equal(FS.upgradeStyle({ layout: 'visual', font: 'Plus Jakarta Sans', heading_size: 26 }).heading_size, 26);
+  assert.equal(FS.upgradeStyle(old), null, 'an upgraded look is left alone');
+  assert.equal(FS.upgradeStyle(undefined), null);
 });

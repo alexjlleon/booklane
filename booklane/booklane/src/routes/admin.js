@@ -22,6 +22,7 @@ const SESS = require('../services/sessions');
 const FORMS = require('../services/forms');
 const FSTYLE = require('../services/form-style');
 const UP = require('../services/uploads');
+const BRAND = require('../services/brand');
 const MSG = require('../services/messaging');
 const TPL = require('../services/message-templates');
 const CRM = require('../services/crm-sync');
@@ -362,6 +363,11 @@ module.exports = function adminRoutes(app) {
 
   // ---------- Business ----------
   app.get('/api/admin/business', (req) => { requireRole('host')(req); return maskBusiness(B.byId(bid(req)), req); });
+  /** What the Brand kit screen offers: the fonts and the rules a logo has to meet. */
+  app.get('/api/admin/brand/options', (req) => {
+    requireRole('host')(req);
+    return { fonts: Object.keys(FSTYLE.FONTS).map((name) => ({ name, kind: FSTYLE.FONTS[name], weights: FSTYLE.FONT_WEIGHTS[name] })), logo: BRAND.LOGO };
+  });
   app.patch('/api/admin/business', (req) => {
     requireRole('admin')(req);
     const cur = B.byId(bid(req));
@@ -375,7 +381,14 @@ module.exports = function adminRoutes(app) {
       fields.slug = s;
     }
     if (body.timezone !== undefined) { if (!T.isValidTz(body.timezone)) throw new HttpError(422, 'Unknown timezone'); fields.timezone = body.timezone; }
-    for (const k of ['email', 'phone', 'website', 'logo_url']) if (body[k] !== undefined) fields[k] = clampStr(body[k], 300);
+    for (const k of ['email', 'phone', 'website']) if (body[k] !== undefined) fields[k] = clampStr(body[k], 300);
+    // A logo is one we hold (uploaded, so its size was checked) or an https:// address. One saved
+    // before this rule is left alone until it is changed.
+    if (body.logo_url !== undefined && String(body.logo_url).trim() !== String(cur.logo_url || '')) {
+      const logo = FSTYLE.cleanUrl(body.logo_url);
+      if (String(body.logo_url).trim() && !logo) throw new HttpError(422, 'Upload your logo, or use an https:// address', { logo_url: 'Upload a logo or use an https:// address' });
+      fields.logo_url = logo;
+    }
     if (body.brand_color !== undefined) { if (!/^#[0-9a-f]{6}$/i.test(body.brand_color)) throw new HttpError(422, 'Use a hex color like #6d4aff'); fields.brand_color = body.brand_color; }
     if (body.settings && typeof body.settings === 'object') {
       const stored = B.conform(BUSINESS_SETTINGS, db.json(db.get('SELECT settings FROM businesses WHERE id = ?', cur.id).settings, {})) || {};
@@ -387,6 +400,9 @@ module.exports = function adminRoutes(app) {
       for (const [name, cfg] of [['BoothBook', incoming.integrations?.boothbook], ['Webhook', incoming.integrations?.webhook]]) {
         if (cfg?.url) { try { const u = new URL(cfg.url); if (!['https:', 'http:'].includes(u.protocol)) throw new Error(); } catch { throw new HttpError(422, `${name} URL must be a valid https:// address`); } }
       }
+      // The brand kit is saved whole and cleaned: colours are hex, fonts are ones we offer or files
+      // this company uploaded, sizes are in range.
+      if (incoming.brand) incoming.brand = BRAND.sanitize(Object.assign({}, stored.brand, incoming.brand));
       const merged = deepMerge(stored, incoming);
       // arrays replace, not merge
       fields.settings = JSON.stringify(merged);
@@ -1227,6 +1243,7 @@ module.exports = function adminRoutes(app) {
       },
       brand_color: b.brand_color || '',
       logo_url: b.logo_url || '',
+      brand: BRAND.of(b),
     };
   });
 
@@ -1291,10 +1308,15 @@ module.exports = function adminRoutes(app) {
     return Object.assign({ warnings: built.warnings || [] }, { form: formOut(db.get('SELECT * FROM forms WHERE id = ?', lastId)) });
   });
 
-  /** An image for a form: a logo, banner, background or a photo on a choice. Returns its address. */
+  /**
+   * A file for the company's pages. An image (banner, background, photo on a choice) by default;
+   * `kind: 'logo'` also checks its size and shape, and `kind: 'font'` takes a font file instead.
+   * Returns its address.
+   */
   app.post('/api/admin/uploads', (req) => {
     requireRole('admin')(req);
-    return UP.save(bid(req), (req.body || {}).data);
+    const kind = ['logo', 'font'].includes((req.body || {}).kind) ? req.body.kind : undefined;
+    return UP.save(bid(req), (req.body || {}).data, { kind });
   });
 
   /** Copy a form, switched off, so a variation can be tried without touching the live one. */

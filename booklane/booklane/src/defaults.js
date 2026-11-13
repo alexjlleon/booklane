@@ -16,6 +16,21 @@ const BUSINESS_SETTINGS = {
     available_text: '',
     taken_text: '',
   },
+  // The brand kit: the company's colours, fonts and logo treatment, used by every public page.
+  // The accent colour and the logo itself live on the business row (brand_color, logo_url). A
+  // page's own Look can still override any of these. Blank colours mean the built-in palette.
+  brand: {
+    button_text: '', background: '', surface: '', text: '', heading_color: '',
+    font: 'Plus Jakarta Sans', heading_font: '',
+    // The company's own font files (uploaded), which win over the names above.
+    font_file: '', font_file_name: '', heading_font_file: '', heading_font_file_name: '',
+    font_size: 15, heading_size: 26,
+    // Behind an embedded page: 'transparent' (the website shows through), 'page' (the page
+    // background above) or 'custom' (embed_color).
+    embed_background: 'transparent', embed_color: '',
+    // 'tile' crops the logo into a rounded square on the accent colour; 'plain' shows it as it is.
+    logo_style: 'tile',
+  },
   leads: {
     abandoned_after_min: 30,
     notify_team_on_partial: true,

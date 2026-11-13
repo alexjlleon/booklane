@@ -142,9 +142,9 @@ module.exports = function publicRoutes(app) {
     const b = getBusiness(req.params.slug);
     const et = getEventType(b, req.params.event);
     const style = FSTYLE.bookingStyle(et.settings);
-    const fonts = FSTYLE.fontHref(style);
+    const fonts = FSTYLE.styleFontLinks(style);
     res.html(page({ title: `${et.name} · ${b.name}`, description: et.description || b.settings.tagline, business: b, embed: bool(req.query.embed),
-      head: fonts ? `<link href="${fonts}" rel="stylesheet">` : '',
+      head: fonts,
       bodyClass: `form-page booking-page layout-${style.layout}`,
       scripts: ['common.js', 'look.js', 'scheduler.js', 'booking.js'],
       data: bookingPageData(b, et) }));
@@ -177,9 +177,9 @@ module.exports = function publicRoutes(app) {
     const b = getBusiness(req.params.slug);
     const f = FORMS.bySlug(b, req.params.form);
     const style = FORMS.styleOf(f);
-    const fonts = FSTYLE.fontHref(style);
+    const fonts = FSTYLE.styleFontLinks(style);
     res.html(page({ title: `${f.name} · ${b.name}`, description: f.description || b.settings.tagline, business: b, embed: bool(req.query.embed),
-      head: fonts ? `<link href="${fonts}" rel="stylesheet">` : '',
+      head: fonts,
       bodyClass: `form-page layout-${style.layout}`,
       scripts: ['common.js', 'look.js', 'scheduler.js', 'form.js'],
       data: { business: publicBusiness(b), form: FORMS.publicForm(b, f) } }));

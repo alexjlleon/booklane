@@ -121,7 +121,9 @@
     addEventListener('load', post);
   }
 
-  BL.logo = (b) => b.logo_url ? `<div class="biz-logo"><img src="${BL.esc(b.logo_url)}" alt=""></div>` : `<div class="biz-logo">${BL.esc((b.name || '?').trim().charAt(0).toUpperCase())}</div>`;
+  // The brand kit says whether a logo sits in a coloured tile or is shown as it is.
+  BL.logoClass = (b) => (((b.settings || {}).brand || {}).logo_style === 'plain' ? 'biz-logo plain' : 'biz-logo');
+  BL.logo = (b) => b.logo_url ? `<div class="${BL.logoClass(b)}"><img src="${BL.esc(b.logo_url)}" alt=""></div>` : `<div class="biz-logo">${BL.esc((b.name || '?').trim().charAt(0).toUpperCase())}</div>`;
   BL.powered = () => BL.data.embed ? '' : `<div class="powered">Scheduling by ${BL.esc(BL.data.appName || 'Availvo')} · <a href="/privacy">Privacy</a></div>`;
 
   BL.fieldErrors = (root, details) => {
