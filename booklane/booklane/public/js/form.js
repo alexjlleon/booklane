@@ -84,9 +84,11 @@
   // ----- questions: drawn by the shared kit, so booking pages get the same choices -----
   const K = BL.Look.kit({
     S, st, root: app,
-    questions: () => cur().questions || [],
+    questions: () => (cur().type === 'availability' ? [dateQ(cur())] : (cur().questions || [])),
     onAnswer: (qid, value, { kind, el, changed }) => {
       clearErr(el);
+      // A date picked on the date check itself: save it and show the answer straight away.
+      if (cur().type === 'availability') { capture({ answers: { [qid]: value } }, true); return render(); }
       if (kind === 'pick') { capture({ answers: { [qid]: value } }, true); refreshNav(); return maybeAdvance(); }
       if (kind === 'step') return capture({ answers: { [qid]: value } }, false);
       if (changed) capture({ answers: { [qid]: value } }, true);
@@ -115,20 +117,26 @@
     </form>`;
   }
 
+  // A date check with no date field before it asks for the date itself, so the step is never a dead end.
+  const dateId = (step) => step.date_question_id || 'event_date';
+  const dateQ = (step) => ({ id: dateId(step), label: 'What is your date?', type: 'date', required: true, date_display: 'calendar' });
+  const askedEarlier = (step) => steps.slice(0, steps.indexOf(step)).some((s) => (s.questions || []).some((q) => q.id === dateId(step)));
+
   function renderAvailability(step) {
     const a = st.avail;
-    const when = st.answers[step.date_question_id];
+    const when = st.answers[dateId(step)];
+    const again = askedEarlier(step) ? '' : '<p style="margin-top:12px"><button type="button" class="btn btn-link btn-sm" data-redate>Check another date</button></p>';
     const pretty = when ? BL.fmtDate(when + 'T12:00:00Z', 'UTC', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }) : '';
-    if (!when) return '<div class="done"><p class="muted">Tell us your date and we\'ll check it.</p></div>';
+    if (!when) return `<form class="step-form q-grid" novalidate>${renderQuestion(dateQ(step))}</form>`;
     if (!a || a.loading) return `<div class="done"><div class="spinner" style="margin:10px auto"></div><p class="muted">Checking ${esc(pretty)}…</p></div>`;
     if (a.available) {
       return `<div class="done"><div class="done-icon">${icons.check}</div>
         <h2 style="margin:10px 0 4px">We're available!</h2>
-        <p class="muted">${esc(step.available_text || `${pretty} is open.`)}</p></div>`;
+        <p class="muted">${esc(step.available_text || `${pretty} is open.`)}</p>${again}</div>`;
     }
     return `<div class="done"><div class="done-icon" style="background:#fdf1e7;color:#b4690e">${icons.check}</div>
       <h2 style="margin:10px 0 4px">That date is in demand</h2>
-      <p class="muted">${esc(step.unavailable_text || `We may already be booked on ${pretty}, but teams free up. Let's talk.`)}</p></div>`;
+      <p class="muted">${esc(step.unavailable_text || `We may already be booked on ${pretty}, but teams free up. Let's talk.`)}</p>${again}</div>`;
   }
 
   function stepBody(step) {
@@ -201,7 +209,7 @@
 
   // The same endpoint the booking pages use, so one answer about a date, not two.
   async function checkDate(step) {
-    const when = st.answers[step.date_question_id];
+    const when = st.answers[dateId(step)];
     if (!when || (st.avail && st.avail.date === when)) return;
     st.avail = { loading: true, date: when };
     try {
@@ -254,6 +262,7 @@
       if (f.phone === 'required' && st.contact.phone.replace(/\D/g, '').length < 7) errs.phone = 'Enter a valid phone number';
       return { errs, msg: 'Please fix the highlighted fields.' };
     }
+    if (step.type === 'availability' && !st.answers[dateId(step)]) { errs[dateId(step)] = 'Pick a date'; return { errs, msg: 'Pick your date to continue.' }; }
     if (step.type === 'schedule' && !st.slot && !PREVIEW) return { errs, msg: 'Pick a time to continue.' };
     return { errs, msg: null };
   }
@@ -330,6 +339,7 @@
   app.addEventListener('click', (e) => {
     if (e.target.closest('[data-next]')) { e.preventDefault(); return go(1); }
     if (e.target.closest('[data-back]')) { e.preventDefault(); return go(-1); }
+    if (e.target.closest('[data-redate]')) { const id = dateId(cur()); delete st.answers[id]; delete st.calMonth[id]; st.avail = null; return render(); }
     if (e.target.closest('[data-restart]')) { st.i = 0; st.answers = {}; st.typed = {}; return render(); }
     K.click(e);
   });

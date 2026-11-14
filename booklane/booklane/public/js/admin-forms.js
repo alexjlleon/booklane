@@ -492,13 +492,16 @@
       }
       if (s.type === 'message') return A.field('What it says', `<textarea class="textarea" rows="3" data-s-body="${i}">${esc(s.body || '')}</textarea>`);
       if (s.type === 'availability') {
-        return `${A.field('Which field holds the date', `<input class="input" data-s-date="${i}" value="${esc(s.date_question_id || 'event_date')}">`, 'The answer id of a date field on an earlier step. Usually event_date.')}
+        const did = s.date_question_id || 'event_date';
+        const asked = steps.slice(0, i).some((p) => (p.questions || []).some((q) => q.id === did && q.type === 'date'));
+        return `${asked ? '' : `<p class="muted small" style="margin:0 0 10px">No earlier step has a date field called ${esc(did)}, so this step shows a calendar and asks for the date itself.</p>`}${A.field('Which field holds the date', `<input class="input" data-s-date="${i}" value="${esc(s.date_question_id || 'event_date')}">`, 'The answer id of a date field on an earlier step. Usually event_date.')}
           ${A.field('If the date is free', `<input class="input" data-s-avail="${i}" value="${esc(s.available_text || '')}" placeholder="Good news, that date is open.">`)}
           ${A.field('If it is taken', `<input class="input" data-s-unavail="${i}" value="${esc(s.unavailable_text || '')}" placeholder="We may be booked, but let's talk.">`)}`;
       }
       if (s.type === 'schedule') {
         return A.field('Which calendar', `<select class="select" data-s-et="${i}">${Object.entries(etOptions).map(([v, l]) => `<option value="${v}" ${String(s.event_type_id || '') === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`,
-          'The booking page that owns the hours and the people. Change hours there, not here.');
+          'The booking page that owns the hours and the people. Change hours there, not here.')
+          + (s.event_type_id ? '' : '<p class="field-error" style="margin:-6px 0 10px">No booking page picked yet. Until you choose one, this step shows no times and the form cannot be finished.</p>');
       }
       return '';
     };
